@@ -1,20 +1,17 @@
 # Ricerca TKT
 
-Motore di ricerca avanzato per i ticket dell'**Area Riservata Zucchetti**.
+Motore di ricerca avanzato per i ticket Zucchetti.
 
-I ticket sono più di un milione, quindi non vengono scaricati: ogni ricerca
-interroga in tempo reale lo stesso indice Solr usato dalla pagina "Ricerca
-rapida" di Zucchetti, **con una sola richiesta e con il limite di risultati di
-Zucchetti** (210, i più rilevanti). Sopra c'è una costruzione delle query più
-potente, con filtri, faccette, ordinamenti e raggruppamenti sui risultati,
-esportazione, preferiti con note e ricerche salvate.
+I ticket sono più di un milione, quindi non vengono scaricati: ogni ricerca la fa il
+**portale ticket Zucchetti (HDAPortal)** sui suoi dati aggiornati, con un numero massimo di
+risultati per ricerca. Sopra c'è un'interfaccia più potente: filtri, faccette, ordinamenti e
+raggruppamenti sui risultati, esportazione, preferiti con note e ricerche salvate.
 
-Esistono due versioni con le stesse funzioni di ricerca:
-
-| | **Segnalibro** (consigliata per provare) | **Applicazione web** |
+| | **Segnalibro** (consigliata) | **Applicazione web** |
 |---|---|---|
+| Sito | nuovo portale ticket (HDAPortal) | vecchia Area Riservata (indice Solr "Ricerca rapida"), **non aggiornata** |
 | Installazione | nessuna: un segnalibro nel browser | server con Python 3.11+ o Docker |
-| Accesso | la sessione già aperta nell'Area Riservata | credenziali Zucchetti o cookie di sessione |
+| Accesso | la sessione già aperta nel portale | credenziali Zucchetti o cookie di sessione |
 | Dati personali | nel browser (esportabili) | database SQLite sul server |
 | Cartella | [`bookmarklet/`](bookmarklet/) | [`app/`](app/), [`static/`](static/) |
 
@@ -23,55 +20,50 @@ Esistono due versioni con le stesse funzioni di ricerca:
 1. Scarica [`bookmarklet/installa.html`](bookmarklet/installa.html) (su GitHub:
    apri il file → pulsante *Download raw file*) e aprilo con Chrome o Edge.
 2. Trascina il pulsante **Ricerca TKT** nella barra dei preferiti
-   (<kbd>Ctrl</kbd>+<kbd>Maiusc</kbd>+<kbd>B</kbd> per mostrarla).
-3. Accedi all'Area Riservata Zucchetti, apri la pagina **Ricerca rapida** e
-   clicca il segnalibro: il motore di ricerca si apre sopra la pagina.
-   <kbd>Esc</kbd> lo chiude, un altro clic sul segnalibro lo riapre.
+   (<kbd>Ctrl</kbd>+<kbd>Maiusc</kbd>+<kbd>B</kbd> per mostrarla). Se avevi la versione 1,
+   sostituisci il vecchio segnalibro.
+3. Accedi al portale ticket, apri almeno una volta la scheda **All tickets** e clicca il
+   segnalibro: il motore di ricerca si apre sopra la pagina. <kbd>Esc</kbd> lo chiude, un altro
+   clic sul segnalibro lo riapre.
 
 In alternativa si può incollare il contenuto di
 [`bookmarklet/dist/ricerca-tkt.min.js`](bookmarklet/dist/ricerca-tkt.min.js)
-nella console del browser (F12 → Console) sulla pagina Zucchetti.
+nella console del browser (F12 → Console) sulla pagina del portale.
 
 ### Come funziona
 
-Il segnalibro viene eseguito dentro la pagina Zucchetti, quindi usa la sessione
-dell'utente e non deve gestire password o cookie. Ogni ricerca è una richiesta
-alla routine `servlet/spsl_fquery_mc` nello stesso formato della scheda Filtri
-della pagina, osservato sul sito reale:
+Il portale è un'applicazione ExtJS. Il segnalibro viene eseguito dentro la pagina, quindi usa la
+sessione dell'utente (e il token anti-falsificazione del portale) senza gestire password o cookie:
 
-```
-pKeyword = IdCenSer:PAOW AND ((IdMeseM:9 AND IdAnnoM:2026) OR ...) AND (Testi:(…) OR Oggetto:(…))
-pArea = TICKOPEXXX   pCore = (vuoto)   pLangs = ITA   cs_SITE = (vuoto)   m_cID = …
-```
+- trova l'elenco **All tickets** (`<id>_UC_ListCt`, classe `entity-incident`), la sua griglia
+  (`<id>_UC_grd`) e il suo archivio dati ExtJS;
+- a ogni ricerca imposta i filtri dell'elenco (`<id>_UC_filter_default_FullText`, `Subject`,
+  `DateFromFilter`/`DateToFilter`, `LastUpdateDate…`, `StatusFilter`, `PriorityFilter`,
+  `CatalogItemTxt`, `ClassCliTxt`) e chiede al massimo 200 righe (si cambia in Impostazioni);
+- aspetta che il portale ricarichi l'elenco da solo; se non lo fa preme Invio nel campo
+  *Search* e, come ultima possibilità, ricarica l'archivio dell'elenco;
+- legge i ticket dall'archivio, usando le colonne della griglia (ID, Date, Site, Subject con il
+  riepilogo *Issue/Request* e *Resolution*, Status, Priority, Service, Classification,
+  Assigned to, Owner Group, Last update…), anche per le righe che la griglia non ha disegnato;
+- controlla che la richiesta inviata dal portale contenga il testo cercato e avvisa se no.
 
-- testo cercato nei campi `Testi` e `Oggetto`, centro servizi in `IdCenSer`,
-  periodo per mese e anno (`IdMeseM`/`IdAnnoM`, data di ultimo aggiornamento);
-- la richiesta parte, in ordine di preferenza, ripetendo quella osservata dalla
-  pagina, dal componente dei risultati (`spsl_wsolrresultsgrid`) o direttamente
-  con il codice `m_cID` del portlet; se Zucchetti risponde con un errore se ne fa
-  una sola altra con i parametri dell'ultima ricerca della pagina;
-- le funzioni native del browser vengono prese da un riquadro nascosto, perché
-  la pagina ne ridefinisce alcune (`controls.js` sostituisce `Set`).
+Lo stato predefinito è **tutti gli stati** (la pagina del portale di solito mostra solo quelli
+aperti). Gli altri filtri impostati nella pagina (Servizio, Sede, Contatto, Assegnato a…) restano
+attivi e sono mostrati nel pannello. Dopo una ricerca l'elenco del portale mostra la stessa
+ricerca: **Ripristina il portale** rimette i filtri e le righe per pagina di prima. **Apri** su un
+risultato apre il ticket con il pulsante *Open* della pagina; se il ticket non è più nell'elenco
+(ad esempio un preferito) apre *Find by ID…* già compilato.
 
-**Filtri imparati dalla pagina.** I nomi dei campi Solr di Stato, Priorità,
-Tipologia, Gruppo, Operatore, Prodotto, Numero ticket… non sono documentati. Il
-segnalibro li impara da solo: quando la pagina fa una ricerca (anche prima di
-aprire il segnalibro), confronta i valori scelti nel modulo Filtri
-(`w_StatoDett = CLOSE`, …) con la query inviata e memorizza il campo. Dal modulo
-Filtri prende anche gli elenchi dei valori (stati, priorità, gruppi, centri
-servizi), che diventano menu a tendina. Finché un filtro non è stato imparato
-compare come "da imparare"; si può anche impostare a mano in Impostazioni.
+Il pannello è isolato in uno *shadow DOM*: non modifica il portale e non ne eredita gli stili; la
+pagina sotto resta inattiva finché il pannello è aperto, e il controllo di inattività del portale
+viene informato che l'utente sta lavorando. I testi dei ticket sono resi come testo, quindi
+l'HTML della griglia non viene mai iniettato nel pannello.
 
-Il pannello è isolato in uno *shadow DOM*: non modifica la pagina Zucchetti e non
-ne eredita gli stili; la pagina sotto resta inattiva finché il pannello è aperto.
-I risultati sono resi come testo, quindi l'HTML restituito dal server non viene
-mai iniettato.
-
-In **Impostazioni** si trovano lo stato della connessione con i filtri attivi e
-da imparare, la mappatura dei campi, **Copia/Scarica dati tecnici** (richieste
-osservate senza cookie, un esempio di risposta, il modulo Filtri e i suoi script:
-contengono alcuni risultati di esempio, quindi controllali prima di condividerli)
-ed esportazione/importazione dei dati personali.
+In **Impostazioni** si trovano lo stato del collegamento (elenco usato, colonne riconosciute,
+filtri gestiti, come è partita l'ultima ricerca), **Leggi l'elenco attuale della pagina**, il
+massimo di ticket per ricerca, **Copia/Scarica dati tecnici** ed esportazione/importazione dei
+dati personali. I dati tecnici descrivono l'elenco del portale (archivio, colonne, filtri,
+richieste osservate) senza cookie né token; nomi e testi sono sostituiti da «N car.».
 
 ### Sviluppo del segnalibro
 
@@ -82,12 +74,19 @@ Dopo una modifica rigenera `dist/` e `installa.html` (serve Node.js ed esbuild):
 cd bookmarklet && npm i --no-save esbuild@0.24.0 && node build.mjs
 ```
 
-Prova completa con un finto sito che riproduce la pagina reale (ricerca veloce,
-portlet dei risultati caricato dopo la prima ricerca, modulo Filtri, routine con
-area obbligatoria, funzioni native ridefinite):
+La prova completa usa un finto portale con ExtJS vero (versione GPL, non inclusa nel
+repository) e dati inventati: stessa struttura dell'elenco All tickets, token anti-falsificazione
+obbligatorio, filtri applicati in tre modi diversi (`?apply=auto|enter|none`), pulsanti *Open* e
+*Find by ID…*. Scarica ExtJS una volta:
 
 ```bash
-python -m uvicorn bookmarklet.test.fake_zucchetti:app --port 8770
+mkdir -p bookmarklet/test/vendor && cd bookmarklet/test/vendor && npm pack extjs-gpl@6.2.0 && tar -xzf extjs-gpl-6.2.0.tgz package/build/ext-all.js package/build/classic/theme-triton/resources && rm extjs-gpl-6.2.0.tgz
+```
+
+Poi avvia il finto portale (<http://127.0.0.1:8770/HDAPortal/>) e la prova:
+
+```bash
+python -m uvicorn bookmarklet.test.fake_hdaportal:app --port 8770
 ```
 
 ```bash
@@ -96,31 +95,29 @@ node bookmarklet/test/e2e.js
 
 ## Funzionalità di ricerca
 
-- Modalità *tutte le parole*, *almeno una*, *frase esatta* (con distanza massima
-  tra le parole) e **sintassi Solr libera** (`AND OR NOT ( ) "frase"~N parola* parola~ campo:valore`).
-- Parole da escludere, frase obbligatoria, corrispondenza parziale (prefisso),
-  tolleranza agli errori di battitura, "Cerca in" oggetto/testo.
-- Periodo con preimpostazioni, numeri di ticket (elenchi e intervalli), prodotti
-  da includere o escludere. Il periodo viene filtrato cercando la data scritta nel
-  titolo dei risultati (`"04-2026"`, `"21-04-2026"`) e i risultati vengono poi
-  verificati in locale.
-- I filtri della schermata originale (Stato, Stato base, Priorità, Tipologia,
-  Gruppo, Operatore, Azienda, Persona, Operatore/Gruppo partecipante,
-  Classificazione, Argomento, Centro servizi), con più valori, esclusioni
-  (`-valore`) e caratteri jolly (`*`), attivi dopo averli mappati sui campi Solr.
-- Anteprima della query Solr generata, modificabile a mano; `#8900042` cerca
-  direttamente quel ticket.
-- Quando Zucchetti restituisce il massimo dei risultati compare un avviso che
-  suggerisce di restringere la ricerca.
+- Testo cercato dal portale (campo *Search*), "l'oggetto contiene", classificazione e
+  classificazione cliente (testo).
+- Data di apertura con preimpostazioni (ultimi 30 giorni, 3/6/12 mesi, anno corrente, anno
+  scorso, 2 o 5 anni) e data di ultimo aggiornamento.
+- Stato: tutti, aperti, chiusi e risolti, scelti a mano o come nella pagina; priorità.
+- Elenco del portale in cui cercare (All tickets, My tickets…).
+- Sui risultati ricevuti: parole da escludere e verifica che compaiano tutte le parole.
+- Quando il portale ha più ticket del massimo compare un avviso con il totale e un pulsante per
+  caricare i successivi.
 
-**Sui risultati**: filtro istantaneo (parole, `-esclusioni`, `"frasi"`),
-faccette per prodotto, anno, mese ed etichette, ordinamento per rilevanza, data,
-numero o oggetto, raggruppamento per prodotto, mese o anno, selezione multipla,
-esportazione CSV (Excel) e JSON, copia dei numeri, apertura del ticket su Zucchetti.
+**Sui risultati**: filtro istantaneo (parole, `-esclusioni`, `"frasi"`), faccette per stato,
+priorità, servizio, gruppo, assegnatario, sede, anno, mese ed etichette, ordinamento per data di
+apertura o di aggiornamento, ID, oggetto o stato, raggruppamento, selezione multipla,
+esportazione CSV (Excel) e JSON, copia degli ID, tutte le colonne della griglia per ogni ticket,
+apertura del ticket nel portale.
 
 **Personale**: preferiti con note ed etichette, ricerche salvate, cronologia.
 
 ## Applicazione web (server)
+
+> Questa versione interroga l'indice Solr della **vecchia** Area Riservata ("Ricerca rapida"),
+> che non contiene i ticket più recenti; non è ancora stata adattata al nuovo portale. Per il
+> portale ticket usa il segnalibro.
 
 Utile per installarla una volta su un server interno e usarla da più postazioni.
 Requisiti: Python 3.11 o successivo.
@@ -210,7 +207,7 @@ bookmarklet/
   build.mjs             genera dist/ e installa.html
   installa.html         pagina con il pulsante da trascinare nei preferiti
   dist/                 segnalibro e codice per la console, già generati
-  test/                 finto sito Zucchetti e prova completa nel browser
+  test/                 finto portale ticket (ExtJS) e prova completa nel browser
 app/
   main.py               API FastAPI, sessioni, risultati in streaming (NDJSON)
   query.py              costruzione della query Solr e filtri locali
