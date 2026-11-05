@@ -8,15 +8,6 @@ from typing import Literal, Optional
 from pydantic import BaseModel, Field, field_validator
 
 
-class ExtendedSpec(BaseModel):
-    """Opzioni della ricerca estesa (oltre il limite di risultati di Zucchetti)."""
-
-    enabled: bool = False
-    split: Literal["auto", "year", "month", "day", "none"] = "auto"
-    deep_paging: bool = True
-    max_requests: int = Field(40, ge=1, le=1000)
-
-
 class SearchSpec(BaseModel):
     """Criteri di ricerca inviati dall'interfaccia."""
 
@@ -37,7 +28,6 @@ class SearchSpec(BaseModel):
     core: Optional[str] = Field(None, max_length=100)
     area: Optional[str] = Field(None, max_length=200)
     langs: Optional[str] = Field(None, max_length=100)
-    extended: ExtendedSpec = Field(default_factory=ExtendedSpec)
 
     @field_validator("products_in", "products_out")
     @classmethod
@@ -76,7 +66,6 @@ class Ticket:
     url: Optional[str] = None
     core: str = ""
     rank: int = 0
-    window: str = ""
     extra: dict = field(default_factory=dict)
 
     def to_dict(self) -> dict:

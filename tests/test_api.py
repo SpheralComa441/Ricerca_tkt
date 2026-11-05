@@ -46,11 +46,13 @@ def test_security_headers(client):
 
 def test_search_stream_and_history(client):
     login(client)
-    r = client.post("/api/search", json={"text": "detassazione", "extended": {"enabled": True}}, headers=H)
+    r = client.post("/api/search", json={"text": "detassazione"}, headers=H)
     evs = events(r)
     assert evs[0]["type"] == "start" and evs[-1]["type"] == "done"
     found = sum(len(e["tickets"]) for e in evs if e["type"] == "batch")
-    assert found == evs[-1]["stats"]["found"] > 210
+    stats = evs[-1]["stats"]
+    assert found == stats["found"] == 210
+    assert stats["requests"] == 1 and stats["capped"] is True and stats["cap"] == 210
     hist = client.get("/api/history").json()["items"]
     assert hist[0]["summary"] == "detassazione" and hist[0]["results"] == found
 
@@ -66,6 +68,13 @@ def test_saved_and_favorites(client):
     login(client)
     r = client.post("/api/saved", json={"name": "Prova", "spec": {"text": "tfr"}}, headers=H)
     sid = r.json()["id"]
+    # ricerche salvate prima della rimozione della ricerca estesa restano valide
+    old_spec = {"text": "tfr", "extended": {"enabled": True, "split": "auto", "max_requests": 40}}
+    r2 = client.post("/api/saved", json={"name": "Vecchia", "spec": old_spec}, headers=H)
+    assert r2.status_code == 200, r2.text
+    r3 = client.post("/api/search", json=old_spec, headers=H)
+    assert r3.status_code == 200 and events(r3)[-1]["stats"]["requests"] == 1
+    client.delete(f"/api/saved/{r2.json()['id']}", headers=H)
     assert client.get("/api/saved").json()["items"][0]["name"] == "Prova"
     assert client.delete(f"/api/saved/{sid}", headers=H).json()["ok"]
 

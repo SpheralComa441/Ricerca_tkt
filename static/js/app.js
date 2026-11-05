@@ -265,7 +265,6 @@
   // ------------------------------------------------------------------ profilo
   function applyProfile() {
     const p = state.profile;
-    $("#cap-label").textContent = `(oltre i ${p.cap} risultati)`;
     $$(".cap-n").forEach((el) => (el.textContent = p.cap));
     const grid = clear($("#riepilogo"));
     for (const f of p.fields.filter((x) => x.group === "riepilogo")) {
@@ -286,13 +285,6 @@
     $("#core").value = p.default_core || "";
     $("#area").value = p.default_area || "";
     $("#langs").value = p.default_langs || "";
-    $("#ext-max").max = p.max_requests_hard_limit;
-    $("#ext-max").value = p.default_max_requests;
-    $("#ext-help").textContent = p.date_strategy === "phrase"
-      ? `Il periodo viene suddiviso cercando la data mostrata nel titolo del ticket (es. "04-2026") e i risultati vengono verificati localmente. Ogni richiesta restituisce al massimo ${p.cap} ticket.`
-      : p.date_strategy === "field"
-        ? `Il periodo viene suddiviso con il campo data dell'indice. Ogni richiesta restituisce al massimo ${p.cap} ticket.`
-        : "Nessuna strategia di data configurata: viene usata solo la paginazione per esclusione.";
     chipsIn.setOptions(p.products || []);
     chipsOut.setOptions(p.products || []);
   }
@@ -374,14 +366,6 @@
     });
     $("#search-form").addEventListener("change", onChange);
     $("#date-preset").addEventListener("change", () => { applyPreset($("#date-preset").value); onChange(); });
-    $("#search-form").addEventListener("keydown", (e) => {
-      if (e.key === "Enter" && (e.ctrlKey || e.metaKey)) {
-        e.preventDefault();
-        $("#ext-enabled").checked = true;
-        hideSuggest();
-        runSearch();
-      }
-    });
 
     $("#btn-copy-query").addEventListener("click", () => state.query && copyText($("#qpreview").textContent, "Query copiata"));
     $("#btn-edit-query").addEventListener("click", editAsSolr);
@@ -509,12 +493,6 @@
       core: $("#core").value.trim(),
       area: $("#area").value.trim(),
       langs: $("#langs").value.trim(),
-      extended: {
-        enabled: $("#ext-enabled").checked,
-        split: $("#ext-split").value,
-        deep_paging: $("#ext-paging").checked,
-        max_requests: Math.max(1, parseInt($("#ext-max").value, 10) || 40),
-      },
     };
   }
 
@@ -538,11 +516,6 @@
     $("#core").value = s.core ?? p.default_core ?? "";
     $("#area").value = s.area ?? p.default_area ?? "";
     $("#langs").value = s.langs ?? p.default_langs ?? "";
-    const ext = s.extended || {};
-    $("#ext-enabled").checked = !!ext.enabled;
-    $("#ext-split").value = ext.split || "auto";
-    $("#ext-paging").checked = ext.deep_paging !== false;
-    $("#ext-max").value = ext.max_requests || p.default_max_requests || 40;
     updateAdvCount();
   }
 
@@ -582,7 +555,7 @@
     if (!state.query) return;
     const q = state.query;
     const keep = buildSpec();
-    applySpec({ text: q, mode: "solr", core: keep.core, area: keep.area, langs: keep.langs, extended: keep.extended });
+    applySpec({ text: q, mode: "solr", core: keep.core, area: keep.area, langs: keep.langs });
     updatePreview();
     toast("Criteri convertiti in una query Solr modificabile");
     $("#q").focus();
@@ -703,7 +676,7 @@
         while ((i = buf.indexOf("\n")) >= 0) {
           const line = buf.slice(0, i);
           buf = buf.slice(i + 1);
-          if (line.trim()) handleEvent(JSON.parse(line), spec);
+          if (line.trim()) handleEvent(JSON.parse(line));
         }
       }
     } catch (e) {
@@ -732,11 +705,10 @@
     setTimeout(() => { renderPending = false; render(); }, 200);
   }
 
-  function handleEvent(ev, spec) {
+  function handleEvent(ev) {
     switch (ev.type) {
       case "start":
         state.query = ev.query;
-        state.budget = ev.budget;
         for (const w of ev.warnings || []) pushAlert("warn", w);
         break;
       case "batch":
@@ -747,15 +719,6 @@
         }
         scheduleRender();
         break;
-      case "progress": {
-        const bar = $("#progress-bar");
-        bar.parentElement.classList.remove("indet");
-        const total = Math.max(ev.requests + ev.pending, 1);
-        bar.style.width = `${Math.min(100, (ev.requests / Math.min(ev.budget, total)) * 100)}%`;
-        $("#progress-text").textContent =
-          `Richieste ${fmtN(ev.requests)} (max ${fmtN(ev.budget)}) · in coda ${fmtN(ev.pending)} · ${fmtN(ev.found)} ticket · ultima: ${ev.label}`;
-        break;
-      }
       case "warning":
         pushAlert("warn", ev.message);
         break;
@@ -765,7 +728,7 @@
         break;
       case "done":
         state.stats = ev.stats;
-        summarizeAlerts(ev.stats, spec);
+        summarizeAlerts(ev.stats);
         break;
       default:
         break;
@@ -778,27 +741,10 @@
     renderAlerts();
   }
 
-  function summarizeAlerts(st, spec) {
-    const cap = state.profile.cap;
-    if (!st.extended && st.base_capped) {
-      pushAlert("warn", `Zucchetti ha restituito il massimo di ${cap} risultati: probabilmente ce ne sono altri.`, {
-        label: "Attiva la ricerca estesa", run: () => { $("#ext-enabled").checked = true; runSearch(); },
-      });
-    } else if (st.extended) {
-      if (st.unexplored > 0) {
-        pushAlert("warn", `Raggiunto il massimo di ${st.budget} richieste: ${fmtN(st.unexplored)} periodi non ancora esplorati.`, {
-          label: "Continua con più richieste",
-          run: () => {
-            const hard = state.profile.max_requests_hard_limit;
-            $("#ext-max").value = Math.min(hard, (parseInt($("#ext-max").value, 10) || 40) * 2);
-            runSearch();
-          },
-        });
-      }
-      if (st.capped_count > 0) {
-        const list = st.capped.slice(0, 6).join(", ") + (st.capped_count > 6 ? "…" : "");
-        pushAlert("warn", `${fmtN(st.capped_count)} periodi hanno ancora raggiunto il limite di ${cap} risultati (${list}). Restringi la ricerca o attiva la paginazione per esclusione.`);
-      }
+  function summarizeAlerts(st) {
+    const cap = st.cap || state.profile.cap;
+    if (st.capped) {
+      pushAlert("warn", `Zucchetti mostra al massimo ${cap} risultati (i più rilevanti): restringi la ricerca con un periodo, un prodotto o parole più specifiche.`);
     }
     if (st.filtered_out > 0) {
       pushAlert("info", `${fmtN(st.filtered_out)} risultati restituiti da Zucchetti sono stati scartati perché non rispettano i filtri (periodo, numeri, prodotti).`);
@@ -932,10 +878,9 @@
     if (nVisible !== total) parts.push(" · ", h("b", null, fmtN(nVisible)), " dopo i filtri");
     if (st) {
       parts.push(h("span", { class: "muted" },
-        ` · ${fmtN(st.requests)} richiest${st.requests === 1 ? "a" : "e"}`,
-        st.cache_hits ? ` (+${fmtN(st.cache_hits)} dalla cache)` : "",
+        st.cache_hits ? " · dalla cache" : "",
         ` · ${(st.elapsed_ms / 1000).toLocaleString("it-IT", { maximumFractionDigits: 1 })} s`,
-        st.extended && st.complete ? " · elenco completo" : ""));
+        st.capped ? ` · limite di ${fmtN(st.cap)} raggiunto` : ""));
     }
     if (state.selected.size) {
       parts.push(" · ", h("b", null, fmtN(state.selected.size)), " selezionati ",
@@ -962,7 +907,6 @@
       t.product ? h("span", { class: "badge", text: t.product }) : null,
       t.date ? h("time", { datetime: t.date, text: fmtDate(t.date) }) : null,
       h("span", { class: "spacer" }),
-      t.window && t.window !== "Ricerca principale" && !opts.noSelect ? h("span", { class: "win", title: "Periodo della ricerca estesa che ha trovato il ticket", text: t.window }) : null,
       h("button", { type: "button", class: "icon-btn" + (fav ? " on" : ""), title: fav ? "Rimuovi dai preferiti" : "Aggiungi ai preferiti",
         "aria-pressed": String(!!fav), onclick: () => toggleFavorite(t) }, fav ? "★" : "☆"),
       h("button", { type: "button", class: "icon-btn", title: "Nota ed etichette", "aria-label": "Nota ed etichette",
@@ -1220,7 +1164,6 @@
     if (s.products_out && s.products_out.length) parts.push(`esclusi: ${s.products_out.join(", ")}`);
     const nf = Object.keys(s.fields || {}).length;
     if (nf) parts.push(`${nf} filtr${nf === 1 ? "o" : "i"} di riepilogo`);
-    if (s.extended && s.extended.enabled) parts.push("ricerca estesa");
     return parts.join(" · ") || "(nessun criterio)";
   }
   function runSpec(spec) {

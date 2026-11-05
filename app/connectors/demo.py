@@ -80,13 +80,12 @@ class DemoConnector(Connector):
             if key in self._profile.get("fields", {}):
                 self._profile["fields"][key]["solr"] = solr
         self._profile.setdefault("strategies", {}).update(
-            {"date": "field", "number": "field", "product": "field"}
+            {"date": "field", "number": "field", "product": "field", "earliest_year": 2016}
         )
         self._profile.setdefault("search", {})["result_cap"] = DEMO_CAP
         self._profile["search"]["default_core"] = "TICKET"
         self._profile.setdefault("parse", {})["link_base"] = "/demo/"
         self._profile["products"] = [p for p, _ in demo_engine.PRODUCTS]
-        self._profile.setdefault("extended", {})["earliest_year"] = 2016
         self.size = size
         self.latency_ms = latency_ms
 

@@ -64,13 +64,7 @@
     "day_phrase": "{dd}-{mm}-{yyyy}",
     "number": "term",
     "product": "term",
-    "max_exclusions": 800
-  },
-
-  "extended": {
-    "earliest_year": 2010,
-    "max_requests_hard_limit": 200,
-    "default_max_requests": 40
+    "earliest_year": 2010
   },
 
   "fields": {

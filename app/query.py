@@ -121,7 +121,6 @@ class Profile:
         self.data = data
         self.fields: dict = {k: v for k, v in data.get("fields", {}).items() if not k.startswith("_")}
         self.strategies: dict = data.get("strategies", {})
-        self.extended: dict = data.get("extended", {})
         self.cap: int = int(data.get("search", {}).get("result_cap", 210))
 
     def solr(self, key: str) -> Optional[str]:
@@ -131,6 +130,10 @@ class Profile:
 
     def field_format(self, key: str) -> str:
         return (self.fields.get(key) or {}).get("format", "solr")
+
+    @property
+    def earliest_year(self) -> int:
+        return int(self.strategies.get("earliest_year", 2010))
 
     @property
     def date_strategy(self) -> str:
@@ -191,9 +194,7 @@ class Profile:
             "default_core": search.get("default_core", ""),
             "default_area": search.get("default_area", ""),
             "default_langs": search.get("default_langs", ""),
-            "earliest_year": int(self.extended.get("earliest_year", 2010)),
-            "max_requests_hard_limit": int(self.extended.get("max_requests_hard_limit", 200)),
-            "default_max_requests": int(self.extended.get("default_max_requests", 40)),
+            "earliest_year": self.earliest_year,
             "products": self.data.get("products", []),
         }
 
@@ -245,18 +246,9 @@ def date_clause(profile: Profile, start: Optional[date], end: Optional[date]) ->
         hi = profile.format_date_value(end, True) if end else "*"
         return f"{fname}:[{lo} TO {hi}]"
     if profile.date_strategy == "phrase":
-        earliest = date(int(profile.extended.get("earliest_year", 2010)), 1, 1)
+        earliest = date(profile.earliest_year, 1, 1)
         return date_phrase_clause(profile, start or earliest, end or date.today())
     return None
-
-
-def number_exclusion_clause(profile: Profile, numbers: list[int]) -> Optional[str]:
-    if not numbers:
-        return None
-    items = [str(n) for n in numbers]
-    if profile.number_strategy == "field":
-        return f"NOT {profile.solr('number')}:{_or_group(items)}"
-    return f"NOT {_or_group(items)}"
 
 
 # ---------------------------------------------------------------------------

@@ -82,10 +82,6 @@
             <button type="button" data-mode="phrase" aria-checked="false" role="radio" title="Le parole esattamente in quest'ordine">Frase esatta</button>
             <button type="button" data-mode="solr" aria-checked="false" role="radio" title="Sintassi Lucene/Solr: AND OR NOT ( ) &quot;frase&quot;~N parola* parola~ campo:valore">Sintassi Solr</button>
           </div>
-          <label class="switch" title="Suddivide la ricerca per periodo e unisce i risultati per superare il limite di Zucchetti">
-            <input type="checkbox" id="ext-enabled"><span class="track"></span>
-            Ricerca estesa <span class="muted" id="cap-label"></span>
-          </label>
         </div>
 
         <div class="quick">
@@ -141,20 +137,6 @@
             <fieldset>
               <legend>Prodotti da escludere</legend>
               <div class="chips-input" id="products-out" data-placeholder="es. HRPORTAL"></div>
-              <legend class="sub">Ricerca estesa</legend>
-              <label class="fld">Suddivisione del periodo
-                <select id="ext-split">
-                  <option value="auto">Automatica (anno → mese → settimana → giorno)</option>
-                  <option value="month">Parti dai mesi</option>
-                  <option value="day">Parti dai giorni (molte richieste)</option>
-                  <option value="none">Nessuna (solo paginazione per esclusione)</option>
-                </select>
-              </label>
-              <label class="check"><input type="checkbox" id="ext-paging" checked> Paginazione per esclusione dei ticket già trovati</label>
-              <label class="fld">Massimo richieste a Zucchetti
-                <input id="ext-max" type="number" min="1" max="200" value="40">
-              </label>
-              <p class="muted small" id="ext-help"></p>
             </fieldset>
 
             <fieldset>
@@ -192,8 +174,8 @@
           <li>Usa le virgolette per una frase: <code>"premio di risultato" conguaglio</code>.</li>
           <li><b>Sintassi Solr</b>: <code>(detassazione OR "premio di risultato") AND NOT storno</code>, <code>detass*</code>, <code>conguaglo~</code>.</li>
           <li><b>#8900042</b> nel campo di ricerca apre direttamente quel numero di ticket.</li>
-          <li>Zucchetti restituisce al massimo <span class="cap-n">210</span> risultati: attiva la <b>Ricerca estesa</b> per superare il limite.</li>
-          <li>Scorciatoie: <kbd>/</kbd> per cercare, <kbd>Ctrl</kbd>+<kbd>Invio</kbd> per la ricerca estesa, <kbd>Esc</kbd> per interrompere.</li>
+          <li>Zucchetti mostra al massimo <span class="cap-n">210</span> risultati, i più rilevanti: se li raggiungi, restringi la ricerca con un periodo, un prodotto o parole più specifiche.</li>
+          <li>Scorciatoie: <kbd>/</kbd> per cercare, <kbd>Esc</kbd> per interrompere.</li>
         </ul>
       </div>
 

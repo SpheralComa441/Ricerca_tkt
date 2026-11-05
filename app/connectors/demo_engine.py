@@ -4,8 +4,7 @@ Genera un archivio sintetico di ticket di assistenza paghe e implementa un
 sottoinsieme della sintassi Lucene/Solr (AND/OR/NOT, parentesi, "frasi"~N,
 campo:valore, intervalli [a TO b], prefisso*, fuzzy~). Restituisce risposte
 nello stesso formato della routine Zucchetti, con lo stesso limite di
-risultati, così l'interfaccia e la ricerca estesa si possono provare senza
-credenziali.
+risultati, così l'interfaccia si può provare senza credenziali.
 """
 from __future__ import annotations
 
