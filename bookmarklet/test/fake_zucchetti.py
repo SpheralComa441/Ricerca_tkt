@@ -65,7 +65,13 @@ __HOSTILE__
         + '&pCore=' + encodeURIComponent(p.pCore.Value()) + '&pLangs=' + encodeURIComponent(p.langs.Value()) + '&cs_SITE=';
       return new JSURL('../servlet/spsl_fquery_mc?' + q).Response();
     } },
-    click: function(){ window.__clicked = this.doResults.rs.url1 + '|' + this.doResults.rs.id; }
+    click: function(){ window.__clicked = this.doResults.rs.url1 + '|' + this.doResults.rs.id; },
+    // come doSearch() dopo "Cerca" nella scheda Filtri: i valori arrivano dal modulo dei filtri
+    doSearch: function(){ var r = this.splResults.Link(); document.getElementById('esito').textContent = r.slice(0, 80); this.pCore.Value(''); }
+  };
+  window.cercaDallaPagina = function(){
+    portlet.userInput.Value('detassazione AND (TKSTATO:"Chiuso")'); portlet.area.Value('HR'); portlet.langs.Value('ITA,ENG');
+    portlet.doSearch();
   };
   var portlets = { spsl_wsolrresultsgrid: portlet };
   window.ZtVWeb = { getPortlet: function(n){ return portlets[n]; } };
@@ -74,6 +80,7 @@ __HOSTILE__
 <div id="bujlv_lblHeadertbl">RICERCA RAPIDA</div>
 <iframe name="gspv_winf_search" src="../servlet/gspv_winf_search?m_cDecoration=none" style="width:100%;height:200px"></iframe>
 <p>Pagina finta per i test del segnalibro.</p>
+<button id="cerca-pagina" onclick="cercaDallaPagina()">Cerca (scheda Filtri)</button><pre id="esito"></pre>
 </body></html>"""
 
 FILTERS_FORM = """<!doctype html><html><body><form id="filtri">
@@ -139,6 +146,10 @@ async def fquery(request: Request):
         return HTMLResponse('<html><body><form><input type="password" name="m_cPassword"></form></body></html>')
     if params.get("m_cID") != MCID:
         return PlainTextResponse("Accesso non consentito", status_code=403)
+    # come la routine reale: senza lingue valide l'indice risponde con un errore
+    if params.get("pLangs", "") not in {"ITA", "ENG", "ITA,ENG"}:
+        core = params.get("pCore") or "TICKET"
+        return Response(json.dumps({"data": [], "maxResults": [], "fields": [], "facet": [], "errors": [core]}), media_type="text/plain")
     try:
         docs, words = index().search(params.get("pKeyword", ""), CAP)
     except demo_engine.QuerySyntaxError as exc:

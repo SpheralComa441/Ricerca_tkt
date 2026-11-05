@@ -11,7 +11,7 @@
 (() => {
   "use strict";
   const NS = "__RicercaTKT__";
-  const VERSION = "1.0.1";
+  const VERSION = "1.0.2";
   if (window[NS]) { window[NS].toggle(); return; }
   try {
 
@@ -115,9 +115,17 @@
     ["gruppo_partecipante", "Gruppo partecipante", "", "Gruppo di assistenza che ha partecipato al ticket"],
     ["classificazione", "Classificazione"], ["argomento", "Argomento"],
   ].map(([key, label, group, hint]) => ({ key, label, group: group || "riepilogo", hint: hint || "" }));
-  const DEFAULT_SETTINGS = { core: "TICKET", area: "", langs: "", mapping: {}, cap: 210, earliestYear: 2010 };
-  const settings = Object.assign({}, DEFAULT_SETTINGS, store.get("settings", {}));
+  // Lingua "ITA" come la ricerca veloce della testata Zucchetti (pLangs=g_UserLang): con pLangs
+  // vuoto la routine risponde {"errors":["TICKET"]} e nessun risultato.
+  const DEFAULT_SETTINGS = { v: 2, core: "TICKET", area: "", langs: "ITA", mapping: {}, cap: 210, earliestYear: 2010 };
+  const storedSettings = store.get("settings", {}) || {};
+  const settings = Object.assign({}, DEFAULT_SETTINGS, storedSettings);
   settings.mapping = Object.assign({}, settings.mapping || {});
+  if (!(storedSettings.v >= 2) && Object.keys(storedSettings).length) {
+    if (!settings.langs) settings.langs = "ITA";
+    settings.v = 2;
+    store.set("settings", settings);
+  }
   const TITLE_RE = /^\s*\[#(\d+)\]\s*\[([^\]]*)\]\s*\[(\d{1,2})-(\d{1,2})-(\d{4})\]\s*/;
 
   // ===================================================================== query Solr
@@ -446,7 +454,67 @@
   // ===================================================================== connessione a Zucchetti
   const conn = {
     found: null, template: null, templateOk: true, mcid: null, mode: "", lastRequest: null, lastRaw: "", lastSummary: null,
+    inNative: false, pageRequests: [], seenFields: new Set(store.get("seenFields", [])), onPageSearch: null,
   };
+
+  function requestParams(r) {
+    const out = {};
+    try { for (const [k, v] of new URL(r.url, r.base || location.href).searchParams) out[k] = v; } catch { /* */ }
+    if (r.body && r.body.includes("=")) for (const [k, v] of new URLSearchParams(r.body)) out[k] = v;
+    return out;
+  }
+
+  /** Osserva (senza modificarle) le ricerche fatte dalla pagina Zucchetti: parametri reali e nomi dei campi Solr. */
+  function observeWindow(w) {
+    try {
+      const proto = w.XMLHttpRequest && w.XMLHttpRequest.prototype;
+      if (!proto || proto.__rtktObserved) return;
+      const o = proto.open, snd = proto.send, hdr = proto.setRequestHeader;
+      proto.open = function (method, url) {
+        try { this.__rtktObs = { method: String(method || "GET").toUpperCase(), url: String(url), headers: {}, base: w.location.href }; } catch { /* */ }
+        return o.apply(this, arguments);
+      };
+      proto.setRequestHeader = function (k, v) { try { if (this.__rtktObs) this.__rtktObs.headers[k] = v; } catch { /* */ } return hdr.apply(this, arguments); };
+      proto.send = function (body) {
+        try {
+          const r = this.__rtktObs;
+          if (r && /spsl_fquery_mc/i.test(r.url) && !conn.inNative) {
+            r.body = typeof body === "string" ? body : "";
+            r.at = new Date().toISOString();
+            pageSearchSeen(r);
+          }
+        } catch { /* */ }
+        return snd.apply(this, arguments);
+      };
+      Object.defineProperty(proto, "__rtktObserved", { value: true });
+    } catch { /* finestra non accessibile */ }
+  }
+  function pageSearchSeen(r) {
+    const p = requestParams(r);
+    const kw = p.pKeyword || "";
+    conn.pageRequests.unshift({ at: r.at, method: r.method, url: r.url, body: r.body, params: p });
+    conn.pageRequests.length = Math.min(conn.pageRequests.length, 10);
+    for (const m of kw.matchAll(/(^|[\s(+\-!])([A-Za-z_][A-Za-z0-9_.]*):/g)) conn.seenFields.add(m[2]);
+    store.set("seenFields", [...conn.seenFields]);
+    store.set("pageParams", { pArea: p.pArea ?? null, pLangs: p.pLangs ?? null, pCore: p.pCore ?? null, at: r.at });
+    if (kw && !conn.template && conn.found) learnTemplate(r, kw);
+    if (conn.onPageSearch) try { conn.onPageSearch(p); } catch { /* */ }
+  }
+  for (const w of sameOriginWindows(window, 0, [])) observeWindow(w);
+  conn.found = findPortlet();
+
+  function pageLang() {
+    for (const w of sameOriginWindows(window, 0, [])) {
+      try {
+        for (const name of ["gspv_fheader_search", "spsl_wfast_search"]) {
+          const p = w.ZtVWeb && w.ZtVWeb.getPortlet(name);
+          const v = p && p.g_UserLang && p.g_UserLang.Value();
+          if (v) return String(v);
+        }
+      } catch { /* */ }
+    }
+    return "";
+  }
 
   function captureXHR(win) {
     const proto = win.XMLHttpRequest && win.XMLHttpRequest.prototype;
@@ -486,7 +554,8 @@
     else { set("input", q); set("pCore", opt.core); if (opt.langs) set("g_UserLang", opt.langs); }
     const cap = captureXHR(w);
     let raw;
-    try { raw = p.splResults.Link(); } finally { cap.restore(); restores.reverse().forEach((r) => r()); }
+    conn.inNative = true;
+    try { raw = p.splResults.Link(); } finally { conn.inNative = false; cap.restore(); restores.reverse().forEach((r) => r()); }
     const req = cap.reqs.find((r) => /spsl_fquery_mc/i.test(r.url)) || cap.reqs[cap.reqs.length - 1];
     if (req) { conn.lastRequest = req; learnTemplate(req, q); }
     conn.mode = "native";
@@ -539,7 +608,32 @@
 
   const nextFrame = () => new Promise((r) => requestAnimationFrame(() => setTimeout(r, 30)));
 
-  /** Una sola richiesta per ricerca: prima il modello appreso, poi il portlet della pagina, poi la chiamata diretta. */
+  /**
+   * Una richiesta per ricerca; solo se Zucchetti risponde con un errore e nessun risultato se ne fa
+   * una seconda con parametri alternativi (quelli dell'ultima ricerca della pagina, o lingua ITA),
+   * che vengono poi memorizzati.
+   */
+  async function zSearchWithFallback(q, opt, signal) {
+    const r = await zSearch(q, opt, signal);
+    if (r.rawCount || !r.errors.length) return r;
+    const pp = store.get("pageParams", null);
+    const cands = [];
+    if (pp && (pp.pLangs !== null || pp.pArea !== null)) cands.push({ core: pp.pCore || opt.core, area: pp.pArea ?? opt.area, langs: pp.pLangs ?? opt.langs });
+    const pl = pageLang() || "ITA";
+    cands.push({ core: opt.core, area: opt.area, langs: pl });
+    const alt = cands.find((c) => c.core !== opt.core || c.area !== opt.area || c.langs !== opt.langs);
+    if (!alt) return r;
+    const r2 = await zSearch(q, alt, signal);
+    if (r2.rawCount || !r2.errors.length) {
+      Object.assign(settings, { core: alt.core, area: alt.area, langs: alt.langs });
+      store.set("settings", settings);
+      r2.fixed = alt;
+      return r2;
+    }
+    return r;
+  }
+
+  /** Una sola richiesta: prima il modello appreso, poi il portlet della pagina, poi la chiamata diretta. */
   async function zSearch(q, opt, signal) {
     if (!conn.found) conn.found = findPortlet();
     let raw;
@@ -756,7 +850,7 @@ dialog{border:1px solid var(--bd2);border-radius:12px;padding:20px;width:min(480
   <section id="tab-favorites" hidden><div class="card"><div class="row between"><h2>Preferiti</h2><div class="row"><input id="ffilter" type="search" placeholder="Filtra per testo o etichetta…" style="width:260px"><button type="button" class="btn gh s" id="fexp">Esporta CSV</button></div></div><div id="favs" class="list"></div></div></section>
   <section id="tab-settings" hidden>
    <div class="card"><h2>Connessione a Zucchetti</h2><pre class="pre mono" id="conninfo"></pre>
-    <div class="row" style="margin-top:10px"><button type="button" class="btn" id="tcopy">Copia dati tecnici</button><button type="button" class="btn gh" id="tdl">Scarica dati tecnici</button></div>
+    <div class="row" style="margin-top:10px"><button type="button" class="btn" id="usepage">Usa i parametri dell'ultima ricerca della pagina</button><button type="button" class="btn" id="tcopy">Copia dati tecnici</button><button type="button" class="btn gh" id="tdl">Scarica dati tecnici</button></div>
     <p class="mu sm">I dati tecnici servono a completare la configurazione (nomi dei campi dei filtri, formato dei link): contengono la richiesta inviata (senza cookie), un esempio di risposta con alcuni risultati e il modulo "Filtri" della pagina, se aperta. Controllali prima di condividerli.</p></div>
    <div class="card"><h2>Valori predefiniti</h2><div class="fg"><label class="fld">Indice (core)<input id="s-core"></label><label class="fld">Area<input id="s-area"></label><label class="fld">Lingue<input id="s-langs"></label><label class="fld">Massimo risultati di Zucchetti<input id="s-cap" type="number" min="1"></label></div></div>
    <div class="card"><h2>Mappatura dei campi Solr</h2><p class="mu sm">Una riga per campo, nel formato <code>chiave = NOMECAMPO</code>. Lascia vuoto ciò che non conosci. Chiavi disponibili: <span id="keys"></span>.</p><textarea id="s-map" rows="8" class="mono" placeholder="stato = NOMECAMPO_STATO"></textarea></div>
@@ -939,7 +1033,7 @@ dialog{border:1px solid var(--bd2);border-radius:12px;padding:20px;width:min(480
     const t0 = performance.now();
     try {
       const opt = { core: s.core, area: s.area, langs: s.langs };
-      const r = await zSearch(built.query, opt, ctrl.signal);
+      const r = await zSearchWithFallback(built.query, opt, ctrl.signal);
       if (S.abort !== ctrl) return;
       let filtered = 0;
       for (const t of r.tickets) {
@@ -949,7 +1043,13 @@ dialog{border:1px solid var(--bd2);border-radius:12px;padding:20px;width:min(480
       }
       S.info = { raw: r.rawCount, capped: r.capped, cap: r.maxResults || settings.cap, filtered, ms: Math.round(performance.now() - t0) };
       conn.lastSummary = { fields: r.fields, rawCount: r.rawCount, dataLength: r.dataLength, maxResults: r.maxResults, facet: r.facet, errors: r.errors };
-      for (const e of r.errors) pushAlert("warn", `Zucchetti: ${e}`);
+      if (r.fixed) {
+        $("#core").value = r.fixed.core; $("#area").value = r.fixed.area; $("#langs").value = r.fixed.langs;
+        toast(`Parametri corretti e salvati: lingue "${r.fixed.langs}", area "${r.fixed.area}"`);
+      }
+      if (r.errors.length && !r.rawCount) {
+        pushAlert("err", `Zucchetti non è riuscito a cercare nell'indice ${r.errors.join(", ")}. Chiudi Ricerca TKT (Esc), fai una ricerca normale dalla scheda Filtri della pagina Zucchetti e riapri il segnalibro: userò gli stessi parametri. Se non basta, manda i dati tecnici da Impostazioni.`);
+      } else for (const e of r.errors) pushAlert("warn", `Zucchetti non ha cercato nell'indice: ${e}`);
       if (r.capped) pushAlert("warn", `Zucchetti mostra al massimo ${S.info.cap} risultati (i più rilevanti): restringi la ricerca con un periodo, un prodotto o parole più specifiche.`);
       if (filtered) pushAlert("info", `${fmtN(filtered)} risultati scartati perché fuori dai filtri (periodo, numeri, prodotti).`);
       if (!r.rawCount && r.dataLength) pushAlert("warn", "La risposta contiene dati che non riesco a leggere: usa Impostazioni → Copia dati tecnici e invialo per la configurazione.");
@@ -1268,6 +1368,7 @@ dialog{border:1px solid var(--bd2);border-radius:12px;padding:20px;width:min(480
       mode: conn.mode || "(nessuna ricerca eseguita)", portlet: conn.found ? conn.found.kind : null,
       m_cID: conn.mcid, template: conn.template ? { method: conn.template.method, url: conn.template.url, body: conn.template.body, keywordParam: conn.template.kw, where: conn.template.where } : null,
       lastRequest: strip(conn.lastRequest), lastQuery: S.query, responseSummary: conn.lastSummary, responseSample: sample,
+      pageSearches: conn.pageRequests, pageParams: store.get("pageParams", null), solrFieldsSeen: [...conn.seenFields], settings,
       filtersFormHtml: filters,
     };
   }
@@ -1280,6 +1381,8 @@ dialog{border:1px solid var(--bd2);border-radius:12px;padding:20px;width:min(480
       `Ultima ricerca tramite: ${modes[conn.mode] || "—"}`,
       `Codice m_cID: ${conn.mcid || "—"}`,
       `Modulo "Filtri" leggibile: ${d.filtersFormHtml ? "sì" : "no (apri la pagina di ricerca Zucchetti)"}`,
+      `Ultima ricerca fatta dalla pagina: ${(() => { const pp = store.get("pageParams", null); return pp ? `lingue "${pp.pLangs ?? "—"}", area "${pp.pArea ?? "—"}", indice "${pp.pCore ?? "—"}" (${fmtDT(pp.at)})` : "nessuna osservata (chiudi il pannello e cerca dalla scheda Filtri)"; })()}`,
+      `Campi Solr visti nelle ricerche della pagina: ${conn.seenFields.size ? [...conn.seenFields].join(", ") : "—"}`,
     ].join("\n");
     $("#s-core").value = settings.core; $("#s-area").value = settings.area; $("#s-langs").value = settings.langs; $("#s-cap").value = settings.cap;
     $("#s-map").value = Object.entries(settings.mapping).filter(([, v]) => v).map(([k, v]) => `${k} = ${v}`).join("\n");
@@ -1302,6 +1405,17 @@ dialog{border:1px solid var(--bd2);border-radius:12px;padding:20px;width:min(480
     $$(".capn").forEach((x) => { x.textContent = settings.cap; });
     preview();
     toast(bad.length ? `Impostazioni salvate; righe ignorate: ${bad.join(" | ")}` : "Impostazioni salvate");
+  });
+  $("#usepage").addEventListener("click", () => {
+    const pp = store.get("pageParams", null);
+    if (!pp) { toast("Nessuna ricerca della pagina osservata: chiudi il pannello, cerca dalla scheda Filtri e riapri il segnalibro"); return; }
+    if (pp.pCore) settings.core = pp.pCore;
+    if (pp.pArea !== null) settings.area = pp.pArea;
+    if (pp.pLangs !== null) settings.langs = pp.pLangs;
+    store.set("settings", settings);
+    $("#core").value = settings.core; $("#area").value = settings.area; $("#langs").value = settings.langs;
+    renderSettings();
+    toast("Parametri della pagina salvati");
   });
   $("#tcopy").addEventListener("click", () => copyText(JSON.stringify(techData(), null, 2), "Dati tecnici copiati"));
   $("#tdl").addEventListener("click", () => download("ricerca-tkt-dati-tecnici.json", JSON.stringify(techData(), null, 2), "application/json"));
@@ -1366,7 +1480,13 @@ dialog{border:1px solid var(--bd2);border-radius:12px;padding:20px;width:min(480
     download("preferiti.csv", "\ufeff" + ["Numero;Data;Prodotto;Oggetto;Estratto;Link;Nota;Etichette", ...rows].join("\r\n"), "text/csv;charset=utf-8");
   });
 
-  function show() { host.style.display = ""; document.documentElement.style.overflow = "hidden"; setTimeout(() => $("#q").focus(), 0); }
+  let lastSeenAt = (store.get("pageParams", null) || {}).at || "";
+  function show() {
+    host.style.display = ""; document.documentElement.style.overflow = "hidden"; setTimeout(() => $("#q").focus(), 0);
+    const pp = store.get("pageParams", null);
+    if (pp && pp.at && pp.at !== lastSeenAt) { lastSeenAt = pp.at; toast(`Vista una ricerca della pagina Zucchetti (lingue "${pp.pLangs ?? "—"}"): dettagli in Impostazioni`); }
+  }
+  conn.onPageSearch = () => { if (!$("#tab-settings").hidden) renderSettings(); };
   function hide() { if (S.abort) S.abort.abort(); host.style.display = "none"; document.documentElement.style.overflow = prevOverflow; }
   $("#close").addEventListener("click", hide);
   // eventi da tastiera: restano dentro il pannello (non arrivano alla pagina Zucchetti)

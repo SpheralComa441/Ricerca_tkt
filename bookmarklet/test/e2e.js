@@ -75,6 +75,8 @@ const txt = (page, sel) => page.locator(sel).first().innerText();
 
   // ---- pagina di ricerca con il portlet -------------------------------------------------
   await page.goto(BASE + "/areariservata/jsp/gspv_psearch.jsp");
+  // impostazioni salvate dalla versione 1.0.1 (lingue vuote): devono essere aggiornate a ITA
+  await page.evaluate(() => localStorage.setItem("rtkt:settings", JSON.stringify({ core: "TICKET", area: "", langs: "", mapping: {}, cap: 210 })));
   await resetLog(page);
   await clickBookmarklet(page);
   await page.waitForSelector("#ricerca-tkt-host", { state: "attached" });
@@ -85,6 +87,7 @@ const txt = (page, sel) => page.locator(sel).first().innerText();
   let l = await log(page);
   check(l.length === 1, `una sola richiesta per ricerca (${l.length})`);
   check(l[0] && l[0].params.pKeyword === "detassazione" && l[0].params.pCore === "TICKET", "parametri passati dal portlet della pagina");
+  check(l[0] && l[0].params.pLangs === "ITA", `lingua ITA inviata (anche con impostazioni vecchie): "${l[0] && l[0].params.pLangs}"`);
   check((await txt(page, "#sum")).includes("210 ticket trovati"), "210 risultati mostrati");
   check((await txt(page, "#alert")).includes("al massimo 210"), "avviso del limite di Zucchetti");
   check((await page.locator(".res").count()) === 50, "50 risultati per pagina");
@@ -177,6 +180,27 @@ const txt = (page, sel) => page.locator(sel).first().innerText();
   await page.fill("#q", "assunzione");
   await page.waitForTimeout(300);
   check((await txt(page, "#qprev")) === '(assunzione) AND (TKSTATO:"Aperto")', "query con il campo mappato");
+
+  // ricerca fatta dalla pagina con il pannello chiuso: parametri e campi osservati
+  await page.keyboard.press("Escape");
+  await page.click("#cerca-pagina");
+  await clickBookmarklet(page);
+  await page.locator("#q").waitFor({ state: "visible", timeout: 5000 });
+  await page.click('#nav button[data-tab="settings"]');
+  const info = await txt(page, "#conninfo");
+  check(info.includes('lingue "ITA,ENG"') && info.includes('area "HR"'), "parametri della ricerca della pagina osservati");
+  check(info.includes("TKSTATO"), "campo Solr visto nella ricerca della pagina");
+  // lingua sbagliata nelle impostazioni -> Zucchetti dà errore -> seconda richiesta con i parametri della pagina
+  await page.fill("#s-langs", "XXX");
+  await page.click("#ssave");
+  await page.click('#nav button[data-tab="search"]');
+  await page.fill('#rie input[data-f="stato"]', "");
+  await resetLog(page);
+  await search(page, "tfr");
+  l = await log(page);
+  check(l.length === 2 && l[0].params.pLangs === "XXX" && l[1].params.pLangs === "ITA,ENG", `una sola richiesta in più, con i parametri della pagina (${l.map((x) => x.params.pLangs)})`);
+  check((await page.locator(".res").count()) > 0 && (await page.inputValue("#langs")) === "ITA,ENG", "risultati e parametri corretti salvati");
+  await page.click('#nav button[data-tab="search"]');
 
   // salva ricerca e cronologia
   await page.click("#qsave");
