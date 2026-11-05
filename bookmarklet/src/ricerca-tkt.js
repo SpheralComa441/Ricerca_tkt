@@ -10,7 +10,7 @@
 (() => {
   "use strict";
   const NS = "__RicercaTKT__";
-  const VERSION = "2.0.0";
+  const VERSION = "2.1.0";
   if (window[NS]) { window[NS].toggle(); return; }
   try {
 
@@ -68,7 +68,25 @@
     for (let p = c, i = 0; p && i < 40; p = p.ownerCt || (typeof p.up === "function" ? p.up() : null), i++) if (/^body_/.test(p.id || "")) return p;
     return null;
   }
+  // Schede del portale (My tickets, My Group Tickets, Tickets from my groups, All tickets...): il titolo
+  // di un elenco è il testo della scheda che lo contiene.
+  const ALL_TAB_RE = /^(all tickets?|tutti i ticket|tutti i tickets)$/i;
+  const ALL_KEY = "INC_ALLGRP_EXTENDED";
+  function portalTabs() {
+    try {
+      return Ext.ComponentQuery.query("tab").map((t) => ({ t, text: textOf(String((typeof t.getText === "function" ? t.getText() : t.text) || "")), card: t.card || null }))
+        .filter((x) => x.text);
+    } catch { return []; }
+  }
+  function isInside(card, cmp, el) {
+    if (!card) return false;
+    try { if (el && card.el && card.el.dom && card.el.dom.contains(el)) return true; } catch { /* */ }
+    for (let p = cmp, i = 0; p && i < 60; p = p.ownerCt || p.floatParent || null, i++) if (p === card) return true;
+    return false;
+  }
+  const bodyKey = (id) => { const x = /^body_([^-]+)/.exec(id || ""); return x ? x[1] : ""; };
   function findModules() {
+    const tabs = portalTabs();
     const ids = new Set();
     for (const el of document.querySelectorAll('[id$="' + SUFFIX + '"]')) if (/\bentity-incident\b/.test(el.className || "")) ids.add(el.id);
     for (const c of allComponents()) {
@@ -85,20 +103,24 @@
       if (!isGrid(grid) && cmp && typeof cmp.query === "function") grid = cmp.query("gridpanel").find(isGrid) || null;
       let store = null;
       try { store = isGrid(grid) ? grid.getStore() : null; } catch { store = null; }
-      const body = cmp ? ownerBody(cmp) : (document.getElementById(id) || { closest: () => null }).closest('[id^="body_"]');
-      const key = body && body.id ? body.id.slice(5) : prefix;
-      let title = LIST_NAMES[key] || "";
-      try { const b = Ext.getCmp("body_" + key); title = (b && (b.title || (b.tab && b.tab.text))) || title || key; } catch { /* */ }
+      const el = document.getElementById(id);
+      const domBody = el ? el.closest('[id^="body_"]') : null;
+      const cmpBody = cmp ? ownerBody(cmp) : null;
+      const key = bodyKey(domBody && domBody.id) || bodyKey(cmpBody && cmpBody.id) || prefix;
+      const tab = tabs.find((x) => isInside(x.card, cmp, el)) || null;
+      const title = (tab && tab.text) || LIST_NAMES[key] || key;
       out.push({
         prefix, P, key, title: textOf(String(title)), cmp, grid: isGrid(grid) ? grid : null, store,
         field: (name) => Ext.getCmp(P + "filter_default_" + name) || null,
         quick: Ext.getCmp(P + "defaultFilter_default_FullText") || null,
-        rendered: !!(grid && grid.rendered),
+        rendered: !!(grid && grid.rendered), tabText: tab ? tab.text : "", bodyId: (domBody && domBody.id) || (cmpBody && cmpBody.id) || "",
       });
     }
-    const rank = (m) => (m.key === "INC_ALLGRP_EXTENDED" ? 0 : m.store ? 1 : 2);
-    return out.sort((a, b) => rank(a) - rank(b));
+    return out;
   }
+  // Ricerca globale: solo l'elenco All tickets (riconosciuto dal pannello body_INC_ALLGRP_EXTENDED o dalla scheda).
+  const isAllList = (m) => !!m && (m.key === ALL_KEY || ALL_TAB_RE.test(m.tabText || ""));
+  const allTab = () => portalTabs().find((x) => ALL_TAB_RE.test(x.text) || (x.card && x.card.id === "body_" + ALL_KEY)) || null;
 
   // ===================================================================== archivio locale
   const store = {
@@ -338,8 +360,45 @@
     }
     return out;
   }
+  // Gruppi e persone: campi del portale con menu ad albero o ricerca (valori = codici del portale)
+  const PEOPLE = [
+    ["AssignedUserOrGroupFilter", "Assegnato a (persona o gruppo)"],
+    ["OwnerUserGroupID", "Gruppo proprietario"],
+    ["ModifiedBy", "Modificato da (chi ci ha lavorato)"],
+    ["OwnerUserID", "Responsabile (Resource Owner)"],
+  ];
+  const PEOPLE_KEYS = new Set(PEOPLE.map(([k]) => k));
+  function scalarValue(f, v) {
+    if (Array.isArray(v)) v = v[0];
+    if (v && typeof v === "object") {
+      try { if (typeof v.get === "function") return String(v.get(f.valueField || "value") ?? ""); } catch { /* */ }
+      return String(v.value ?? v.id ?? v.Value ?? v.ID ?? "");
+    }
+    return v === null || v === undefined ? "" : String(v);
+  }
+  function personValue(f) {
+    try {
+      const v = scalarValue(f, f.getValue());
+      if (!v || /^\[\{"value":""/.test(v)) return null;
+      return { v, t: fieldDisplay(f) || v };
+    } catch { return null; }
+  }
+  const canLookup = (f) => !!(f && typeof f.doQuery === "function" && typeof f.getStore === "function" && !f.readOnly && f.editable !== false);
+  function setPerson(f, d) {
+    const same = () => scalarValue(f, f.getValue()) === String(d.v);
+    const vf = f.valueField || "value", df = f.displayField || "text";
+    let st = null;
+    try { st = typeof f.getStore === "function" ? f.getStore() : null; } catch { /* */ }
+    try { const r = st && typeof st.findRecord === "function" ? st.findRecord(vf, d.v, 0, false, true, true) : null; if (r) { f.setValue(r); if (same()) return true; } } catch { /* */ }
+    try { f.setValue(d.v); if (same()) return true; } catch { /* */ }
+    try { if (st && typeof st.add === "function" && !st.isTreeStore) { const [r] = st.add({ [vf]: d.v, [df]: d.t }); f.setValue(r); if (same()) return true; } } catch { /* */ }
+    return false;
+  }
+  function clearField(f) {
+    try { if (typeof f.clearValue === "function") f.clearValue(); else f.setValue(null); } catch { try { f.setValue(""); } catch { /* */ } }
+  }
   function keptFilters(m) {
-    return filterFields(m).filter(({ suffix, f }) => !(suffix in CONTROLLED) && !(f.isXType && f.isXType("hiddenfield")))
+    return filterFields(m).filter(({ suffix, f }) => !(suffix in CONTROLLED) && !PEOPLE_KEYS.has(suffix) && !(f.isXType && f.isXType("hiddenfield")))
       .map(({ suffix, f }) => ({ suffix, f, label: fieldLabel(f, suffix), value: fieldDisplay(f) }))
       .filter((x) => x.value && !/^\[\{"value":""/.test(x.value));
   }
@@ -369,6 +428,17 @@
     doSet("PriorityFilter", !!(s.pr && s.pr.length), (f) => setMulti(f, s.pr || []));
     doSet("CatalogItemTxt", !!s.classif, (f) => setText(f, s.classif || ""));
     doSet("ClassCliTxt", !!s.classcli, (f) => setText(f, s.classcli || ""));
+    if (s.people && typeof s.people === "object") {
+      for (const [suffix] of PEOPLE) {
+        const want = s.people[suffix];
+        doSet(suffix, !!want, (f) => {
+          const cur = personValue(f);
+          if (want && want.v) return cur && cur.v === String(want.v) ? true : setPerson(f, want);
+          if (cur) clearField(f);
+          return !personValue(f);
+        });
+      }
+    }
   }
   async function pressEnter(m) {
     const f = m.field("FullText") || m.quick;
@@ -419,38 +489,58 @@
       throw new Error(`Il portale ha risposto con un errore al caricamento dell'elenco${w.error ? ` (${w.error})` : ""}.${auth ? " La sessione potrebbe essere scaduta: ricarica la pagina del portale e riprova." : big}`);
     }
   }
-  function setPageSize(st) {
+  function setPageSize(st, n) {
+    const size = n || settings.cap;
     try {
-      if (typeof st.setPageSize === "function") { if (st.getPageSize() !== settings.cap) st.setPageSize(settings.cap); }
-      else st.pageSize = settings.cap;
+      if (typeof st.setPageSize === "function") { if (st.getPageSize() !== size) st.setPageSize(size); }
+      else st.pageSize = size;
     } catch { /* */ }
     try { return typeof st.getPageSize === "function" ? st.getPageSize() : st.pageSize; } catch { return null; }
   }
   // Ricerca: imposta i filtri dell'elenco della pagina e aspetta che il portale lo ricarichi.
   // Imposta i valori con apply(), poi aspetta che il portale ricarichi l'elenco da solo; se non lo fa
   // preme Invio nel campo Search e, come ultima possibilità, ricarica l'archivio dell'elenco.
+  const triggers = {}; // modo di avvio che ha funzionato, per elenco: le ricerche successive partono subito
+  // valori dei filtri gestiti: se apply() non cambia nulla il portale non può ricaricare da solo
+  function fieldSig(m) {
+    const out = [];
+    for (const suffix of [...Object.keys(CONTROLLED), ...PEOPLE_KEYS]) {
+      const f = m.field(suffix);
+      if (!f) continue;
+      try { const v = f.getValue(); out.push(isDate(v) ? isoOf(v) : Array.isArray(v) ? asList(v).sort().join(",") : scalarValue(f, v)); } catch { out.push("?"); }
+    }
+    return out.join("\u0001");
+  }
   async function reload(m, apply, run, signal) {
     const st = m.store;
     const w = watchStore(st);
+    const known = triggers[m.key] || "";
     try {
       activity(true);
+      const before = fieldSig(m);
       apply();
-      await waitUntil(() => w.started > 0, 900, signal);
-      if (!w.started) {
-        run.trigger = "invio " + (await pressEnter(m));
-        await waitUntil(() => w.started > 0, 1200, signal);
+      const changed = fieldSig(m) !== before;
+      run.changed = changed;
+      if (known === "loadPage" && changed) { run.trigger = "loadPage"; st.loadPage(1); }
+      else {
+        if (changed && !known.startsWith("invio")) await waitUntil(() => w.started > 0, known === "automatico" ? 1500 : 900, signal);
+        if (!w.started) {
+          run.trigger = "invio " + (await pressEnter(m));
+          await waitUntil(() => w.started > 0, 1200, signal);
+        }
+        if (!w.started) { run.trigger = "loadPage"; st.loadPage(1); }
+        else if (!run.trigger) run.trigger = "automatico";
       }
-      if (!w.started) { run.trigger = "loadPage"; st.loadPage(1); }
-      else if (!run.trigger) run.trigger = "automatico";
       await waitLoads(st, w, signal);
       run.loads = w.loaded;
+      if (changed) triggers[m.key] = run.trigger.startsWith("invio") ? "invio" : run.trigger;
     } finally { w.stop(); }
   }
   // valori dei filtri della pagina prima della prima ricerca, per poterli ripristinare
   function snapshot(m) {
     const values = {};
-    for (const suffix of Object.keys(CONTROLLED)) {
-      const f = CONTROLLED[suffix] ? m.field(suffix) : null;
+    for (const suffix of [...Object.keys(CONTROLLED), ...PEOPLE_KEYS]) {
+      const f = CONTROLLED[suffix] || PEOPLE_KEYS.has(suffix) ? m.field(suffix) : null;
       if (f) { try { const v = f.getValue(); values[suffix] = Array.isArray(v) ? v.slice() : v; } catch { /* */ } }
     }
     let quick, pageSize = null;
@@ -516,6 +606,8 @@
     ["group", /^(owner group|gruppo|gruppo proprietario|gruppo assegnatario)$/],
     ["updated", /^(last update|last updated|ultimo aggiornamento|ultima modifica|last change|modified)$/],
     ["sender", /^(mittente|sender|from)$/],
+    ["owner", /^(resource owner|responsabile|risorsa responsabile)$/],
+    ["modifiers", /^(modified by|modificato da|modificatori)$/],
     ["sla", /^(sla)$/],
     ["tags", /^(tags?|etichette)$/],
   ];
@@ -729,7 +821,15 @@
       }
       return false;
     }, 2500);
-    if (field) { try { field.setValue(code); field.focus(true, 30); } catch { /* */ } }
+    if (!field) return;
+    try { field.setValue(code); field.focus(true, 30); } catch { /* */ }
+    // conferma con il pulsante della finestra (OK / Find / Cerca...), se riconoscibile
+    try {
+      const w = field.up("window");
+      const ok = w && w.query("button").filter((x) => x.isVisible && x.isVisible(true))
+        .find((x) => /^(ok|find|search|cerca|trova|apri|open|vai|go)$/i.test(textOf(String((x.getText ? x.getText() : x.text) || ""))));
+      if (ok && String(field.getValue()) === code) { await sleep(80); clickBtn(ok); }
+    } catch { /* l'utente conferma a mano */ }
   }
 
   // ===================================================================== interfaccia
@@ -804,6 +904,9 @@ fieldset{border:1px solid var(--bd);border-radius:8px;padding:10px 12px 12px;mar
 .qp{display:flex;align-items:center;gap:10px;background:var(--sf2);border-radius:8px;padding:6px 10px;flex-wrap:wrap}.qp code{flex:1;min-width:200px;background:transparent;padding:0;overflow-wrap:anywhere;white-space:pre-wrap;max-height:4.5em;overflow:auto;font-family:inherit;font-size:13px}
 .note{font-size:12.5px;color:var(--wt);background:var(--wb);border:1px solid var(--wbd);border-radius:6px;padding:4px 9px}
 .kept{display:flex;flex-direction:column;gap:5px}.kept .chip{align-self:flex-start}
+.ppl{display:flex;flex-direction:column;gap:8px}.pr{display:grid;grid-template-columns:230px minmax(0,1fr) auto;gap:8px;align-items:start}.pr .lb{font-size:13px;padding-top:6px}.pr .cv{display:flex;flex-direction:column;gap:4px;min-width:0}.pr .act{display:flex;gap:4px;flex-wrap:wrap}
+.sug{list-style:none;margin:0;padding:4px;border:1px solid var(--bd2);border-radius:6px;background:var(--sf);max-height:220px;overflow:auto}.sug li button{width:100%;text-align:left;border:0;background:transparent;padding:5px 8px;border-radius:4px;cursor:pointer}.sug li button:hover{background:var(--acs)}
+.yc{margin-bottom:10px;padding:12px 14px}.yc h3{margin:0 0 8px}.yr{display:grid;grid-template-columns:52px minmax(0,1fr) 80px auto;gap:8px;align-items:center;font-size:13px;padding:2px 0}.yr .yb{height:8px;background:var(--sf2);border-radius:4px;overflow:hidden}.yr .yb span{display:block;height:100%;background:var(--ac)}.yr .yn{text-align:right;font-variant-numeric:tabular-nums}.yr.on b{color:var(--ac)}.yr.on .yb span{background:var(--st)}
 .chip{display:inline-flex;align-items:center;gap:3px;background:var(--acs);color:var(--ac);border-radius:999px;padding:1px 4px 1px 9px;font-size:12.5px;font-weight:600}.chip button{border:0;background:transparent;color:inherit;cursor:pointer;padding:0 3px;font-size:14px;line-height:1;border-radius:50%}
 .chips{display:flex;flex-wrap:wrap;gap:6px}.chips:empty{display:none}
 .tips{margin:0;padding-left:18px;display:flex;flex-direction:column;gap:6px;color:var(--mu)}.tips b{color:var(--tx)}
@@ -830,7 +933,7 @@ mark{background:var(--mk);color:var(--mkt);border-radius:2px;padding:0 1px}
 dialog{border:1px solid var(--bd2);border-radius:12px;padding:20px;width:min(480px,calc(100vw - 32px));background:var(--sf);color:var(--tx);box-shadow:0 20px 50px rgba(0,0,0,.25)}dialog::backdrop{background:rgba(10,15,25,.45)}dialog form{display:flex;flex-direction:column;gap:10px}dialog h3{margin:0;font-size:16px}
 .toast{position:fixed;bottom:20px;left:50%;transform:translateX(-50%);background:var(--tx);color:var(--bg);padding:9px 16px;border-radius:8px;box-shadow:0 8px 24px rgba(0,0,0,.25);font-size:13.5px;z-index:3;max-width:min(680px,calc(100vw - 32px))}
 @media (max-width:1100px){.quick{grid-template-columns:repeat(3,minmax(0,1fr))}.quick>:nth-child(4),.quick>:nth-child(5){grid-column:span 3}}
-@media (max-width:820px){.res-grid{grid-template-columns:1fr}.facets{position:static;flex-direction:row;flex-wrap:wrap;max-height:none}.facet{flex:1 1 200px}.ag,.two{grid-template-columns:1fr}.top{flex-wrap:wrap;gap:8px}.tabs{order:3;flex-basis:100%}}
+@media (max-width:820px){.pr{grid-template-columns:1fr}.res-grid{grid-template-columns:1fr}.facets{position:static;flex-direction:row;flex-wrap:wrap;max-height:none}.facet{flex:1 1 200px}.ag,.two{grid-template-columns:1fr}.top{flex-wrap:wrap;gap:8px}.tabs{order:3;flex-basis:100%}}
 @media (max-width:560px){.quick{grid-template-columns:1fr 1fr}.quick>:nth-child(1),.quick>:nth-child(4),.quick>:nth-child(5){grid-column:span 2}}
 `;
 
@@ -856,7 +959,7 @@ dialog{border:1px solid var(--bd2);border-radius:12px;padding:20px;width:min(480
      <label class="fld">Dal<input type="date" id="dfrom"></label>
      <label class="fld">Al<input type="date" id="dto"></label>
      <label class="fld">Stato<select id="st"><option value="all">Tutti gli stati</option><option value="open">Aperti</option><option value="closed">Chiusi e risolti</option><option value="custom">Scegli…</option><option value="page">Come nella pagina</option></select></label>
-     <label class="fld">Elenco del portale<select id="lst"></select></label>
+     <label class="fld">Massimo ticket<select id="capq" title="Righe chieste al portale in una ricerca (le più recenti)"><option>50</option><option>100</option><option>200</option><option>500</option></select></label>
     </div>
     <details class="adv" id="adv"><summary>Opzioni avanzate <span class="mu sm" id="adv-n"></span></summary>
      <div class="ag">
@@ -871,6 +974,8 @@ dialog{border:1px solid var(--bd2);border-radius:12px;padding:20px;width:min(480
       </fieldset>
       <fieldset class="full" id="st-box" hidden><legend>Stati</legend><div class="tg" id="st-list"></div><div class="row"><button type="button" class="btn gh s" data-sel="st:all">Tutti</button><button type="button" class="btn gh s" data-sel="st:open">Solo aperti</button><button type="button" class="btn gh s" data-sel="st:closed">Solo chiusi</button><button type="button" class="btn gh s" data-sel="st:none">Nessuno</button></div></fieldset>
       <fieldset class="full"><legend>Priorità <span class="mu sm">(nessuna scelta = tutte)</span></legend><div class="tg" id="pr-list"></div></fieldset>
+      <fieldset class="full" id="ppl-box"><legend>Gruppi e persone <span class="mu sm">(filtri del portale, su tutti i ticket)</span></legend><div class="ppl" id="ppl"></div>
+       <p class="mu sm" style="margin:0">Scrivi un nome per cercarlo nel portale, oppure usa <b>Scegli nel portale</b>: si apre il menu del portale per quel campo e, dopo la scelta, Ricerca TKT si riapre da solo.</p></fieldset>
       <fieldset class="full"><legend>Altri filtri impostati nella pagina del portale</legend><div class="kept" id="kept"></div>
        <p class="mu sm" style="margin:0">Servizio, Sede, Contatto, Assegnato a, Gruppo… si impostano nei filtri del portale (chiudi con Esc): Ricerca TKT li mantiene in tutte le ricerche.</p></fieldset>
      </div>
@@ -882,18 +987,20 @@ dialog{border:1px solid var(--bd2);border-radius:12px;padding:20px;width:min(480
    <div id="emptyst" class="card" style="margin-top:16px"><h2>Come cercare</h2><ul class="tips">
     <li>Il testo va nel campo <b>Search</b> dell'elenco del portale, insieme a periodo, stato e gli altri filtri: la ricerca la fa il portale, sui suoi dati aggiornati. Chiudendo il pannello l'elenco del portale mostra la stessa ricerca; <b>Ripristina il portale</b> rimette i filtri di prima.</li>
     <li>Per i ticket storici lascia <b>Tutti gli stati</b> (la pagina del portale di solito mostra solo quelli aperti).</li>
-    <li>Arrivano al massimo <b class="capn">200</b> ticket per ricerca, i più recenti (si cambia in Impostazioni): restringi con periodo e filtri, poi affina con i filtri a sinistra dei risultati.</li>
+    <li>La ricerca è su <b>tutti i ticket</b> (elenco All tickets), ma il portale li ordina per data: arrivano i <b class="capn">200</b> più recenti. Se il portale ne ha di più, <b>Quanti per anno?</b> mostra la distribuzione su tutti gli anni e con un clic cerchi in un anno solo.</li>
+    <li>Gruppi e persone (Assegnato a, Gruppo, Modificato da, Responsabile) sono filtri del portale, quindi valgono su tutti i ticket; nei risultati ci sono anche le faccette.</li>
     <li><b>Apri</b> apre il ticket nel portale; <kbd>/</kbd> per cercare, <kbd>Esc</kbd> per tornare al portale, un altro clic sul segnalibro per riaprire.</li></ul></div>
    <div id="results" class="res-grid" hidden>
     <aside class="card facets" id="facets"></aside>
     <div>
      <div class="card prog" id="prog" hidden><div class="bar"><span></span></div><span class="sm" id="progt">Ricerca in corso…</span><button type="button" class="btn gh s" id="stop">Interrompi</button></div>
      <div id="alert" class="alert" hidden></div>
+     <div id="years" class="card yc" hidden></div>
      <div class="sum" id="sum"></div>
      <div class="tb">
       <input id="refine" class="rf" type="search" placeholder='Filtra nei risultati… (parole, -escludi, "frase")'>
       <select id="sort" aria-label="Ordinamento"><option value="rank">Ordine del portale</option><option value="date_desc">Apertura: più recenti</option><option value="date_asc">Apertura: meno recenti</option><option value="upd_desc">Ultimo aggiornamento</option><option value="code_desc">ID: decrescente</option><option value="code_asc">ID: crescente</option><option value="subject">Oggetto A→Z</option><option value="status">Stato</option></select>
-      <select id="group" aria-label="Raggruppamento"><option value="none">Nessun raggruppamento</option><option value="status">Per stato</option><option value="service">Per servizio</option><option value="site">Per sede</option><option value="group">Per gruppo</option><option value="assigned">Per assegnatario</option><option value="priority">Per priorità</option><option value="month">Per mese</option><option value="year">Per anno</option></select>
+      <select id="group" aria-label="Raggruppamento"><option value="none">Nessun raggruppamento</option><option value="status">Per stato</option><option value="service">Per servizio</option><option value="site">Per sede</option><option value="group">Per gruppo</option><option value="assigned">Per assegnatario</option><option value="owner">Per responsabile</option><option value="priority">Per priorità</option><option value="month">Per mese</option><option value="year">Per anno</option></select>
       <select id="psize" aria-label="Risultati per pagina"><option>25</option><option selected>50</option><option>100</option><option>250</option></select>
       <div class="menu"><button type="button" class="btn gh s" id="exp">Esporta ▾</button><div class="ml" id="expm" hidden><button type="button" data-x="csv">CSV (Excel)</button><button type="button" data-x="json">JSON</button><button type="button" data-x="codes">Copia ID ticket</button><button type="button" data-x="list">Copia elenco</button></div></div>
       <label class="ck sm"><input type="checkbox" id="selall"> Seleziona pagina</label>
@@ -912,7 +1019,7 @@ dialog{border:1px solid var(--bd2);border-radius:12px;padding:20px;width:min(480
     <div class="row" style="margin-top:10px"><button type="button" class="btn" id="tread">Leggi l'elenco attuale della pagina</button><button type="button" class="btn" id="tcopy">Copia dati tecnici</button><button type="button" class="btn gh" id="tdl">Scarica dati tecnici</button></div>
     <pre class="pre mono" id="treadout" hidden></pre>
     <p class="mu sm">I dati tecnici servono a correggere il collegamento se qualcosa non va: descrivono l'elenco del portale (colonne, filtri, richieste inviate) senza cookie né token; nomi e testi sono sostituiti da «N car.». Controllali comunque prima di condividerli.</p></div>
-   <div class="card"><h2>Risultati</h2><div class="row"><label class="fld" style="max-width:320px">Massimo ticket per ricerca<select id="s-cap"><option>50</option><option>100</option><option>200</option><option>500</option></select></label></div>
+   <div class="card"><h2>Risultati</h2><div class="row"><label class="fld" style="max-width:320px">Massimo ticket per ricerca (anche nella scheda Cerca)<select id="s-cap"><option>50</option><option>100</option><option>200</option><option>500</option></select></label></div>
     <p class="mu sm">È il numero di righe chieste al portale in una sola richiesta (la pagina ne mostra 50 alla volta). Valori più bassi sono più leggeri per il portale; dai risultati si possono caricare i successivi.</p></div>
    <div class="card"><h2>Dati personali</h2><p class="mu sm">Preferiti, note, ricerche salvate e cronologia sono salvati solo in questo browser.</p>
     <div class="row"><button type="button" class="btn" id="pexp">Esporta</button><label class="btn">Importa<input type="file" id="pimp" accept="application/json,.json" hidden></label><button type="button" class="btn gh dg" id="pdel">Cancella tutto</button></div></div>
@@ -941,11 +1048,11 @@ dialog{border:1px solid var(--bd2);border-radius:12px;padding:20px;width:min(480
   const prevInert = !!(document.body && document.body.inert);
 
   // ===================================================================== stato
-  const emptyFacets = () => ({ status: new Set(), priority: new Set(), service: new Set(), group: new Set(), assigned: new Set(), site: new Set(), year: null, month: null, tags: new Set() });
+  const emptyFacets = () => ({ status: new Set(), priority: new Set(), service: new Set(), group: new Set(), assigned: new Set(), owner: new Set(), modifiers: new Set(), site: new Set(), year: null, month: null, tags: new Set() });
   const S = {
     results: [], keys: new Set(), facet: emptyFacets(), refine: "", sort: "rank", group: "none", page: 1, size: 50,
     selected: new Set(), searching: false, abort: null, last: null, words: [], alerts: [], visible: [], pageItems: [],
-    favorites: new Map(), info: null, modules: [], stCodes: new Set(), prCodes: new Set(), snaps: {},
+    favorites: new Map(), info: null, modules: [], stCodes: new Set(), prCodes: new Set(), snaps: {}, years: null, opening: null,
   };
   for (const f of store.get("favorites", [])) if (f && f.key) S.favorites.set(f.key, f);
   const saveFavs = () => store.set("favorites", [...S.favorites.values()].map((f) => Object.assign({}, f, { ticket: clean(f.ticket) })));
@@ -970,21 +1077,33 @@ dialog{border:1px solid var(--bd2);border-radius:12px;padding:20px;width:min(480
   // ===================================================================== modulo di ricerca
   function currentModule() {
     S.modules = findModules();
-    const want = $("#lst").value || settings.list;
-    return S.modules.find((m) => m.key === want && m.store) || S.modules.find((m) => m.store) || null;
+    return S.modules.find((m) => m.store && isAllList(m)) || null;
   }
-  function renderModules() {
-    const sel = $("#lst");
-    const cur = sel.value || settings.list;
-    S.modules = findModules();
-    clear(sel);
-    for (const m of S.modules.filter((x) => x.store)) sel.appendChild(h("option", { value: m.key }, m.title || m.key));
-    if (!sel.options.length) sel.appendChild(h("option", { value: "" }, "nessun elenco trovato"));
-    if ([...sel.options].some((o) => o.value === cur)) sel.value = cur;
-    sel.disabled = sel.options.length < 2;
+  // Se l'elenco All tickets non esiste ancora (scheda mai aperta) apre la scheda e aspetta che compaia.
+  function ensureAllTickets() {
+    const m = currentModule();
+    if (m) return Promise.resolve(m);
+    if (S.opening) return S.opening;
+    const tab = allTab();
+    if (!tab) return Promise.resolve(null);
+    S.opening = (async () => {
+      const was = !!(document.body && document.body.inert);
+      try {
+        if (document.body) document.body.inert = false;
+        const bar = tab.t.ownerCt;
+        const tp = (bar && bar.tabPanel) || (tab.card && typeof tab.card.up === "function" ? tab.card.up("tabpanel") : null);
+        if (tp && tab.card && typeof tp.setActiveTab === "function") tp.setActiveTab(tab.card);
+        else if (tab.t.el && tab.t.el.dom) tab.t.el.dom.click();
+      } catch { /* */ } finally { if (document.body) document.body.inert = was; }
+      await waitUntil(() => !!currentModule(), 10000);
+      return currentModule();
+    })();
+    S.opening.finally(() => { S.opening = null; });
+    return S.opening;
   }
   function renderToggles() {
     const m = currentModule();
+    renderPeople(m);
     const stOpts = m ? comboOptions(m.field("StatusFilter")) : [];
     const prOpts = m ? comboOptions(m.field("PriorityFilter")) : [];
     S.stOpts = stOpts;
@@ -998,6 +1117,192 @@ dialog{border:1px solid var(--bd2);border-radius:12px;padding:20px;width:min(480
     if (!stOpts.length && !["all", "page"].includes($("#st").value)) $("#st").value = "all";
     $("#st-box").hidden = $("#st").value !== "custom";
     renderKept(m);
+  }
+  // ---- gruppi e persone
+  function renderPeople(m) {
+    const box = clear($("#ppl"));
+    const present = m ? PEOPLE.filter(([k]) => m.field(k)) : [];
+    $("#ppl-box").hidden = !present.length;
+    for (const [suffix, label] of present) {
+      const f = m.field(suffix);
+      const cur = personValue(f);
+      const sug = h("ul", { class: "sug", hidden: true });
+      const inp = canLookup(f) ? h("input", { type: "search", placeholder: cur ? "Cambia: scrivi un nome…" : "Scrivi almeno 2 lettere del nome…", "aria-label": `Cerca ${label}`, "data-ppl": suffix }) : null;
+      if (inp) {
+        let seq = 0;
+        inp.addEventListener("keydown", (e) => {
+          if (e.key !== "Enter") return;
+          e.preventDefault();
+          const b = sug.querySelector("button");
+          if (b) b.click();
+        });
+        inp.addEventListener("input", debounce(async () => {
+          const q = inp.value.trim();
+          const my = ++seq;
+          clear(sug); sug.hidden = q.length < 2;
+          if (q.length < 2) return;
+          sug.appendChild(h("li", { class: "mu sm", text: "Cerco nel portale…" }));
+          let list = [];
+          try { list = await queryField(f, q); } catch { list = []; }
+          if (my !== seq) return;
+          clear(sug);
+          if (!list.length) sug.appendChild(h("li", { class: "mu sm", text: "Nessun risultato" }));
+          for (const it of list.slice(0, 30)) sug.appendChild(h("li", null, h("button", { type: "button", onclick: () => {
+            const ok = it.r ? pickRecord(f, it.r) : setPerson(f, { v: it.v, t: it.t });
+            if (!ok) toast("Il portale non ha accettato il valore: usa «Scegli nel portale»");
+            renderPeople(currentModule()); previewNow(); advCount();
+          } }, it.t)));
+        }, 350));
+      }
+      box.appendChild(h("div", { class: "pr" },
+        h("span", { class: "lb" }, label),
+        h("div", { class: "cv" }, cur ? h("span", { class: "chip" }, cur.t, h("button", { type: "button", "aria-label": `Togli ${label}`, title: "Togli il filtro", onclick: () => { clearField(f); renderPeople(currentModule()); previewNow(); advCount(); } }, "×")) : h("span", { class: "mu sm", style: "padding-top:6px" }, "qualsiasi"), inp, sug),
+        h("div", { class: "act" }, h("button", { type: "button", class: "btn s", onclick: () => pickInPortal(m, f, label) }, "Scegli nel portale…"))));
+    }
+  }
+  async function queryField(f, q) {
+    const st = f.getStore();
+    const vf = f.valueField || "value", df = f.displayField || "text";
+    const map = (r) => ({ r, v: String(r.get(vf) ?? ""), t: textOf(String(r.get(df) ?? r.get(vf) ?? "")) });
+    if (f.queryMode === "local") { const n = norm(q); return st.getRange().map(map).filter((x) => x.v && norm(x.t).includes(n)); }
+    let loaded = false;
+    const on = () => { loaded = true; };
+    st.on("load", on);
+    const was = !!(document.body && document.body.inert);
+    try {
+      if (document.body) document.body.inert = false;
+      f.lastQuery = null;
+      f.doQuery(q, true, true);
+    } catch { try { st.load({ params: { [f.queryParam || "query"]: q } }); } catch { /* */ } } finally { if (document.body) document.body.inert = was; }
+    await waitUntil(() => loaded && !loading(st), 8000);
+    st.un("load", on);
+    try { if (typeof f.collapse === "function") f.collapse(); } catch { /* */ }
+    activity(true);
+    return st.getRange().map(map).filter((x) => x.v);
+  }
+  function pickRecord(f, r) {
+    try {
+      f.setValue(r);
+      try { f.fireEvent("select", f, r); } catch { /* */ }
+      return scalarValue(f, f.getValue()) === String(r.get(f.valueField || "value"));
+    } catch { return false; }
+  }
+  // Scelta con il menu del portale: il pannello si nasconde e si riapre dopo la scelta.
+  let pill = null;
+  function showPill(text, onClick) {
+    if (!pill) {
+      pill = document.createElement("div");
+      pill.id = "ricerca-tkt-pill";
+      const r = pill.attachShadow({ mode: "open" });
+      const st = document.createElement("style");
+      st.textContent = ":host{all:initial}button{position:fixed;left:50%;bottom:18px;transform:translateX(-50%);z-index:2147483647;font:600 14px system-ui,Segoe UI,Arial,sans-serif;background:#1f5fbf;color:#fff;border:0;border-radius:999px;padding:10px 18px;box-shadow:0 6px 20px rgba(0,0,0,.3);cursor:pointer;max-width:calc(100vw - 32px)}";
+      r.appendChild(st);
+      r.appendChild(document.createElement("button"));
+      document.documentElement.appendChild(pill);
+    }
+    const b = pill.shadowRoot.querySelector("button");
+    b.textContent = text;
+    b.onclick = onClick;
+    pill.style.display = "";
+  }
+  const hidePill = () => { if (pill) pill.style.display = "none"; };
+  function expandFilters(m, f) {
+    try { const fp = Ext.getCmp(m.P + "mainFiltersPanel"); if (fp && fp.collapsed && typeof fp.expand === "function") fp.expand(false); } catch { /* */ }
+    try {
+      if (f && typeof f.isVisible === "function" && !f.isVisible(true) && m.cmp && m.cmp.el) {
+        const tg = m.cmp.el.dom.querySelector(".filter-toggle");
+        if (tg) tg.click();
+      }
+    } catch { /* */ }
+  }
+  async function pickInPortal(m, f, label) {
+    hide();
+    showModuleTab(m);
+    await sleep(60);
+    expandFilters(m, f);
+    await sleep(150);
+    let done = false;
+    const back = () => {
+      if (done) return;
+      done = true;
+      try { f.un("change", onChange); } catch { /* */ }
+      document.removeEventListener("keydown", onKey, true);
+      setTimeout(() => { hidePill(); show(); $("#adv").open = true; }, 300);
+    };
+    const onChange = () => { if (personValue(f)) back(); };
+    const onKey = (e) => { if (e.key === "Escape" && !(f.isExpanded)) back(); };
+    f.on("change", onChange);
+    document.addEventListener("keydown", onKey, true);
+    showPill(`Scegli «${label}» nel portale · poi Ricerca TKT si riapre (clic qui per tornare subito)`, back);
+    try { if (f.el && f.el.dom) f.el.dom.scrollIntoView({ block: "center" }); } catch { /* */ }
+    try { if (typeof f.focus === "function") f.focus(); } catch { /* */ }
+    try { if (typeof f.expand === "function") f.expand(); else if (typeof f.onTriggerClick === "function") f.onTriggerClick(); } catch { /* */ }
+  }
+  // ---- distribuzione per anno (una richiesta al portale per anno, fino a coprire il totale)
+  function renderYears() {
+    const box = clear($("#years"));
+    const y = S.years;
+    box.hidden = !y;
+    if (!y) return;
+    const max = Math.max(1, ...y.rows.map(([, n]) => n));
+    box.appendChild(h("div", { class: "row between" }, h("h3", null, "Ticket per anno nel portale"),
+      h("span", { class: "mu sm" }, y.running ? `conteggio in corso… ${fmtN(y.sum)} su ${fmtN(y.total)}` : `${fmtN(y.sum)} su ${fmtN(y.total)} contati${y.stopped ? " (interrotto)" : ""}`)));
+    for (const [yy, n] of y.rows) {
+      const bar = h("span");
+      bar.style.width = `${(n / max) * 100}%`;
+      box.appendChild(h("div", { class: "yr" + (y.active === yy ? " on" : "") }, h("b", null, String(yy)), h("div", { class: "yb" }, bar), h("span", { class: "yn" }, fmtN(n)),
+        n ? h("button", { type: "button", class: "btn gh s", disabled: y.running, onclick: () => searchYear(yy) }, `Cerca nel ${yy}`) : h("span")));
+    }
+  }
+  function searchYear(y) {
+    const s = S.last || spec();
+    const from = `${y}-01-01`, to = `${y}-12-31`;
+    $("#dfrom").value = s.dfrom && s.dfrom > from ? s.dfrom : from;
+    $("#dto").value = s.dto && s.dto < to ? s.dto : to;
+    $("#preset").value = "custom";
+    onFormChange();
+    if (S.years) { S.years.active = y; S.keepYears = S.years; }
+    runSearch();
+  }
+  async function yearCounts() {
+    const m = currentModule();
+    if (!m || S.searching || !S.last || !S.info) return;
+    const s = S.last;
+    const nowY = new Date().getFullYear();
+    const toY = s.dto ? Math.min(nowY, +s.dto.slice(0, 4)) : nowY;
+    const fromY = s.dfrom ? +s.dfrom.slice(0, 4) : 1990;
+    const ctrl = new AbortController();
+    S.abort = ctrl; S.searching = true; $("#prog").hidden = false; $("#progt").textContent = "Conto i ticket anno per anno…"; $("#go").disabled = true;
+    S.years = { rows: [], sum: 0, total: S.info.total, running: true, stopped: false };
+    render(); renderYears();
+    let zeros = 0;
+    try {
+      for (let y = toY; y >= fromY; y--) {
+        const sp = Object.assign({}, s, { dfrom: s.dfrom && s.dfrom > `${y}-01-01` ? s.dfrom : `${y}-01-01`, dto: s.dto && s.dto < `${y}-12-31` ? s.dto : `${y}-12-31`, people: undefined });
+        const run = { applied: [], failed: [], trigger: "", loads: 0 };
+        await reload(m, () => { setPageSize(m.store, 1); applyValues(m, sp, run); }, run, ctrl.signal);
+        let n = 0;
+        try { n = m.store.getTotalCount() || 0; } catch { /* */ }
+        S.years.rows.push([y, n]); S.years.sum += n;
+        renderYears();
+        if (S.years.sum >= S.years.total) break;
+        zeros = n ? 0 : zeros + 1;
+        if (zeros >= 3 && y < nowY - 2) break;
+      }
+    } catch (e) {
+      S.years.stopped = true;
+      if (!(e && e.name === "AbortError")) pushAlert("err", e && e.message ? e.message : "Errore nel conteggio per anno");
+    } finally {
+      S.years.running = false;
+      // l'elenco del portale torna sulla ricerca principale (serve per «Apri» e «Carica i successivi»)
+      try {
+        const run = { applied: [], failed: [], trigger: "", loads: 0 };
+        await reload(m, () => { setPageSize(m.store); applyValues(m, Object.assign({}, s, { people: undefined }), run); }, run);
+        S.info.page = 1;
+      } catch { /* */ }
+      S.abort = null; S.searching = false; $("#prog").hidden = true; $("#go").disabled = false;
+      renderYears(); render();
+    }
   }
   function renderKept(m) {
     const box = clear($("#kept"));
@@ -1034,8 +1339,14 @@ dialog{border:1px solid var(--bd2);border-radius:12px;padding:20px;width:min(480
       text: $("#q").value.trim(), subject: $("#subject").value.trim(), exclude: $("#exclude").value.trim(), allWords: $("#allw").checked,
       dfrom: $("#dfrom").value || "", dto: $("#dto").value || "", ufrom: $("#ufrom").value || "", uto: $("#uto").value || "",
       st: $("#st").value || "all", stCodes: [...S.stCodes], pr: [...S.prCodes], classif: $("#classif").value.trim(), classcli: $("#classcli").value.trim(),
-      list: $("#lst").value || "",
+      people: peopleSpec(currentModule()),
     };
+  }
+  function peopleSpec(m) {
+    const out = {};
+    if (!m) return out;
+    for (const [suffix] of PEOPLE) { const f = m.field(suffix); const v = f ? personValue(f) : null; if (v) out[suffix] = v; }
+    return out;
   }
   function applySpec(s) {
     s = s || {};
@@ -1045,12 +1356,20 @@ dialog{border:1px solid var(--bd2);border-radius:12px;padding:20px;width:min(480
     $("#st").value = ["all", "open", "closed", "custom", "page"].includes(s.st) ? s.st : "all";
     S.stCodes = new Set(s.stCodes || []); S.prCodes = new Set(s.pr || []);
     $("#classif").value = s.classif || ""; $("#classcli").value = s.classcli || "";
-    if (s.list && [...$("#lst").options].some((o) => o.value === s.list)) $("#lst").value = s.list;
+    const m = currentModule();
+    if (m && s.people && typeof s.people === "object") {
+      for (const [suffix] of PEOPLE) {
+        const f = m.field(suffix);
+        if (!f) continue;
+        const want = s.people[suffix], cur = personValue(f);
+        try { if (want && want.v) { if (!cur || cur.v !== String(want.v)) setPerson(f, want); } else if (cur) clearField(f); } catch { /* */ }
+      }
+    }
     renderToggles(); advCount(); preview();
   }
   function advCount() {
     const s = spec();
-    const n = [s.subject, s.exclude, s.allWords, s.ufrom || s.uto, s.classif, s.classcli, s.pr.length, s.st === "custom"].filter(Boolean).length;
+    const n = [s.subject, s.exclude, s.allWords, s.ufrom || s.uto, s.classif, s.classcli, s.pr.length, s.st === "custom"].filter(Boolean).length + Object.keys(s.people || {}).length;
     $("#adv-n").textContent = n ? `(${n} attiv${n === 1 ? "a" : "e"})` : "";
   }
   const onFormChange = () => { preview(); advCount(); };
@@ -1068,6 +1387,7 @@ dialog{border:1px solid var(--bd2);border-radius:12px;padding:20px;width:min(480
     if (s.pr && s.pr.length) p.push(`Priorità: ${s.pr.join(", ")}`);
     if (s.classif) p.push(`Classificazione ~ "${s.classif}"`);
     if (s.classcli) p.push(`Classif. cliente ~ "${s.classcli}"`);
+    for (const [suffix, label] of PEOPLE) { const v = s.people && s.people[suffix]; if (v) p.push(`${label.replace(/ \(.*$/, "")} = ${v.t || v.v}`); }
     if (m) { const k = keptFilters(m); if (k.length) p.push(`dalla pagina: ${k.map((x) => `${x.label} = ${x.value}`).join(", ")}`); }
     if (s.exclude) p.push(`poi senza: ${s.exclude}`);
     return p.join(" · ");
@@ -1075,10 +1395,9 @@ dialog{border:1px solid var(--bd2);border-radius:12px;padding:20px;width:min(480
   function previewNow() {
     const m = currentModule();
     const s = spec();
-    $("#qprev").textContent = `${describe(s, m)} · elenco ${m ? m.title : "—"} · max ${settings.cap}`;
+    $("#qprev").textContent = `${describe(s, m)} · tutti i ticket (${m ? m.title : "All tickets"}) · i ${settings.cap} più recenti`;
     const box = clear($("#qwarn"));
-    if (!m) box.appendChild(h("div", { class: "note", text: "Nessun elenco di ticket trovato nella pagina: apri la scheda «All tickets» del portale e riapri il segnalibro." }));
-    else if (m.key !== "INC_ALLGRP_EXTENDED" && !S.modules.some((x) => x.key === "INC_ALLGRP_EXTENDED" && x.store)) box.appendChild(h("div", { class: "note", text: `Stai cercando solo in «${m.title}»: per cercare in tutti i ticket apri una volta la scheda «All tickets» del portale e riapri il segnalibro.` }));
+    if (!m) box.appendChild(h("div", { class: "note", text: S.opening ? "Apro la scheda «All tickets» del portale…" : "Non trovo l'elenco «All tickets» del portale: aprilo una volta dalla barra delle schede e riapri il segnalibro." }));
     $("#qrestore").hidden = !(m && S.snaps[m.key]);
     if (s.st === "custom" && !s.stCodes.length) box.appendChild(h("div", { class: "note", text: "Nessuno stato scelto: verrà tolto il filtro sullo stato." }));
   }
@@ -1092,7 +1411,7 @@ dialog{border:1px solid var(--bd2);border-radius:12px;padding:20px;width:min(480
 
   // ===================================================================== ricerca
   function hay(t) {
-    if (t._hay === undefined) t._hay = norm([t.code, t.subject, t.preview, t.resolution, t.site, t.siteCode, t.contact, t.status, t.priority, t.service, t.classification, t.assigned, t.group, t.tags, fmtDate(t.date)].join(" "));
+    if (t._hay === undefined) t._hay = norm([t.code, t.subject, t.preview, t.resolution, t.site, t.siteCode, t.contact, t.status, t.priority, t.service, t.classification, t.assigned, t.group, t.owner, t.modifiers, t.tags, fmtDate(t.date)].join(" "));
     const f = S.favorites.get(t.key);
     return f ? `${t._hay} ${norm(f.note)} ${norm(f.tags.join(" "))}` : t._hay;
   }
@@ -1121,10 +1440,10 @@ dialog{border:1px solid var(--bd2);border-radius:12px;padding:20px;width:min(480
   async function runSearch() {
     const s = spec();
     if (S.searching) return;
-    const m = currentModule();
-    if (!m) { toast("Nessun elenco di ticket trovato: apri la scheda «All tickets» del portale"); preview(); return; }
+    const m = currentModule() || (await ensureAllTickets());
+    if (!m) { toast("Non trovo l'elenco «All tickets» del portale: aprilo una volta dalla barra delle schede"); preview(); return; }
     const ctrl = new AbortController();
-    S.abort = ctrl; S.last = s; S.words = wordsOf(s); S.module = m.key;
+    S.abort = ctrl; S.last = s; S.words = wordsOf(s); S.module = m.key; S.years = S.keepYears || null; S.keepYears = null; renderYears();
     Object.assign(S, { results: [], keys: new Set(), page: 1, alerts: [], info: null, refine: "" });
     S.selected.clear(); S.facet = emptyFacets();
     $("#refine").value = ""; $("#emptyst").hidden = true; $("#results").hidden = false; $("#prog").hidden = false; $("#progt").textContent = "Ricerca in corso nel portale…"; $("#go").disabled = true;
@@ -1137,7 +1456,7 @@ dialog{border:1px solid var(--bd2);border-radius:12px;padding:20px;width:min(480
       S.info = { total: r.total, loaded: r.tickets.length, page: r.page, pageSize: r.pageSize, dropped, ms: run.ms };
       if (run.failed.length) pushAlert("warn", `Alcuni filtri non sono stati impostati nella pagina: ${run.failed.join("; ")}. I risultati potrebbero non rispettarli.`);
       if (run.verified === false) pushAlert("warn", "Il portale ha ricaricato l'elenco, ma la richiesta non sembra contenere il testo cercato: i risultati potrebbero non essere filtrati. Se succede, manda i dati tecnici (Impostazioni).");
-      if (r.total > r.tickets.length) pushAlert("warn", `Il portale ha ${fmtN(r.total)} ticket per questa ricerca: qui ci sono i primi ${fmtN(r.tickets.length)} (in ordine di data). Restringi la ricerca o carica i successivi.`);
+      if (r.total > r.tickets.length) pushAlert("warn", `Il portale ha ${fmtN(r.total)} ticket per questa ricerca, su tutti gli anni: qui ci sono i ${fmtN(r.tickets.length)} più recenti. Con «Quanti per anno?» vedi come si distribuiscono e cerchi in un anno solo; oppure restringi la ricerca o carica i successivi.`);
       if (dropped) pushAlert("info", `${fmtN(dropped)} ticket scartati dai filtri sui risultati.`);
       if (!r.tickets.length && r.total) pushAlert("warn", "Il portale indica dei risultati ma l'elenco è vuoto: manda i dati tecnici da Impostazioni.");
       const hist = store.get("history", []);
@@ -1155,6 +1474,7 @@ dialog{border:1px solid var(--bd2);border-radius:12px;padding:20px;width:min(480
   async function loadMore() {
     const m = currentModule();
     if (!m || S.searching || !S.info || m.key !== S.module) return;
+    S.years = null; renderYears();
     const ctrl = new AbortController();
     S.abort = ctrl; S.searching = true; $("#prog").hidden = false; $("#progt").textContent = "Carico i ticket successivi…"; $("#go").disabled = true;
     render();
@@ -1181,12 +1501,14 @@ dialog{border:1px solid var(--bd2);border-radius:12px;padding:20px;width:min(480
   }
 
   // ===================================================================== risultati
-  const FACETS = [["status", "Stato"], ["priority", "Priorità"], ["service", "Servizio"], ["group", "Gruppo"], ["assigned", "Assegnato a"], ["site", "Sede / cliente"]];
+  const FACETS = [["status", "Stato"], ["priority", "Priorità"], ["group", "Gruppo"], ["assigned", "Assegnato a"], ["owner", "Responsabile"], ["modifiers", "Modificato da"], ["service", "Servizio"], ["site", "Sede / cliente"]];
+  const MULTI_FACETS = new Set(["modifiers"]);
+  const fvals = (t, k) => { const v = t[k] || ""; return MULTI_FACETS.has(k) ? v.split(/\s*[,;]\s*/).filter(Boolean) : [v || "—"]; };
   function filterItems(skip) {
     const r = parseRefine(S.refine), f = S.facet;
     return S.results.filter((t) => {
       if (r.inc.length || r.exc.length) { const x = hay(t); if (!r.inc.every((w) => x.includes(w)) || r.exc.some((w) => x.includes(w))) return false; }
-      for (const [k] of FACETS) if (skip !== k && f[k].size && !f[k].has(t[k] || "—")) return false;
+      for (const [k] of FACETS) if (skip !== k && f[k].size && !fvals(t, k).some((v) => f[k].has(v))) return false;
       if (skip !== "year" && f.year && (t.date || "").slice(0, 4) !== f.year) return false;
       if (skip !== "month" && skip !== "year" && f.month && (t.date || "").slice(5, 7) !== f.month) return false;
       if (skip !== "tags" && f.tags.size) { const fv = S.favorites.get(t.key); if (!fv || !fv.tags.some((x) => f.tags.has(x))) return false; }
@@ -1240,10 +1562,13 @@ dialog{border:1px solid var(--bd2);border-radius:12px;padding:20px;width:min(480
     if (S.searching) { el.appendChild(h("span", { class: "mu", text: $("#progt").textContent })); return; }
     const total = S.results.length;
     const parts = [h("b", null, fmtN(total)), total === 1 ? " ticket" : " ticket"];
-    if (S.info && S.info.total > total) parts.push(h("span", { class: "mu" }, ` su ${fmtN(S.info.total)} nel portale`));
+    if (S.info && S.info.total > total) parts.push(h("span", { class: "mu" }, `, i più recenti su ${fmtN(S.info.total)} nel portale`));
     if (nv !== total) parts.push(" · ", h("b", null, fmtN(nv)), " dopo i filtri");
     if (S.info) parts.push(h("span", { class: "mu" }, ` · ${(S.info.ms / 1000).toLocaleString("it-IT", { maximumFractionDigits: 1 })} s`));
-    if (S.info && S.info.total > S.info.loaded) parts.push(h("button", { type: "button", class: "btn s", id: "more", onclick: loadMore }, `Carica i successivi ${fmtN(Math.min(S.info.pageSize || settings.cap, S.info.total - S.info.loaded))}`));
+    if (S.info && S.info.total > S.info.loaded) {
+      parts.push(h("button", { type: "button", class: "btn s", id: "yearsbtn", onclick: yearCounts, title: "Conta i ticket di questa ricerca anno per anno (una richiesta al portale per anno)" }, "Quanti per anno?"));
+      parts.push(h("button", { type: "button", class: "btn s", id: "more", onclick: loadMore }, `Carica i successivi ${fmtN(Math.min(S.info.pageSize || settings.cap, S.info.total - S.info.loaded))}`));
+    }
     if (S.selected.size) parts.push(" · ", h("b", null, fmtN(S.selected.size)), " selezionati ", h("button", { type: "button", class: "btn gh s", onclick: () => { S.selected.clear(); render(); } }, "deseleziona"));
     add(el, parts);
   }
@@ -1271,7 +1596,7 @@ dialog{border:1px solid var(--bd2);border-radius:12px;padding:20px;width:min(480
       t.preview ? h("div", { class: "snip" }, hl(t.preview, words)) : null,
       t.resolution ? h("div", { class: "snip rs" }, h("b", null, "Soluzione: "), hl(t.resolution, words)) : null,
       h("div", { class: "meta" }, metaItem("Sede", [t.site, t.siteCode].filter(Boolean).join(" · ")), metaItem("Contatto", t.contact), metaItem("Servizio", t.service),
-        metaItem("Classificazione", t.classification), metaItem("Assegnato a", t.assigned), metaItem("Gruppo", t.group),
+        metaItem("Classificazione", t.classification), metaItem("Assegnato a", t.assigned), metaItem("Gruppo", t.group), metaItem("Responsabile", t.owner !== t.assigned ? t.owner : ""), metaItem("Modificato da", t.modifiers),
         t.updated ? metaItem("Aggiornato", `${fmtDate(t.updated)}${t.updTime ? " " + t.updTime : ""}`) : null, metaItem("SLA", t.sla), metaItem("Tag", t.tags)),
       extra.length ? h("div", { class: "meta" }, extra) : null,
       t.cols && t.cols.length ? h("details", { class: "cols" }, h("summary", null, "Tutte le colonne"), h("dl", null, t.cols.map((c) => [h("dt", null, c.h), h("dd", null, c.v)]))) : null);
@@ -1304,7 +1629,8 @@ dialog{border:1px solid var(--bd2);border-radius:12px;padding:20px;width:min(480
     const f = S.facet;
     const box = clear($("#facets"));
     for (const [k, title] of FACETS) {
-      const c = countBy(filterItems(k), (t) => t[k] || "");
+      const c = new Map();
+      for (const t of filterItems(k)) for (const v of fvals(t, k)) if (v && v !== "—") c.set(v, (c.get(v) || 0) + 1);
       for (const v of f[k]) if (!c.has(v)) c.set(v, 0);
       if (c.size < 2 && !f[k].size) continue;
       const ent = [...c.entries()].sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0])).slice(0, 15)
@@ -1350,9 +1676,9 @@ dialog{border:1px solid var(--bd2);border-radius:12px;padding:20px;width:min(480
     const s = noFormula(v);
     return /[;"\n\r]/.test(s) ? `"${s.replace(/"/g, '""')}"` : s;
   }
-  const CSV_HEAD = "ID;Data apertura;Ora;Ultimo aggiornamento;Stato;Priorità;Oggetto;Richiesta;Soluzione;Sede;Codice sede;Contatto;Servizio;Classificazione;Assegnato a;Gruppo;SLA;Tag;Nota;Etichette";
+  const CSV_HEAD = "ID;Data apertura;Ora;Ultimo aggiornamento;Stato;Priorità;Oggetto;Richiesta;Soluzione;Sede;Codice sede;Contatto;Servizio;Classificazione;Assegnato a;Gruppo;Responsabile;Modificato da;SLA;Tag;Nota;Etichette";
   function csvRow(t, f) {
-    return [t.code, fmtDate(t.date), t.time, fmtDate(t.updated), t.status, t.priority, t.subject, t.preview, t.resolution, t.site, t.siteCode, t.contact, t.service, t.classification, t.assigned, t.group, t.sla, t.tags, f ? f.note : "", f ? f.tags.join(", ") : ""].map(cell).join(";");
+    return [t.code, fmtDate(t.date), t.time, fmtDate(t.updated), t.status, t.priority, t.subject, t.preview, t.resolution, t.site, t.siteCode, t.contact, t.service, t.classification, t.assigned, t.group, t.owner, t.modifiers, t.sla, t.tags, f ? f.note : "", f ? f.tags.join(", ") : ""].map(cell).join(";");
   }
   const toCSV = (items) => "\ufeff" + [CSV_HEAD, ...items.map((t) => csvRow(t, S.favorites.get(t.key)))].join("\r\n");
   function clean(t) { const { _hay, ...rest } = t; return rest; }
@@ -1493,7 +1819,22 @@ dialog{border:1px solid var(--bd2);border-radius:12px;padding:20px;width:min(480
       const controlled = suffix in CONTROLLED;
       let value = "";
       try { value = controlled ? maskDeep(f.getValue(), keepSet) : (fieldDisplay(f) ? "(impostato)" : ""); } catch { /* */ }
-      return { suffix, cls: f.$className, xtype: f.xtype, name: f.getName ? f.getName() : f.name, label: fieldLabel(f, suffix), controlled, value, options: opts.length, sample: opts.slice(0, 20).map(([v, x]) => (controlled ? `${v}=${x}` : v)), valueField: f.valueField, displayField: f.displayField, multi: !!f.multiSelect, listeners: names(f.hasListeners) };
+      const o = { suffix, cls: f.$className, xtype: f.xtype, name: f.getName ? f.getName() : f.name, label: fieldLabel(f, suffix), controlled, value, options: opts.length, sample: opts.slice(0, 20).map(([v, x]) => (controlled ? `${v}=${x}` : v)), valueField: f.valueField, displayField: f.displayField, multi: !!f.multiSelect, listeners: names(f.hasListeners) };
+      if (PEOPLE_KEYS.has(suffix)) {
+        try {
+          let st = null;
+          try { st = typeof f.getStore === "function" ? f.getStore() : f.store || null; } catch { /* */ }
+          const raw = f.getValue();
+          Object.assign(o, {
+            people: true, lookup: canLookup(f), readOnly: !!f.readOnly, editable: f.editable, queryMode: f.queryMode, queryParam: f.queryParam, minChars: f.minChars,
+            forceSelection: f.forceSelection, valueType: Array.isArray(raw) ? "array" : raw === null ? "null" : typeof raw, valueKeys: raw && typeof raw === "object" && !Array.isArray(raw) ? Object.keys(raw).slice(0, 20) : null,
+            value: maskDeep(scalarValue(f, raw), keepSet), triggers: names(f.getTriggers ? f.getTriggers() : f.triggers),
+            store: st ? { cls: st.$className, tree: !!st.isTreeStore, count: typeof st.getCount === "function" ? st.getCount() : null, fields: (() => { try { return (st.getModel().getFields() || []).map((x) => x.name).slice(0, 30); } catch { return null; } })(), url: (() => { try { const px = st.getProxy(); return px && px.getUrl ? maskUrl(px.getUrl() || "", keepSet) : null; } catch { return null; } })() } : null,
+            methods: methodsOf(f),
+          });
+        } catch { /* */ }
+      }
+      return o;
     });
     try { t.buttons = (m.cmp && m.cmp.query ? m.cmp.query("button") : []).map((b) => textOf(String((b.getText ? b.getText() : b.text) || b.tooltip || b.itemId || ""))).filter(Boolean).slice(0, 60); } catch { /* */ }
     return t;
@@ -1508,7 +1849,8 @@ dialog{border:1px solid var(--bd2);border-radius:12px;padding:20px;width:min(480
     return {
       tool: `Ricerca TKT ${VERSION} (segnalibro)`, page: location.origin + location.pathname, at: new Date().toISOString(), ext,
       portal: { Portal: !!window.Portal, PageManager: !!(window.Portal && window.Portal.PageManager), ActivityMonitor: !!(Ext.ux && Ext.ux.ActivityMonitor), dateFormat: (Ext.Date && Ext.Date.defaultFormat) || null },
-      lists: S.modules.map((x) => ({ key: x.key, prefix: x.prefix, title: x.title, grid: !!x.grid, store: !!x.store, rendered: x.rendered })),
+      lists: S.modules.map((x) => ({ key: x.key, prefix: x.prefix, title: x.title, tab: x.tabText, body: x.bodyId, all: isAllList(x), grid: !!x.grid, store: !!x.store, rendered: x.rendered })),
+      tabs: portalTabs().map((x) => ({ text: x.text, card: x.card ? x.card.id : null, cardCls: x.card ? x.card.$className : null })),
       current: m ? moduleTech(m, keepSet) : null,
       lastSearch: conn.lastRun ? Object.assign({}, conn.lastRun, { spec: maskDeep(s, keepSet) }) : null,
       requests: conn.ext.slice(-12).map(req), xhr: conn.xhr.slice(-12).map(req), errors: conn.errors.slice(-10), settings,
@@ -1521,7 +1863,7 @@ dialog{border:1px solid var(--bd2);border-radius:12px;padding:20px;width:min(480
     let ver = "?";
     try { ver = Ext.getVersion().version; } catch { /* */ }
     lines.push(`Portale: ${location.origin}${location.pathname} · ExtJS ${ver}`);
-    lines.push(`Elenchi di ticket trovati: ${S.modules.length ? S.modules.map((x) => `${x.title || x.key}${x.store ? "" : " (senza dati)"}`).join(", ") : "nessuno — apri la scheda «All tickets»"}`);
+    lines.push(`Elenchi di ticket nella pagina: ${S.modules.length ? S.modules.map((x) => `${x.title || x.key}${isAllList(x) ? " ← usato" : ""}${x.store ? "" : " (senza dati)"}`).join(", ") : "nessuno — apri la scheda «All tickets»"}`);
     if (m) {
       const cols = gridColumns(m.grid);
       lines.push(`Elenco usato: ${m.title} · ${(() => { try { return `${fmtN(m.store.getTotalCount())} ticket con i filtri attuali, ${fmtN(m.store.getCount())} caricati`; } catch { return "—"; } })()}`);
@@ -1530,6 +1872,7 @@ dialog{border:1px solid var(--bd2);border-radius:12px;padding:20px;width:min(480
       lines.push(`Filtri della pagina gestiti: ${ff.filter((x) => x.suffix in CONTROLLED && CONTROLLED[x.suffix]).map((x) => x.suffix).join(", ") || "nessuno"}`);
       const st = comboOptions(m.field("StatusFilter"));
       lines.push(`Stati disponibili: ${st.length ? st.map(([, t]) => t).join(", ") : "—"}`);
+      lines.push(`Gruppi e persone: ${PEOPLE.map(([k, l]) => { const f = m.field(k); return `${l.replace(/ \(.*$/, "")}: ${f ? (canLookup(f) ? "ricerca" : "menu") : "assente"}`; }).join(" · ")}`);
     }
     if (conn.lastRun) {
       const r = conn.lastRun;
@@ -1551,8 +1894,8 @@ dialog{border:1px solid var(--bd2);border-radius:12px;padding:20px;width:min(480
   });
   $("#ssave").addEventListener("click", () => {
     settings.cap = CAPS.includes(+$("#s-cap").value) ? +$("#s-cap").value : 200;
-    settings.list = $("#lst").value || settings.list;
     store.set("settings", settings);
+    $("#capq").value = String(settings.cap);
     $$(".capn").forEach((x) => { x.textContent = settings.cap; });
     preview();
     toast("Impostazioni salvate");
@@ -1561,7 +1904,7 @@ dialog{border:1px solid var(--bd2);border-radius:12px;padding:20px;width:min(480
   $("#tdl").addEventListener("click", () => download("ricerca-tkt-dati-tecnici.json", JSON.stringify(techData(), null, 2), "application/json"));
   $("#pexp").addEventListener("click", () => download("ricerca-tkt-dati-personali.json", JSON.stringify({ version: VERSION, favorites: [...S.favorites.values()], saved: store.get("saved", []), history: store.get("history", []), settings }, null, 2), "application/json"));
   const str = (v, max = 2000) => (v === null || v === undefined ? "" : String(v)).slice(0, max);
-  const TKEYS = ["code", "recId", "list", "date", "time", "updated", "updTime", "subject", "preview", "resolution", "site", "siteCode", "contact", "status", "priority", "service", "classification", "assigned", "group", "sender", "sla", "tags"];
+  const TKEYS = ["code", "recId", "list", "date", "time", "updated", "updTime", "subject", "preview", "resolution", "site", "siteCode", "contact", "status", "priority", "service", "classification", "assigned", "group", "owner", "modifiers", "sender", "sla", "tags"];
   function importTicket(t, key) {
     const o = { key: str(key, 300) };
     for (const k of TKEYS) if (t[k] !== undefined && t[k] !== null) o[k] = str(t[k], k === "preview" || k === "resolution" ? 6000 : 500);
@@ -1646,13 +1989,18 @@ dialog{border:1px solid var(--bd2);border-radius:12px;padding:20px;width:min(480
     $("#st-box").hidden = $("#st").value !== "custom";
     if ($("#st").value === "custom") { $("#adv").open = true; if (!S.stCodes.size) for (const [v] of S.stOpts || []) S.stCodes.add(v); renderToggles(); }
   });
-  $("#lst").addEventListener("change", () => { S.stCodes.clear(); S.prCodes.clear(); renderToggles(); onFormChange(); });
+  $("#capq").addEventListener("change", () => {
+    settings.cap = CAPS.includes(+$("#capq").value) ? +$("#capq").value : 200;
+    store.set("settings", settings);
+    $$(".capn").forEach((x) => { x.textContent = settings.cap; });
+    preview();
+  });
   $$("[data-sel]").forEach((b) => b.addEventListener("click", () => {
     const what = b.dataset.sel.split(":")[1];
     S.stCodes = new Set((S.stOpts || []).filter(([, t]) => what === "all" || (what === "open" && !CLOSED_RE.test(t)) || (what === "closed" && CLOSED_RE.test(t))).map(([v]) => v));
     renderToggles(); onFormChange();
   }));
-  $("#qreset").addEventListener("click", () => { applySpec({ list: $("#lst").value }); $("#q").focus(); });
+  $("#qreset").addEventListener("click", () => { applySpec({ people: {} }); $("#q").focus(); });
   $("#qsave").addEventListener("click", () => { const s = spec(); $("#sname").value = s.text || s.subject || ""; $("#dsave").showModal(); $("#sname").select(); });
   $("#stop").addEventListener("click", () => S.abort && S.abort.abort());
   $("#qrestore").addEventListener("click", async () => {
@@ -1677,8 +2025,10 @@ dialog{border:1px solid var(--bd2);border-radius:12px;padding:20px;width:min(480
 
   function show() {
     host.style.display = ""; document.documentElement.style.overflow = "hidden"; if (document.body) document.body.inert = true;
-    renderModules(); renderToggles(); previewNow();
+    renderToggles(); previewNow();
+    $("#capq").value = String(settings.cap);
     if (!$("#tab-settings").hidden) renderSettings();
+    if (!currentModule() && allTab()) { ensureAllTickets().then(() => { renderToggles(); preview(); }); previewNow(); }
     activity(true);
     setTimeout(() => $("#q").focus(), 0);
   }
@@ -1712,7 +2062,7 @@ dialog{border:1px solid var(--bd2);border-radius:12px;padding:20px;width:min(480
   updateFavCount();
   refreshHistList();
   show();
-  if (!S.modules.some((m) => m.store)) toast("Nessun elenco di ticket trovato: apri la scheda «All tickets» del portale e riapri il segnalibro");
+  if (!currentModule() && !allTab()) toast("Non trovo l'elenco «All tickets» del portale: aprilo una volta dalla barra delle schede e riapri il segnalibro");
 
   } catch (err) {
     try { console.error("Ricerca TKT", err); } catch { /* */ }

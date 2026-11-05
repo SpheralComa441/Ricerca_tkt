@@ -15,6 +15,7 @@ non è noto, quindi è configurabile per provare il segnalibro in tutti i casi:
     ?apply=enter  solo premendo Invio in un campo di testo; i valori vengono letti in quel momento
     ?apply=none   nessuna applicazione automatica: i valori vengono letti a ogni caricamento
     ?tab=all      si apre direttamente sulla scheda All tickets (altrimenti sulla Home)
+    ?lazy=1       l'elenco All tickets viene creato solo alla prima apertura della scheda
     ?ostile=1     la pagina ridefinisce Set, Map, Array.from e Intl e contiene già il segnalibro
 
 ExtJS (GPL) non è nel repository: vedi il README per scaricarlo in bookmarklet/test/vendor/.
@@ -63,6 +64,11 @@ SERVICES: list[tuple[str, str]] = []
 for _i, (_tip, _prod) in enumerate((t, p) for t in ("Informazione", "Anomalia", "Richiesta") for p in PRODUCT_NAMES.values()):
     SERVICES.append((f"SV{_i + 1}", f"{_tip} / {_prod}"))
 SERVICE_IDS = {text: code for code, text in SERVICES}
+# persone e gruppi inventati (codici come quelli del portale: utenti e gruppi)
+USERS = [(f"U{i + 1:03d}", name) for i, name in enumerate(demo_engine.OPERATORI)]
+USER_CODES = {name: code for code, name in USERS}
+GROUPS = [(f"G{i + 1}", name) for i, name in enumerate(demo_engine.GRUPPI)]
+GROUP_CODES = {name: code for code, name in GROUPS}
 
 
 def norm(s: str) -> str:
@@ -107,7 +113,10 @@ def data() -> list[dict]:
                     "TicketPriorityText": dict(PRIORITIES)[PRIO_MAP.get(d.priorita, "P3")],
                     "ServiceID": SERVICE_IDS.get(service, ""), "ServiceText": service,
                     "CatalogItemText": f"{d.classificazione} / {d.argomento}",
-                    "AssignedTo": d.operatore, "OwnerGroup": d.gruppo, "Tags": "normativa" if rng.random() < 0.1 else "",
+                    "AssignedTo": d.operatore, "AssignedCode": USER_CODES[d.operatore],
+                    "OwnerGroup": d.gruppo, "GroupCode": GROUP_CODES[d.gruppo],
+                    "ModifiedByText": ", ".join(d.op_part), "_modifiers": sorted(USER_CODES[o] for o in d.op_part),
+                    "Tags": "normativa" if rng.random() < 0.1 else "",
                     "Sla": rng.choice(["", "OK", "In scadenza", "Scaduto"]),
                     "_hay": norm(" ".join([d.subject, d.text, d.azienda, f"{d.number + 3_000_000}Z"])),
                 })
@@ -154,6 +163,14 @@ def apply_filters(rows: list[dict], filters: list[dict]) -> list[dict]:
             out = [r for r in out if norm(str(v)) in norm(r["CatalogItemText"])]
         elif name == "AccountID":
             out = [r for r in out if r["AccountCode"] == v]
+        elif name == "AssignedUserOrGroupID":
+            out = [r for r in out if v in (r["AssignedCode"], r["GroupCode"])]
+        elif name == "OwnerUserGroupID":
+            out = [r for r in out if r["GroupCode"] == v]
+        elif name == "OwnerUserID":
+            out = [r for r in out if r["AssignedCode"] == v]
+        elif name == "ModifiedBy":
+            out = [r for r in out if v in r["_modifiers"]]
     return out
 
 
@@ -168,7 +185,7 @@ __BM__
 <script>
 window.__opened = []; window.__activity = 0;
 window.Portal = { Const: { LoggedUser: { Name: "Utente di prova" } }, PageManager: {}, MessageBus: {} };
-var CFG = { apply: "__APPLY__", tab: "__TAB__", statuses: __STATUSES__, open: __OPEN__, priorities: __PRIORITIES__, services: __SERVICES__ };
+var CFG = { apply: "__APPLY__", tab: "__TAB__", lazy: __LAZY__, statuses: __STATUSES__, open: __OPEN__, priorities: __PRIORITIES__, services: __SERVICES__, users: __USERS__, groups: __GROUPS__ };
 Ext.onReady(function () {
   Ext.ns("Ext.ux");
   Ext.ux.ActivityMonitor = { lastActive: new Date(), captureActivity: function () { this.lastActive = new Date(); window.__activity++; } };
@@ -177,7 +194,7 @@ Ext.onReady(function () {
   Ext.define("Fake.Ticket", { extend: "Ext.data.Model", idProperty: "RecId", fields: [
     { name: "RecId", type: "int" }, "TicketCode", { name: "Date", type: "date", dateFormat: "MS" }, { name: "LastChange", type: "date", dateFormat: "MS" },
     "Subject", "Description", "Resolution", "AccountName", "AccountCode", "ContactName", "TicketStatusID", "TicketStatusText",
-    "TicketPriorityID", "TicketPriorityText", "ServiceID", "ServiceText", "CatalogItemText", "AssignedTo", "OwnerGroup", "Tags", "Sla"] });
+    "TicketPriorityID", "TicketPriorityText", "ServiceID", "ServiceText", "CatalogItemText", "AssignedTo", "AssignedCode", "OwnerGroup", "GroupCode", "ModifiedByText", "Tags", "Sla"] });
   var enc = Ext.String.htmlEncode;
   function multi(a, b) { return '<div class="list-cell"><div class="list-cell-multitext"><div class="text-default">' + enc(a || "") + '</div><div class="text-caption">' + enc(b || "") + "</div></div></div>"; }
   function dt(v) { return v ? '<div class="list-cell list-cell-datetime"><div class="list-cell-multitext"><div class="text-datetime-date">' + Ext.Date.format(v, "n/j/Y") + '</div><div class="text-datetime-time">' + Ext.Date.format(v, "g:i a") + "</div></div></div>" : ""; }
@@ -207,6 +224,17 @@ Ext.onReady(function () {
     combo("StatusFilter", "TicketStatusID", "Status", CFG.statuses, true, defaultStatuses);
     combo("PriorityFilter", "TicketPriorityID", "Priority", CFG.priorities, true, null);
     combo("ServiceFilter", "ServiceID", "Service", CFG.services, false, null);
+    // come sul portale: "Assigned to" e "Owner Group" con menu a scelta (non digitabili),
+    // "Resource Owner" e "Modified by" con ricerca sul server mentre si scrive
+    combo("AssignedUserOrGroupFilter", "AssignedUserOrGroupID", "Assigned to", CFG.groups.map(function (g) { return [g[0], "[Gruppo] " + g[1]]; }).concat(CFG.users), false, null);
+    combo("OwnerUserGroupID", "OwnerUserGroupID", "Owner Group", CFG.groups, false, null);
+    function lookup(id, name, label) {
+      return fld({ xclass: "Ext.form.field.ComboBox", id: P + "filter_default_" + id, name: name, fieldLabel: label, queryMode: "remote", minChars: 2,
+        queryParam: "query", valueField: "value", displayField: "text", forceSelection: true, typeAhead: false, hideTrigger: false,
+        store: Ext.create("Ext.data.Store", { fields: ["value", "text"], proxy: { type: "ajax", url: "/HDAPortal/Lookup/Users", reader: { type: "json", rootProperty: "data" } } }) });
+    }
+    lookup("OwnerUserID", "OwnerUserID", "Resource Owner");
+    lookup("ModifiedBy", "ModifiedBy", "Modified by");
     fld({ id: P + "filter_default_CatalogItemTxt", name: "CTITM.TranslatedDescription", fieldLabel: "Classification (txt)" });
     fld({ id: P + "filter_default_ClassCliTxt", name: "CLASSCLI.TranslatedDescription", fieldLabel: "Client Classification(txt)" });
 
@@ -221,7 +249,7 @@ Ext.onReady(function () {
       });
       return Ext.encode(out);
     }
-    var store = Ext.create("Ext.data.Store", { model: "Fake.Ticket", pageSize: 50, remoteSort: true, autoLoad: key === "INC_ALLGRP_EXTENDED",
+    var store = Ext.create("Ext.data.Store", { model: "Fake.Ticket", pageSize: 50, remoteSort: true, autoLoad: key === "INC_ALLGRP_EXTENDED" || key === "INC_MYGRP",
       sorters: [{ property: "Date", direction: "DESC" }],
       proxy: { type: "ajax", url: "/HDAPortal/List/GetData?list=" + key, actionMethods: { read: "POST" }, extraParams: { filters: collect() },
         reader: { type: "json", rootProperty: "data", totalProperty: "total" } } });
@@ -254,6 +282,7 @@ Ext.onReady(function () {
         { id: P + "c26_21", text: "Last update", dataIndex: "LastChange", width: 110, renderer: dt },
         { id: P + "c29_23", text: "SLA", dataIndex: "Sla", width: 80, sortable: false },
         { id: P + "c38_19", text: "Resource Owner", dataIndex: "AssignedTo", hidden: true, sortable: false },
+        { id: P + "c33_22", text: "Modified by", dataIndex: "ModifiedByText", hidden: true, sortable: false },
         { id: P + "c23_29", text: "Tags", dataIndex: "Tags", width: 100, sortable: false }
       ],
       listeners: { itemdblclick: function (v, r) { openTicket(r.get("TicketCode"), r.get("Subject")); } },
@@ -278,11 +307,16 @@ Ext.onReady(function () {
       items: [{ xtype: "panel", id: P + "mainFiltersPanel", items: [{ xtype: "panel", id: P + "filterArea_default", cls: "filter-area", layout: "column", items: fields }] }, grid] });
   }
   var mine = makeModule("id5e1f0c2a9b7d3e48", "MYTKT", CFG.open);
-  var all = makeModule("id0a9c7e5b3d1f2468", "INC_ALLGRP_EXTENDED", CFG.open);
+  var grp = makeModule("id7c3b1a9e5d2f4061", "DEFGRP", CFG.open);
+  var from = makeModule("id2f6e8d0c4b1a3957", "INC_MYGRP", CFG.open);
+  var allBody = { title: "All tickets", id: "body_INC_ALLGRP_EXTENDED", layout: "fit", items: CFG.lazy ? [] : [makeModule("id0a9c7e5b3d1f2468", "INC_ALLGRP_EXTENDED", CFG.open)] };
+  if (CFG.lazy) allBody.listeners = { activate: function (b) { if (!b.items.getCount()) setTimeout(function () { b.add(makeModule("id0a9c7e5b3d1f2468", "INC_ALLGRP_EXTENDED", CFG.open)); }, 400); } };
   tabs = Ext.create("Ext.tab.Panel", { id: "navbar", items: [
     { title: "Home", id: "body_Home", html: "<h2 style='margin:16px'>Home (finta)</h2>" },
     { title: "My tickets", id: "body_MYTKT", layout: "fit", items: [mine] },
-    { title: "All tickets", id: "body_INC_ALLGRP_EXTENDED", layout: "fit", items: [all] }
+    { title: "My Group Tickets", id: "body_DEFGRP", layout: "fit", items: [grp] },
+    { title: "Tickets from my groups", id: "body_INC_MYGRP", layout: "fit", items: [from] },
+    allBody
   ] });
   Ext.create("Ext.container.Viewport", { layout: "fit", items: [tabs] });
   if (CFG.tab === "all") tabs.setActiveTab("body_INC_ALLGRP_EXTENDED");
@@ -300,7 +334,7 @@ window.Intl = { NumberFormat: function(){ throw new Error("Intl ridefinito"); } 
 
 
 @app.get("/HDAPortal/")
-async def portal(apply: str = "auto", tab: str = "home", ostile: int = 0):
+async def portal(apply: str = "auto", tab: str = "home", ostile: int = 0, lazy: int = 0):
     if apply not in ("auto", "enter", "none"):
         apply = "auto"
     bm = ""
@@ -310,6 +344,7 @@ async def portal(apply: str = "auto", tab: str = "home", ostile: int = 0):
     page = (PAGE.replace("__APPLY__", apply).replace("__TAB__", "all" if tab == "all" else "home")
             .replace("__STATUSES__", json.dumps(STATUSES)).replace("__OPEN__", json.dumps(OPEN_DEFAULT))
             .replace("__PRIORITIES__", json.dumps(PRIORITIES)).replace("__SERVICES__", json.dumps(SERVICES))
+            .replace("__USERS__", json.dumps(USERS)).replace("__GROUPS__", json.dumps(GROUPS)).replace("__LAZY__", "true" if lazy else "false")
             .replace("__TOKEN__", TOKEN).replace("__HOSTILE__", HOSTILE if ostile else "").replace("__BM__", bm))
     r = HTMLResponse(page)
     r.set_cookie("ASP.NET_SessionId", "ok", path="/")
@@ -349,6 +384,9 @@ async def list_data(request: Request, list_name: str = Query("", alias="list")):
     rows = apply_filters(data(), filters)
     if list_name == "MYTKT":
         rows = [r for r in rows if r["AssignedTo"] == demo_engine.OPERATORI[0]]
+    elif list_name in ("DEFGRP", "INC_MYGRP"):
+        # elenchi limitati ai gruppi dell'utente e, come visto sul portale, all'anno in corso
+        rows = [r for r in rows if r["GroupCode"] in ("G1", "G2") and r["Date"].year == date.today().year]
     try:
         sorters = json.loads(params.get("sort") or "[]")
     except ValueError:
@@ -361,6 +399,16 @@ async def list_data(request: Request, list_name: str = Query("", alias="list")):
     limit = max(1, min(MAX_LIMIT, int(params.get("limit") or 50)))
     entry["total"] = len(rows)
     return JSONResponse({"success": True, "total": len(rows), "data": [to_json(r) for r in rows[start:start + limit]]})
+
+
+@app.get("/HDAPortal/Lookup/Users")
+async def lookup_users(request: Request, query: str = ""):
+    denied = _auth(request)
+    if denied:
+        return denied
+    q = norm(query)
+    LOG.append({"lookup": query})
+    return {"data": [{"value": c, "text": n} for c, n in USERS if q and q in norm(n)][:20]}
 
 
 @app.post("/HDAPortal/Ticket/Find")

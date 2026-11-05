@@ -22,9 +22,9 @@ raggruppamenti sui risultati, esportazione, preferiti con note e ricerche salvat
 2. Trascina il pulsante **Ricerca TKT** nella barra dei preferiti
    (<kbd>Ctrl</kbd>+<kbd>Maiusc</kbd>+<kbd>B</kbd> per mostrarla). Se avevi la versione 1,
    sostituisci il vecchio segnalibro.
-3. Accedi al portale ticket, apri almeno una volta la scheda **All tickets** e clicca il
-   segnalibro: il motore di ricerca si apre sopra la pagina. <kbd>Esc</kbd> lo chiude, un altro
-   clic sul segnalibro lo riapre.
+3. Accedi al portale ticket e clicca il segnalibro: il motore di ricerca si apre sopra la pagina
+   (se la scheda **All tickets** non è mai stata aperta, la apre lui). <kbd>Esc</kbd> lo chiude,
+   un altro clic sul segnalibro lo riapre.
 
 In alternativa si può incollare il contenuto di
 [`bookmarklet/dist/ricerca-tkt.min.js`](bookmarklet/dist/ricerca-tkt.min.js)
@@ -35,24 +35,39 @@ nella console del browser (F12 → Console) sulla pagina del portale.
 Il portale è un'applicazione ExtJS. Il segnalibro viene eseguito dentro la pagina, quindi usa la
 sessione dell'utente (e il token anti-falsificazione del portale) senza gestire password o cookie:
 
-- trova l'elenco **All tickets** (`<id>_UC_ListCt`, classe `entity-incident`), la sua griglia
-  (`<id>_UC_grd`) e il suo archivio dati ExtJS;
+- cerca sempre in **tutti i ticket**: trova l'elenco **All tickets** (`<id>_UC_ListCt`, classe
+  `entity-incident`, nel pannello `body_INC_ALLGRP_EXTENDED` o nella scheda "All tickets"), la sua
+  griglia (`<id>_UC_grd`) e il suo archivio dati ExtJS; se la scheda non è mai stata aperta la apre;
 - a ogni ricerca imposta i filtri dell'elenco (`<id>_UC_filter_default_FullText`, `Subject`,
   `DateFromFilter`/`DateToFilter`, `LastUpdateDate…`, `StatusFilter`, `PriorityFilter`,
-  `CatalogItemTxt`, `ClassCliTxt`) e chiede al massimo 200 righe (si cambia in Impostazioni);
+  `CatalogItemTxt`, `ClassCliTxt` e i filtri di gruppi e persone `AssignedUserOrGroupFilter`,
+  `OwnerUserGroupID`, `ModifiedBy`, `OwnerUserID`) e chiede al massimo 200 righe (si cambia dalla
+  barra di ricerca o in Impostazioni);
 - aspetta che il portale ricarichi l'elenco da solo; se non lo fa preme Invio nel campo
-  *Search* e, come ultima possibilità, ricarica l'archivio dell'elenco;
+  *Search* e, come ultima possibilità, ricarica l'archivio dell'elenco; il modo che ha funzionato
+  viene ricordato per le ricerche successive;
 - legge i ticket dall'archivio, usando le colonne della griglia (ID, Date, Site, Subject con il
   riepilogo *Issue/Request* e *Resolution*, Status, Priority, Service, Classification,
   Assigned to, Owner Group, Last update…), anche per le righe che la griglia non ha disegnato;
 - controlla che la richiesta inviata dal portale contenga il testo cercato e avvisa se no.
 
 Lo stato predefinito è **tutti gli stati** (la pagina del portale di solito mostra solo quelli
-aperti). Gli altri filtri impostati nella pagina (Servizio, Sede, Contatto, Assegnato a…) restano
+aperti). Il portale ordina per data, quindi arrivano i ticket **più recenti**: quando ce ne sono di
+più, **Quanti per anno?** conta i ticket della ricerca anno per anno (una richiesta per anno, solo
+fino a coprire il totale) e con un clic si cerca in un anno solo.
+
+**Gruppi e persone** (*Assegnato a* persona o gruppo, *Gruppo proprietario*, *Modificato da* cioè
+chi ha lavorato il ticket, *Responsabile*) sono filtri del portale, quindi valgono su tutti i
+ticket: i nomi si cercano direttamente dal pannello con la ricerca del portale, oppure con
+**Scegli nel portale…** si usa il menu del portale (il pannello si nasconde e si riapre dopo la
+scelta). Restano nelle ricerche salvate. Sui risultati ci sono anche le faccette per gruppo,
+assegnatario, responsabile e "modificato da".
+
+Gli altri filtri impostati nella pagina (Servizio, Sede, Contatto…) restano
 attivi e sono mostrati nel pannello. Dopo una ricerca l'elenco del portale mostra la stessa
 ricerca: **Ripristina il portale** rimette i filtri e le righe per pagina di prima. **Apri** su un
 risultato apre il ticket con il pulsante *Open* della pagina; se il ticket non è più nell'elenco
-(ad esempio un preferito) apre *Find by ID…* già compilato.
+(ad esempio un preferito) usa *Find by ID…*, compilato e confermato.
 
 Il pannello è isolato in uno *shadow DOM*: non modifica il portale e non ne eredita gli stili; la
 pagina sotto resta inattiva finché il pannello è aperto, e il controllo di inattività del portale
@@ -75,9 +90,11 @@ cd bookmarklet && npm i --no-save esbuild@0.24.0 && node build.mjs
 ```
 
 La prova completa usa un finto portale con ExtJS vero (versione GPL, non inclusa nel
-repository) e dati inventati: stessa struttura dell'elenco All tickets, token anti-falsificazione
-obbligatorio, filtri applicati in tre modi diversi (`?apply=auto|enter|none`), pulsanti *Open* e
-*Find by ID…*. Scarica ExtJS una volta:
+repository) e dati inventati: stesse schede del portale (My tickets, My Group Tickets, Tickets
+from my groups, All tickets, anche creata solo alla prima apertura con `?lazy=1`), token
+anti-falsificazione obbligatorio, filtri applicati in tre modi diversi (`?apply=auto|enter|none`),
+filtri di gruppi e persone (menu e ricerca sul server), pulsanti *Open* e *Find by ID…*.
+Scarica ExtJS una volta:
 
 ```bash
 mkdir -p bookmarklet/test/vendor && cd bookmarklet/test/vendor && npm pack extjs-gpl@6.2.0 && tar -xzf extjs-gpl-6.2.0.tgz package/build/ext-all.js package/build/classic/theme-triton/resources && rm extjs-gpl-6.2.0.tgz
@@ -100,13 +117,16 @@ node bookmarklet/test/e2e.js
 - Data di apertura con preimpostazioni (ultimi 30 giorni, 3/6/12 mesi, anno corrente, anno
   scorso, 2 o 5 anni) e data di ultimo aggiornamento.
 - Stato: tutti, aperti, chiusi e risolti, scelti a mano o come nella pagina; priorità.
-- Elenco del portale in cui cercare (All tickets, My tickets…).
+- Gruppi e persone: assegnato a (persona o gruppo), gruppo proprietario, modificato da,
+  responsabile.
+- Sempre su tutti i ticket (elenco All tickets); conteggio per anno con ricerca nel singolo anno.
 - Sui risultati ricevuti: parole da escludere e verifica che compaiano tutte le parole.
 - Quando il portale ha più ticket del massimo compare un avviso con il totale e un pulsante per
   caricare i successivi.
 
 **Sui risultati**: filtro istantaneo (parole, `-esclusioni`, `"frasi"`), faccette per stato,
-priorità, servizio, gruppo, assegnatario, sede, anno, mese ed etichette, ordinamento per data di
+priorità, gruppo, assegnatario, responsabile, modificato da, servizio, sede, anno, mese ed
+etichette, ordinamento per data di
 apertura o di aggiornamento, ID, oggetto o stato, raggruppamento, selezione multipla,
 esportazione CSV (Excel) e JSON, copia degli ID, tutte le colonne della griglia per ogni ticket,
 apertura del ticket nel portale.
