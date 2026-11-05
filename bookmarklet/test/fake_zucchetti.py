@@ -9,8 +9,10 @@ motore demo con il limite di 210 risultati.
 """
 from __future__ import annotations
 
+import html
 import json
 import threading
+from pathlib import Path
 
 from fastapi import FastAPI, Request
 from fastapi.responses import HTMLResponse, JSONResponse, PlainTextResponse, Response
@@ -33,7 +35,17 @@ def index() -> demo_engine.DemoIndex:
         return _index
 
 
+# Come nella pagina reale: controls.js di SitePainter definisce una funzione globale Set(name)
+# e MooTools ridefinisce Array.from. Altre ridefinizioni simulate per prudenza.
+HOSTILE = """<script>
+function Set(name){ return window["Set_" + name](); }
+window.Map = function(){ throw new Error("Map ridefinita dalla pagina"); };
+Array.from = function(item){ return item == null ? [] : (typeof item.length == "number" && typeof item != "string") ? Array.prototype.slice.call(item) : [item]; };
+window.Intl = { NumberFormat: function(){ throw new Error("Intl ridefinito"); } };
+</script>"""
+
 SEARCH_PAGE = """<!doctype html><html><head><meta charset="utf-8"><title>Ricerca rapida (finta)</title>
+__HOSTILE__
 <script>
 (function(){
   function VC(v){ this.v = v; } VC.prototype.Value = function(x){ if (arguments.length) this.v = x; return this.v; };
@@ -70,9 +82,18 @@ FILTERS_FORM = """<!doctype html><html><body><form id="filtri">
 </form></body></html>"""
 
 
+BOOKMARKLET = Path(__file__).resolve().parent.parent / "dist" / "bookmarklet.txt"
+
+
 @app.get("/areariservata/jsp/gspv_psearch.jsp")
-async def search_page():
-    r = HTMLResponse(SEARCH_PAGE.replace("__MCID__", MCID))
+async def search_page(ostile: int = 0):
+    """Con ?ostile=1 la pagina ridefinisce Set, Map, Array.from e Intl come le pagine reali
+    e contiene già il link del segnalibro (il test lo clicca senza eseguire codice nella pagina)."""
+    page = SEARCH_PAGE.replace("__MCID__", MCID).replace("__HOSTILE__", HOSTILE if ostile else "")
+    if ostile:
+        href = html.escape(BOOKMARKLET.read_text(encoding="utf-8").strip(), quote=True)
+        page = page.replace("<body>", f'<body><a id="__bm" href="{href}">Ricerca TKT</a>', 1)
+    r = HTMLResponse(page)
     r.set_cookie("JSESSIONID", "ok", path="/areariservata")
     return r
 

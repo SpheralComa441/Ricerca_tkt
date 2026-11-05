@@ -45,6 +45,34 @@ const txt = (page, sel) => page.locator(sel).first().innerText();
   page.on("pageerror", (e) => errors.push("pageerror: " + e.message));
   page.on("console", (m) => { if (m.type() === "error") errors.push(m.text()); });
 
+  // ---- pagina "ostile" come quella reale (Set, Map, Array.from, Intl ridefiniti) -------------
+  // Qui non si esegue codice di test nella pagina (le ridefinizioni rompono anche quello):
+  // solo clic e localizzatori, che girano in un contesto separato.
+  {
+    const hp = await ctx.newPage();
+    const herr = [];
+    hp.on("pageerror", (e) => herr.push(e.message));
+    let dialog = "";
+    hp.on("dialog", async (d) => { dialog = d.message(); await d.dismiss(); });
+    await hp.goto(BASE + "/areariservata/jsp/gspv_psearch.jsp?ostile=1");
+    await hp.click("#__bm");
+    const opened = await hp.locator("#q").waitFor({ state: "visible", timeout: 5000 }).then(() => true, () => false);
+    check(opened, `si apre anche se la pagina ridefinisce Set/Map/Array.from/Intl ${dialog ? "(" + dialog.slice(0, 120) + ")" : ""}`);
+    if (opened) {
+      await hp.fill("#q", "detassazione");
+      await hp.click("#go");
+      await hp.locator("#prog").waitFor({ state: "hidden", timeout: 20000 });
+      check((await hp.locator(".res").count()) === 50, "ricerca e risultati sulla pagina ostile");
+      await hp.click("#f-year li:first-child button");
+      check((await hp.locator("#sum").innerText()).includes("dopo i filtri"), "faccette sulla pagina ostile");
+      await hp.click(".res .ib[aria-pressed]");
+      check((await hp.locator("#fav-count").innerText()) === "1", "preferiti sulla pagina ostile");
+      await hp.click(".res .ib[aria-pressed]");
+    }
+    check(herr.length === 0, `nessun errore sulla pagina ostile ${herr.length ? JSON.stringify(herr) : ""}`);
+    await hp.close();
+  }
+
   // ---- pagina di ricerca con il portlet -------------------------------------------------
   await page.goto(BASE + "/areariservata/jsp/gspv_psearch.jsp");
   await resetLog(page);

@@ -11,8 +11,43 @@
 (() => {
   "use strict";
   const NS = "__RicercaTKT__";
-  const VERSION = "1.0.0";
+  const VERSION = "1.0.1";
   if (window[NS]) { window[NS].toggle(); return; }
+  try {
+
+  // ===================================================================== funzioni native
+  // Le pagine Zucchetti (controls.js, MooTools) ridefiniscono alcune funzioni globali del
+  // browser, ad esempio Set. Usiamo quelle originali, prese da un riquadro nascosto e pulito.
+  const PRISTINE = (() => {
+    let fw = null;
+    const frameWin = () => {
+      if (!fw) {
+        const f = document.createElement("iframe");
+        f.id = "ricerca-tkt-realm";
+        f.setAttribute("aria-hidden", "true");
+        f.tabIndex = -1;
+        f.style.cssText = "display:none!important";
+        document.documentElement.appendChild(f);
+        fw = f.contentWindow;
+      }
+      return fw;
+    };
+    const isNative = (v) => {
+      try { return typeof v === "function" && /\{\s*\[native code\]\s*\}\s*$/.test(frameWin().Function.prototype.toString.call(v)); } catch { return false; }
+    };
+    const pick = (name) => (isNative(window[name]) ? window[name] : frameWin()[name]);
+    const nativeFetch = isNative(window.fetch);
+    return {
+      Set: pick("Set"), Map: pick("Map"), URL: pick("URL"), URLSearchParams: pick("URLSearchParams"),
+      DOMParser: pick("DOMParser"), Blob: pick("Blob"), AbortController: pick("AbortController"),
+      DOMException: pick("DOMException"), Promise: pick("Promise"),
+      Intl: frameWin().Intl,
+      JSON: window.JSON && isNative(window.JSON.parse) && isNative(window.JSON.stringify) ? window.JSON : frameWin().JSON,
+      fetch: nativeFetch ? (...a) => window.fetch(...a) : (...a) => frameWin().fetch(...a),
+    };
+  })();
+  // eslint-disable-next-line no-shadow
+  const { Set, Map, URL, URLSearchParams, DOMParser, Blob, AbortController, DOMException, Promise, Intl, JSON, fetch } = PRISTINE;
 
   // ===================================================================== ambiente
   function findRoot() {
@@ -748,7 +783,7 @@ dialog{border:1px solid var(--bd2);border-radius:12px;padding:20px;width:min(480
   root.appendChild(tpl.content);
   document.documentElement.appendChild(host);
   const $ = (s) => root.querySelector(s);
-  const $$ = (s) => Array.from(root.querySelectorAll(s));
+  const $$ = (s) => [...root.querySelectorAll(s)];
   const prevOverflow = document.documentElement.style.overflow;
   document.documentElement.style.overflow = "hidden";
 
@@ -1357,4 +1392,9 @@ dialog{border:1px solid var(--bd2);border-radius:12px;padding:20px;width:min(480
   updateFavCount();
   refreshHistList();
   show();
+
+  } catch (err) {
+    try { console.error("Ricerca TKT", err); } catch { /* */ }
+    alert(`Ricerca TKT non è riuscito ad avviarsi su questa pagina.\n\n${err && err.stack ? err.stack.split("\n").slice(0, 3).join("\n") : err}\n\nCopia questo messaggio e invialo per la correzione.`);
+  }
 })();
