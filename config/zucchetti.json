@@ -1,0 +1,97 @@
+{
+  "_info": "Configurazione del connettore verso l'Area Riservata Zucchetti (Infinity / SitePainter + Solr). Vedi README, sezione 'Configurazione del connettore'.",
+
+  "base_url": "https://www.zucchetti.it/areariservata/",
+  "user_agent": "Mozilla/5.0 (X11; Linux x86_64) RicercaTKT/1.0",
+  "verify_tls": true,
+
+  "login": {
+    "_info": "Il login segue il form della pagina 'entry_page' (qualsiasi form con un campo password). Se non trova un form usa 'fallback_action' con i campi standard SitePainter.",
+    "entry_page": "",
+    "fallback_action": "servlet/cp_login",
+    "username_field": "m_cUserName",
+    "password_field": "m_cPassword",
+    "extra_fields": { "m_cAction": "login" },
+    "check_page": "jsp/gspv_psearch.jsp?m_cWindowName=main",
+    "logged_in_markers": ["ZtVWeb", "spsl_"],
+    "logout_url": "servlet/cp_login?m_cAction=logout"
+  },
+
+  "search": {
+    "_info": "Routine Solr usata dal portlet spsl_wsolrresultsgrid (splResults.Link()).",
+    "endpoint": "servlet/spsl_fquery_mc",
+    "method": "POST",
+    "m_cID": "1ef51ea72b7e79d713e5b1b42030dfa2",
+    "m_cID_sources": [
+      "jsp/spsl_wsolrresultsgrid_portlet.jsp",
+      "jsp/gspv_psearch.jsp?m_cWindowName=main"
+    ],
+    "m_cID_regex": "splResults\\.m_cID\\s*=\\s*'([0-9a-fA-F]{16,64})'",
+    "params": {
+      "pKeyword": "{query}",
+      "pArea": "{area}",
+      "pCore": "{core}",
+      "pLangs": "{langs}",
+      "cs_SITE": ""
+    },
+    "extra_params": {},
+    "extra_headers": { "X-Requested-With": "XMLHttpRequest" },
+    "default_core": "TICKET",
+    "default_area": "",
+    "default_langs": "",
+    "result_cap": 210,
+    "timeout_seconds": 60,
+    "max_concurrency": 3,
+    "min_interval_ms": 200
+  },
+
+  "parse": {
+    "_info": "La colonna 'description' dei risultati ha la forma: [#8900042] [PAGHEW] [21-04-2026] oggetto",
+    "title_field": "description",
+    "snippet_field": "altDescription",
+    "id_field": "id",
+    "url_field": "url1",
+    "title_regex": "^\\s*\\[#(?P<number>\\d+)\\]\\s*\\[(?P<product>[^\\]]*)\\]\\s*\\[(?P<date>\\d{1,2}-\\d{1,2}-\\d{4})\\]\\s*(?P<subject>.*)$",
+    "date_format": "%d-%m-%Y",
+    "link_base": "https://www.zucchetti.it/areariservata/jsp/",
+    "ticket_url_template": null
+  },
+
+  "strategies": {
+    "_info": "date: 'phrase' = filtra il periodo cercando la data mostrata nel titolo (es. \"04-2026\"); 'field' = usa fields.date.solr; 'none' = solo filtro locale. number/product: 'term' = cerca il codice come parola; 'field' = usa il campo Solr mappato.",
+    "date": "phrase",
+    "month_phrase": "{mm}-{yyyy}",
+    "day_phrase": "{dd}-{mm}-{yyyy}",
+    "number": "term",
+    "product": "term",
+    "max_exclusions": 800
+  },
+
+  "extended": {
+    "earliest_year": 2010,
+    "max_requests_hard_limit": 200,
+    "default_max_requests": 40
+  },
+
+  "fields": {
+    "_info": "Nome del campo Solr per ogni filtro. null = filtro non ancora mappato (disattivato nell'interfaccia). Per scoprire i nomi esatti vedi README.",
+    "number":                 { "label": "Numero ticket", "group": "core", "kind": "number", "solr": null },
+    "subject":                { "label": "Oggetto", "group": "core", "kind": "text", "solr": null },
+    "text":                   { "label": "Testo", "group": "core", "kind": "text", "solr": null },
+    "date":                   { "label": "Data", "group": "core", "kind": "date", "solr": null, "format": "solr" },
+    "product":                { "label": "Prodotto", "group": "core", "kind": "code", "solr": null },
+    "centro_servizi":         { "label": "Centro servizi", "group": "riepilogo", "kind": "string", "solr": null },
+    "stato":                  { "label": "Stato tickets", "group": "riepilogo", "kind": "string", "solr": null },
+    "stato_base":             { "label": "Stato base", "group": "riepilogo", "kind": "string", "solr": null },
+    "priorita":               { "label": "Priorità", "group": "riepilogo", "kind": "string", "solr": null },
+    "tipologia":              { "label": "Tipologia", "group": "riepilogo", "kind": "string", "solr": null },
+    "gruppo":                 { "label": "Gruppo", "hint": "Gruppo di assistenza che ha in carico il ticket", "group": "riepilogo", "kind": "string", "solr": null },
+    "operatore":              { "label": "Operatore", "hint": "Operatore di assistenza che ha in carico il ticket", "group": "riepilogo", "kind": "string", "solr": null },
+    "azienda":                { "label": "Azienda", "group": "riepilogo", "kind": "string", "solr": null },
+    "persona":                { "label": "Persona", "hint": "Persona dell'azienda richiedente", "group": "riepilogo", "kind": "string", "solr": null },
+    "operatore_partecipante": { "label": "Operatore partecipante", "hint": "Operatore che ha partecipato al ticket", "group": "riepilogo", "kind": "string", "solr": null },
+    "gruppo_partecipante":    { "label": "Gruppo partecipante", "hint": "Gruppo di assistenza che ha partecipato al ticket", "group": "riepilogo", "kind": "string", "solr": null },
+    "classificazione":        { "label": "Classificazione", "group": "riepilogo", "kind": "string", "solr": null },
+    "argomento":              { "label": "Argomento", "group": "riepilogo", "kind": "string", "solr": null }
+  }
+}
