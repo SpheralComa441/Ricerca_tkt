@@ -161,6 +161,8 @@ class Doc:
     subject_tokens: list
     text_tokens: list
     all_tokens: list
+    censer: str = ""       # codice del centro servizi (come IdCenSer nell'indice reale)
+    stato_code: str = ""   # codice dello stato (come nel modulo Filtri: CLOSE, OPEN, 00005...)
 
     @property
     def date_str(self) -> str:
@@ -226,7 +228,15 @@ def generate(n: int = 40000, seed: int = 42, today: Optional[date] = None) -> li
             title_tokens=t_tok, subject_tokens=s_tok, text_tokens=x_tok,
             all_tokens=t_tok + s_tok + x_tok,
         ))
+    for d in docs:
+        d.censer = CENSER_CODES.get(d.centro, "")
+        d.stato_code = STATO_CODES.get(d.stato, "")
     return docs
+
+
+CENSER_CODES = {"[HR] Paghe Infinity": "PAOW", "[HR] Presenze": "PRES", "[HR] Portale dipendente": "PORT"}
+STATO_CODES = {"Chiuso": "CLOSE", "Risolto": "00008", "In lavorazione": "00005", "Aperto": "OPEN",
+               "In attesa cliente": "00006", "Sospeso": "00007"}
 
 
 # ---------------------------------------------------------------------------
@@ -311,8 +321,8 @@ def lex(q: str) -> list[Tok]:
         if j < n and q[j] == ":":
             buf.append(":"); j += 1  # due punti non di campo: parte del termine
             word = "".join(buf)
-        if word in ("AND", "OR", "NOT"):
-            toks.append(Tok(word)); i = j; continue
+        if word.upper() in ("AND", "OR", "NOT") and not buf[:1] == ["\\"]:
+            toks.append(Tok(word.upper())); i = j; continue
         mod = None
         m = re.search(r"~(\d+)?$", word)
         if m and not word.endswith("\\~"):
@@ -414,6 +424,10 @@ DEMO_FIELDS = {
     "TKGRUPPO": "gruppo", "TKOPERATORE": "operatore", "TKAZIENDA": "azienda",
     "TKPERSONA": "persona", "TKOPPART": "op_part", "TKGRPPART": "gr_part",
     "TKCLASSIF": "classificazione", "TKARGOMENTO": "argomento", "TKCENTRO": "centro",
+    # nomi dei campi dell'indice reale (visti nelle ricerche della pagina Zucchetti)
+    "TESTI": "text", "OGGETTO": "subject", "IDCENSER": "censer", "IDMESEM": "mese", "IDANNOM": "anno",
+    # nome inventato per il finto sito di prova (il nome reale si impara dalla pagina)
+    "IDSTATO": "stato_code",
 }
 
 
@@ -544,6 +558,13 @@ class DemoIndex:
             except ValueError:
                 return set()
             return {doc.idx for doc in self.docs if doc.date == d}
+        if key in ("mese", "anno"):
+            try:
+                n = int(value)
+            except ValueError:
+                return set()
+            attr = "month" if key == "mese" else "year"
+            return {doc.idx for doc in self.docs if getattr(doc.date, attr) == n}
         # campi "stringa"
         needle = value.lower()
         wild = "*" in needle or "?" in needle

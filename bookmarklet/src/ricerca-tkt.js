@@ -11,7 +11,7 @@
 (() => {
   "use strict";
   const NS = "__RicercaTKT__";
-  const VERSION = "1.0.3";
+  const VERSION = "1.1.0";
   if (window[NS]) { window[NS].toggle(); return; }
   try {
 
@@ -115,15 +115,26 @@
     ["gruppo_partecipante", "Gruppo partecipante", "", "Gruppo di assistenza che ha partecipato al ticket"],
     ["classificazione", "Classificazione"], ["argomento", "Argomento"],
   ].map(([key, label, group, hint]) => ({ key, label, group: group || "riepilogo", hint: hint || "" }));
-  // Lingua "ITA" come la ricerca veloce della testata Zucchetti (pLangs=g_UserLang): con pLangs
-  // vuoto la routine risponde {"errors":["TICKET"]} e nessun risultato.
-  const DEFAULT_SETTINGS = { v: 2, core: "TICKET", area: "", langs: "ITA", mapping: {}, cap: 210, earliestYear: 2010 };
+  // Parametri e campi come nella ricerca reale della pagina (scheda Filtri → Risultati):
+  //   pKeyword=IdCenSer:PAOW and ((IdMeseM:9 and IdAnnoM:2026) or ...) and (Testi:("x") or Oggetto:("x"))
+  //   pArea=TICKOPEXXX  pCore=  pLangs=ITA  cs_SITE=
+  // Con pArea vuoto e pCore=TICKET la routine risponde {"errors":["TICKET"]}.
+  const INFINITY_MAPPING = { text: "Testi", subject: "Oggetto", centro_servizi: "IdCenSer" };
+  const DEFAULT_SETTINGS = {
+    v: 3, core: "", area: "TICKOPEXXX", langs: "ITA", cenSer: "", mapping: Object.assign({}, INFINITY_MAPPING),
+    dateRefs: { 1: { m: "IdMeseM", y: "IdAnnoM" } }, options: {}, cap: 210, earliestYear: 2010,
+  };
   const storedSettings = store.get("settings", {}) || {};
   const settings = Object.assign({}, DEFAULT_SETTINGS, storedSettings);
   settings.mapping = Object.assign({}, settings.mapping || {});
-  if (!(storedSettings.v >= 2) && Object.keys(storedSettings).length) {
+  settings.dateRefs = Object.assign({}, DEFAULT_SETTINGS.dateRefs, settings.dateRefs || {});
+  settings.options = Object.assign({}, settings.options || {});
+  if (!(storedSettings.v >= 3) && Object.keys(storedSettings).length) {
     if (!settings.langs) settings.langs = "ITA";
-    settings.v = 2;
+    if (settings.core === "TICKET") settings.core = "";
+    if (!settings.area) settings.area = "TICKOPEXXX";
+    settings.mapping = Object.assign({}, INFINITY_MAPPING, settings.mapping);
+    settings.v = 3;
     store.set("settings", settings);
   }
   const TITLE_RE = /^\s*\[#(\d+)\]\s*\[([^\]]*)\]\s*\[(\d{1,2})-(\d{1,2})-(\d{4})\]\s*/;
@@ -182,8 +193,28 @@
   }
   function fieldValue(v) {
     v = v.trim();
+    if (/^[A-Za-z0-9_.]+$/.test(v)) return v; // codici (PAOW, CLOSE, 00005) come li scrive la pagina
     if (/[*?]/.test(v)) return v.replace(/([+\-&|!(){}[\]^"~:\\/])/g, "\\$1").replace(/ /g, "\\ ");
     return quotePhrase(v);
+  }
+  /** Applica un'espressione ai campi di testo (Testi, Oggetto) come fa la pagina. */
+  function onText(expr, scope) {
+    const tf = solrField("text"), sf = solrField("subject");
+    const fs = (scope === "subject" ? [sf] : scope === "text" ? [tf] : [tf, sf]).filter(Boolean);
+    if (!fs.length) return expr;
+    return fs.length === 1 ? `${fs[0]}:(${expr})` : "(" + fs.map((f) => `${f}:(${expr})`).join(" OR ") + ")";
+  }
+  function monthYearClause(a, b, mf, yf) {
+    if (a.y > b.y || (a.y === b.y && a.m > b.m)) throw new QueryError("La data iniziale è successiva a quella finale (o alla data di oggi).");
+    const parts = [];
+    let y = a.y, m = a.m;
+    while (y < b.y || (y === b.y && m <= b.m)) {
+      if (m === 1 && (y < b.y || b.m === 12)) { parts.push(`${yf}:${y}`); y++; continue; }
+      parts.push(`(${mf}:${m} AND ${yf}:${y})`);
+      if (++m > 12) { m = 1; y++; }
+      if (parts.length > 2000) break;
+    }
+    return orGroup(parts);
   }
   const pad = (n, w = 2) => String(n).padStart(w, "0");
   const lastDay = (y, m) => new Date(Date.UTC(y, m, 0)).getUTCDate(); // m = 1..12
@@ -243,48 +274,48 @@
     const negatives = [];
     const warnings = [];
     const post = { from: null, to: null, numbers: [], ranges: [], pin: [], pout: [] };
+    let criteria = 0;
+    // centro servizi: obbligatorio nella pagina Zucchetti
+    const csf = solrField("centro_servizi");
+    const cs = String((s.fields || {}).centro_servizi || settings.cenSer || "").trim();
+    if (csf && cs) clauses.push(`${csf}:${fieldValue(cs)}`);
     const text = (s.text || "").trim();
     let tc = null;
     if (text) {
-      if (s.mode === "solr") tc = text;
-      else if (s.mode === "phrase") tc = quotePhrase(text.replace(/"/g, " ")) + (s.proximity ? `~${s.proximity}` : "");
+      if (s.mode === "solr") tc = /(^|[\s(+\-!])[A-Za-z_][\w.]*:/.test(text) ? text : onText(text, s.scope);
+      else if (s.mode === "phrase") tc = onText(quotePhrase(text.replace(/"/g, " ")) + (s.proximity ? `~${s.proximity}` : ""), s.scope);
       else {
-        const parts = splitUserText(text).map(([k, v]) => (k === "phrase" ? quotePhrase(v) : termClause(v, s.prefix, s.fuzzy)));
+        const parts = splitUserText(text).map(([k, v]) => onText(k === "phrase" ? quotePhrase(v) : termClause(v, s.prefix, s.fuzzy), s.scope));
         if (parts.length) tc = parts.join(s.mode === "all" ? " AND " : " OR ");
       }
     }
     if ((s.phrase || "").trim()) {
-      const p = quotePhrase(s.phrase.replace(/"/g, " "));
+      const p = onText(quotePhrase(s.phrase.replace(/"/g, " ")), s.scope);
       tc = tc ? `(${tc}) AND ${p}` : p;
     }
-    if (tc) {
-      const sf = s.scope === "subject" ? solrField("subject") : s.scope === "text" ? solrField("text") : null;
-      if (s.scope !== "all" && !sf) warnings.push("Il campo per 'Cerca in' non è mappato (Impostazioni): la ricerca è su tutti i campi.");
-      clauses.push(sf ? `${sf}:(${tc})` : tc);
-    }
+    if (tc) { clauses.push(tc); criteria++; }
     const excl = splitUserText(s.exclude).map(([k, v]) => (k === "phrase" ? quotePhrase(v) : escapeTerm(v)));
-    if (excl.length) negatives.push(`NOT ${orGroup(excl)}`);
+    if (excl.length) { negatives.push(`NOT ${onText(orGroup(excl), s.scope)}`); criteria++; }
 
     const { singles, ranges } = parseNumbers(s.numbers);
     if (singles.length || ranges.length) {
       post.numbers = singles; post.ranges = ranges;
       const nf = solrField("number");
-      if (nf) clauses.push(`${nf}:${orGroup([...singles.map(String), ...ranges.map(([a, b]) => `[${a} TO ${b}]`)])}`);
-      else {
-        if (singles.length && !ranges.length) clauses.push(orGroup(singles.map(String)));
-        if (ranges.length) warnings.push("Gli intervalli di numeri ticket sono applicati solo ai risultati restituiti (campo 'Numero ticket' non mappato).");
-      }
+      if (nf) { clauses.push(`${nf}:${orGroup([...singles.map(String), ...ranges.map(([a, b]) => `[${a} TO ${b}]`)])}`); criteria++; }
+      else warnings.push("Numero ticket: il campo non è ancora noto, quindi il filtro è applicato solo ai risultati ricevuti. Per attivarlo fai una volta, dalla pagina Zucchetti, una ricerca con il numero ticket compilato.");
     }
     const pf = solrField("product");
     if (s.products_in.length) {
       post.pin = s.products_in.slice();
-      clauses.push(pf ? `${pf}:${orGroup(s.products_in.map(quotePhrase))}` : orGroup(s.products_in.map(escapeTerm)));
+      if (pf) { clauses.push(`${pf}:${orGroup(s.products_in.map(fieldValue))}`); criteria++; }
+      else warnings.push("Prodotto: il campo non è ancora noto, quindi il filtro è applicato solo ai risultati ricevuti. Per attivarlo fai una volta, dalla pagina Zucchetti, una ricerca con il prodotto compilato.");
     }
     if (s.products_out.length) {
       post.pout = s.products_out.slice();
-      if (pf) negatives.push(`NOT ${pf}:${orGroup(s.products_out.map(quotePhrase))}`);
+      if (pf) negatives.push(`NOT ${pf}:${orGroup(s.products_out.map(fieldValue))}`);
     }
     for (const [key, raw] of Object.entries(s.fields || {})) {
+      if (key === "centro_servizi") continue;
       const fname = solrField(key);
       const def = FIELD_DEFS.find((f) => f.key === key);
       if (!def) continue;
@@ -295,15 +326,20 @@
         if (!v) continue;
         if ((v[0] === "-" || v[0] === "!") && v.length > 1) neg.push(v.slice(1).trim()); else pos.push(v);
       }
-      if (pos.length) clauses.push(`${fname}:${orGroup(pos.map(fieldValue))}`);
-      if (neg.length) negatives.push(`NOT ${fname}:${orGroup(neg.map(fieldValue))}`);
+      if (pos.length) { clauses.push(`${fname}:${orGroup(pos.map(fieldValue))}`); criteria++; }
+      if (neg.length) { negatives.push(`NOT ${fname}:${orGroup(neg.map(fieldValue))}`); criteria++; }
     }
     const from = parseISO(s.date_from), to = parseISO(s.date_to);
     for (const d of [from, to]) if (d && (d.y < 1900 || d.y > 2100)) throw new QueryError("Anno non valido: scrivi l'anno con 4 cifre (es. 2024).");
     if (from && to && cmpDate(from, to) > 0) throw new QueryError("La data iniziale è successiva a quella finale");
     if (from || to) {
+      criteria++;
+      const ref = settings.dateRefs[s.date_ref || 1] || settings.dateRefs[1];
       const df = solrField("date");
-      if (df) {
+      if (ref && ref.m && ref.y) {
+        const t = todayParts();
+        clauses.push(monthYearClause(from ? { y: from.y, m: from.m } : { y: settings.earliestYear, m: 1 }, to ? { y: to.y, m: to.m } : { y: t.y, m: t.m }, ref.m, ref.y));
+      } else if (df) {
         const lo = from ? `${from.y}-${pad(from.m)}-${pad(from.d)}T00:00:00Z` : "*";
         const hi = to ? `${to.y}-${pad(to.m)}-${pad(to.d)}T23:59:59Z` : "*";
         clauses.push(`${df}:[${lo} TO ${hi}]`);
@@ -312,6 +348,10 @@
         post.from = s.date_from || null; post.to = s.date_to || null;
       }
     }
+    if (!criteria && (post.numbers.length || post.ranges.length || post.pin.length)) {
+      throw new QueryError("Numeri ticket e prodotti non sono ancora cercabili da soli: aggiungi un testo o un periodo (vedi l'avviso sotto la query).");
+    }
+    if (!criteria) throw new QueryError("Inserisci almeno un criterio di ricerca.");
     if (!clauses.length && !negatives.length) {
       if (post.ranges.length) throw new QueryError("Gli intervalli di numeri ticket vanno combinati con un testo o un altro criterio (campo 'Numero ticket' non mappato).");
       throw new QueryError("Inserisci almeno un criterio di ricerca.");
@@ -491,6 +531,70 @@
       Object.defineProperty(proto, "__rtktObserved", { value: true });
     } catch { /* finestra non accessibile */ }
   }
+  // ---- modulo "Filtri" della pagina (iframe gspv_winf_search): opzioni e campi Solr -----------
+  // nome della variabile del modulo (w_<nome>, select <nome>) -> filtro di Ricerca TKT
+  const FORM_VARS = {
+    CentroServizi: "centro_servizi", StatoDett: "stato", StatoBase: "stato_base", Priorita: "priorita",
+    Tipologia: "tipologia", Gruppo: "gruppo", GruppoP: "gruppo_partecipante", FiltroOperatore: "operatore",
+    FiltroAzienda: "azienda", FiltroPersona: "persona", FiltroPersPart: "operatore_partecipante",
+    FiltroArgomento: "argomento", Classificazione: "classificazione", Codric: "product", NumIni: "number",
+  };
+  const SELECTS = { CentroServizi: "centro_servizi", StatoDett: "stato", StatoBase: "stato_base", Priorita: "priorita", Tipologia: "tipologia", Gruppo: "gruppo", GruppoP: "gruppo_partecipante", DataRiferimento: "data_rif" };
+  const RESERVED_FIELDS = /^(Testi|Oggetto|IdMese\w*|IdAnno\w*)$/;
+  function filterWindow() {
+    for (const w of sameOriginWindows(window, 0, [])) {
+      try {
+        const fr = w.document.querySelector("iframe[name=gspv_winf_search], iframe[id$=gspv_winf_search]");
+        if (fr && fr.contentWindow && fr.contentDocument) return fr.contentWindow;
+      } catch { /* */ }
+      try { if (/gspv_winf_search/.test(w.location.pathname)) return w; } catch { /* */ }
+    }
+    return null;
+  }
+  const escRe = (x) => x.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  function readFilterOptions() {
+    const fw = filterWindow();
+    if (!fw) return false;
+    let changed = false;
+    for (const [name, key] of Object.entries(SELECTS)) {
+      try {
+        const sel = fw.document.querySelector(`select[name="${name}"]`);
+        if (!sel) continue;
+        const opts = [...sel.options].map((o) => [String(o.value).trim(), String(o.text).replace(/\s+/g, " ").trim()]).filter(([v]) => v !== "");
+        if (opts.length && JSON.stringify(settings.options[key]) !== JSON.stringify(opts)) { settings.options[key] = opts; changed = true; }
+      } catch { /* */ }
+    }
+    if (!settings.cenSer && settings.options.centro_servizi && settings.options.centro_servizi.length === 1) { settings.cenSer = settings.options.centro_servizi[0][0]; changed = true; }
+    if (changed) store.set("settings", settings);
+    return changed;
+  }
+  /** Dopo una ricerca della pagina: confronta i valori del modulo Filtri con la query per imparare i nomi dei campi. */
+  function learnFromPageSearch(kw) {
+    const learned = [];
+    const fw = filterWindow();
+    if (fw) {
+      for (const [name, key] of Object.entries(FORM_VARS)) {
+        let val;
+        try { val = fw["w_" + name]; } catch { continue; }
+        if (val === undefined || val === null) continue;
+        val = String(val).trim();
+        if (val.length < 2 || val === "0") continue;
+        const m = new RegExp(`([A-Za-z_][\\w.]*)\\s*:\\s*[(\\[{"']*\\s*${escRe(val)}(?![\\w])`, "i").exec(kw);
+        if (m && !RESERVED_FIELDS.test(m[1]) && settings.mapping[key] !== m[1]) { settings.mapping[key] = m[1]; learned.push(key); }
+      }
+      try {
+        const ref = String(fw.w_DataRiferimento ?? "").trim();
+        const mm = /\b(IdMese\w*)\s*:/.exec(kw), ym = /\b(IdAnno\w*)\s*:/.exec(kw);
+        if (ref && mm && ym) settings.dateRefs[ref] = { m: mm[1], y: ym[1] };
+      } catch { /* */ }
+    }
+    const cs = new RegExp(`\\b${escRe(settings.mapping.centro_servizi || "IdCenSer")}\\s*:\\s*"?([A-Za-z0-9_.]+)`).exec(kw);
+    if (cs) settings.cenSer = cs[1];
+    readFilterOptions();
+    store.set("settings", settings);
+    return learned;
+  }
+
   function pageSearchSeen(r) {
     const p = requestParams(r);
     const kw = p.pKeyword || "";
@@ -498,12 +602,52 @@
     conn.pageRequests.length = Math.min(conn.pageRequests.length, 10);
     for (const m of kw.matchAll(/(^|[\s(+\-!])([A-Za-z_][A-Za-z0-9_.]*):/g)) conn.seenFields.add(m[2]);
     store.set("seenFields", [...conn.seenFields]);
-    store.set("pageParams", { pArea: p.pArea ?? null, pLangs: p.pLangs ?? null, pCore: p.pCore ?? null, at: r.at });
-    if (kw && !conn.template && conn.found) learnTemplate(r, kw);
-    if (conn.onPageSearch) try { conn.onPageSearch(p); } catch { /* */ }
+    store.set("pageParams", { pArea: p.pArea ?? null, pLangs: p.pLangs ?? null, pCore: p.pCore ?? null, at: r.at, kw });
+    // la ricerca della pagina è il riferimento: stessi parametri e stessa richiesta
+    if (p.pArea !== undefined) settings.area = p.pArea;
+    if (p.pCore !== undefined) settings.core = p.pCore;
+    if (p.pLangs !== undefined) settings.langs = p.pLangs;
+    if (kw) learnTemplate(r, kw, true);
+    const learned = kw ? learnFromPageSearch(kw) : [];
+    store.set("settings", settings);
+    if (conn.onPageSearch) try { conn.onPageSearch(p, learned); } catch { /* */ }
   }
   for (const w of sameOriginWindows(window, 0, [])) observeWindow(w);
   conn.found = findPortlet();
+  readFilterOptions();
+  // Ricerca fatta dalla pagina prima di aprire il segnalibro: il portlet dei risultati ne conserva
+  // query, area e lingue (e il modulo Filtri i valori scelti), quindi la si usa come se osservata.
+  try {
+    const g = conn.found && conn.found.kind === "grid" ? conn.found.p : null;
+    const kw = g && g.userInput && typeof g.userInput.Value === "function" ? String(g.userInput.Value() || "") : "";
+    const pp = store.get("pageParams", null);
+    if (kw && /[A-Za-z_][\w.]*\s*:/.test(kw)) {
+      const body = new URLSearchParams();
+      body.set("pKeyword", kw);
+      body.set("pArea", String(g.area && g.area.Value ? g.area.Value() : ""));
+      body.set("pCore", "");
+      body.set("pLangs", String(g.langs && g.langs.Value ? g.langs.Value() : ""));
+      body.set("cs_SITE", "");
+      if (g.splResults && g.splResults.m_cID) body.set("m_cID", String(g.splResults.m_cID));
+      if (!(pp && pp.kw === kw)) {
+        pageSearchSeen({ method: "POST", url: ROOT + "servlet/spsl_fquery_mc", base: location.href, at: new Date().toISOString(), body: body.toString(), headers: { "Content-Type": "application/x-www-form-urlencoded" } });
+      } else learnTemplate({ method: "POST", url: ROOT + "servlet/spsl_fquery_mc", base: location.href, body: body.toString(), headers: { "Content-Type": "application/x-www-form-urlencoded" } }, kw, true);
+    }
+  } catch { /* */ }
+  // sorgenti degli script del modulo Filtri, per i dati tecnici (costruzione della query della pagina)
+  conn.filterScripts = {};
+  (async () => {
+    try {
+      const fw = filterWindow();
+      if (!fw) return;
+      for (const sc of fw.document.querySelectorAll("script[src]")) {
+        const src = sc.getAttribute("src") || "";
+        if (!/sipv_ffilters|gspv_winf_search_proc|gspv_fcheck|sipv_fgruppi/i.test(src)) continue;
+        const url = new URL(src, fw.location.href).href;
+        try { const res = await fetch(url, { credentials: "same-origin" }); conn.filterScripts[src] = (await res.text()).slice(0, 80000); } catch { /* */ }
+      }
+    } catch { /* */ }
+  })();
 
   function pageLang() {
     for (const w of sameOriginWindows(window, 0, [])) {
@@ -529,21 +673,24 @@
     return { reqs, restore() { proto.open = o; proto.send = s; proto.setRequestHeader = h; } };
   }
 
-  function learnTemplate(req, q) {
+  function learnTemplate(req, q, fromPage) {
     let url;
-    try { url = new URL(req.url, conn.found.w.location.href); } catch { return; }
+    try { url = new URL(req.url, req.base || (conn.found && conn.found.w.location.href) || location.href); } catch { return; }
     const body = req.body && req.body.includes("=") ? new URLSearchParams(req.body) : new URLSearchParams();
     const where = [...body.entries()].some(([, v]) => v === q) ? "body" : [...url.searchParams.entries()].some(([, v]) => v === q) ? "query" : null;
     if (!where) return;
     const params = where === "body" ? body : url.searchParams;
     const kw = [...params.entries()].find(([, v]) => v === q)[0];
-    conn.template = { method: req.method, url: url.href, body: req.body || "", headers: req.headers, where, kw, kind: conn.found.kind };
-    const mc = (where === "body" ? body : url.searchParams).get("m_cID") || url.searchParams.get("m_cID");
+    // una richiesta osservata dalla pagina non viene sostituita da una del portlet
+    if (conn.template && conn.template.fromPage && !fromPage) return;
+    conn.template = { method: req.method, url: url.href, body: req.body || "", headers: req.headers || {}, where, kw, fromPage: !!fromPage };
+    conn.templateOk = true;
+    const mc = params.get("m_cID") || url.searchParams.get("m_cID");
     if (mc) conn.mcid = mc;
   }
 
   function nativeCall(q, opt) {
-    const { p, w, kind } = conn.found;
+    const { p, w } = conn.found;
     const restores = [];
     const set = (name, value) => {
       const c = p[name];
@@ -552,26 +699,32 @@
       c.Value(value);
       restores.push(() => { try { c.Value(old); } catch { /* */ } });
     };
-    if (kind === "grid") { set("userInput", q); set("area", opt.area); set("pCore", opt.core); set("langs", opt.langs); }
-    else { set("input", q); set("pCore", opt.core); if (opt.langs) set("g_UserLang", opt.langs); }
+    set("userInput", q); set("area", opt.area); set("pCore", opt.core); set("langs", opt.langs);
     const cap = captureXHR(w);
     let raw;
     conn.inNative = true;
     try { raw = p.splResults.Link(); } finally { conn.inNative = false; cap.restore(); restores.reverse().forEach((r) => r()); }
     const req = cap.reqs.find((r) => /spsl_fquery_mc/i.test(r.url)) || cap.reqs[cap.reqs.length - 1];
-    if (req) { conn.lastRequest = req; learnTemplate(req, q); }
+    if (req) { req.base = w.location.href; conn.lastRequest = req; learnTemplate(req, q, false); }
     conn.mode = "native";
     return typeof raw === "string" ? raw : JSON.stringify(raw);
+  }
+
+  // parametri inviati sempre, come nella ricerca della pagina
+  function applyParams(params, q, opt, kwName) {
+    params.set(kwName || "pKeyword", q);
+    params.set("pArea", opt.area);
+    params.set("pCore", opt.core);
+    params.set("pLangs", opt.langs);
+    if (!params.has("cs_SITE")) params.set("cs_SITE", "");
   }
 
   async function templateCall(q, opt, signal) {
     const t = conn.template;
     const url = new URL(t.url);
     const params = t.where === "body" ? new URLSearchParams(t.body) : url.searchParams;
-    params.set(t.kw, q);
-    if (params.has("pCore")) params.set("pCore", opt.core);
-    if (params.has("pArea")) params.set("pArea", opt.area);
-    if (params.has("pLangs") && (t.kind === "grid" || opt.langs)) params.set("pLangs", opt.langs);
+    applyParams(params, q, opt, t.kw);
+    if (conn.mcid && params.has("m_cID")) params.set("m_cID", conn.mcid);
     const headers = Object.assign({}, t.headers);
     const init = { method: t.method, credentials: "same-origin", headers, signal };
     if (t.where === "body") init.body = params.toString();
@@ -585,6 +738,7 @@
 
   async function discoverMcid() {
     if (conn.mcid) return conn.mcid;
+    try { const m = conn.found && conn.found.p.splResults.m_cID; if (/^[0-9a-f]{16,64}$/i.test(m || "")) { conn.mcid = m; return m; } } catch { /* */ }
     for (const src of ["jsp/spsl_wsolrresultsgrid_portlet.jsp", "jsp/spsl_wfast_search_portlet.jsp"]) {
       try {
         const r = await fetch(ROOT + src, { credentials: "same-origin" });
@@ -598,11 +752,13 @@
 
   async function directCall(q, opt, signal) {
     const mcid = await discoverMcid();
-    const body = new URLSearchParams({ m_cID: mcid, pKeyword: q, pArea: opt.area, pCore: opt.core, pLangs: opt.langs, cs_SITE: "" });
+    const body = new URLSearchParams();
+    applyParams(body, q, opt, "pKeyword");
+    body.set("m_cID", mcid);
     const url = ROOT + "servlet/spsl_fquery_mc";
-    const headers = { "Content-Type": "application/x-www-form-urlencoded; charset=UTF-8", "X-Requested-With": "XMLHttpRequest" };
+    const headers = { "Content-Type": "application/x-www-form-urlencoded" };
     conn.lastRequest = { method: "POST", url, body: body.toString(), headers };
-    const res = await fetch(url, { method: "POST", body, headers, credentials: "same-origin", signal });
+    const res = await fetch(url, { method: "POST", body: body.toString(), headers, credentials: "same-origin", signal });
     if (!res.ok) throw new Error(`Zucchetti ha risposto con errore HTTP ${res.status}`);
     conn.mode = "direct";
     return res.text();
@@ -612,7 +768,7 @@
 
   /**
    * Una richiesta per ricerca; solo se Zucchetti risponde con un errore e nessun risultato se ne fa
-   * una seconda con parametri alternativi (quelli dell'ultima ricerca della pagina, o lingua ITA),
+   * una seconda con i parametri dell'ultima ricerca della pagina (o quelli predefiniti della pagina),
    * che vengono poi memorizzati.
    */
   async function zSearchWithFallback(q, opt, signal) {
@@ -620,9 +776,8 @@
     if (r.rawCount || !r.errors.length) return r;
     const pp = store.get("pageParams", null);
     const cands = [];
-    if (pp && (pp.pLangs !== null || pp.pArea !== null)) cands.push({ core: pp.pCore || opt.core, area: pp.pArea ?? opt.area, langs: pp.pLangs ?? opt.langs });
-    const pl = pageLang() || "ITA";
-    cands.push({ core: opt.core, area: opt.area, langs: pl });
+    if (pp && (pp.pLangs !== null || pp.pArea !== null)) cands.push({ core: pp.pCore ?? opt.core, area: pp.pArea ?? opt.area, langs: pp.pLangs ?? opt.langs });
+    cands.push({ core: "", area: "TICKOPEXXX", langs: pageLang() || "ITA" });
     const alt = cands.find((c) => c.core !== opt.core || c.area !== opt.area || c.langs !== opt.langs);
     if (!alt) return r;
     const r2 = await zSearch(q, alt, signal);
@@ -635,19 +790,20 @@
     return r;
   }
 
-  /** Una sola richiesta: prima il modello appreso, poi il portlet della pagina, poi la chiamata diretta. */
+  /** Una sola richiesta: la richiesta appresa dalla pagina, altrimenti il portlet dei risultati, altrimenti la chiamata diretta. */
   async function zSearch(q, opt, signal) {
-    if (!conn.found) conn.found = findPortlet();
+    const f = findPortlet();
+    if (f) conn.found = f;
     let raw;
     const ascii = /^[\x20-\x7e]*$/.test(q);
-    if (conn.template && conn.templateOk && ascii) {
+    if (conn.template && conn.templateOk && (ascii || !(conn.found && conn.found.kind === "grid"))) {
       raw = await templateCall(q, opt, signal);
       try { const r = parseResponse(raw); conn.lastRaw = raw; return r; } catch (e) {
         conn.templateOk = false;
-        if (!conn.found) throw e;
+        if (!(conn.found && conn.found.kind === "grid")) { conn.lastRaw = raw; throw e; }
       }
     }
-    if (conn.found) {
+    if (conn.found && conn.found.kind === "grid") {
       await nextFrame(); // lascia disegnare "Ricerca in corso…" (la chiamata della pagina è sincrona)
       if (signal && signal.aborted) throw new DOMException("interrotta", "AbortError");
       raw = nativeCall(q, opt);
@@ -800,6 +956,7 @@ dialog{border:1px solid var(--bd2);border-radius:12px;padding:20px;width:min(480
       <fieldset><legend>Testo</legend>
        <label class="fld">Escludi parole<input id="exclude" placeholder='es. storno "cassa integrazione"'></label>
        <label class="fld">Deve contenere la frase<input id="phrase" placeholder="es. premio di risultato"></label>
+       <label class="fld">Periodo riferito a<select id="dateref"></select></label>
        <label class="fld">Cerca in<select id="scope"><option value="all">Testo e oggetto</option><option value="subject">Solo oggetto</option><option value="text">Solo testo</option></select></label>
        <label class="fld">Distanza massima tra le parole (frase esatta)<input id="prox" type="number" min="0" max="50" value="0"></label>
        <label class="ck"><input type="checkbox" id="prefix"> Corrispondenza parziale (detass… trova detassazione)</label>
@@ -813,7 +970,7 @@ dialog{border:1px solid var(--bd2);border-radius:12px;padding:20px;width:min(480
        <label class="fld">Lingue<input id="langs"></label>
       </fieldset>
       <fieldset class="full"><legend>Filtri su dati di riepilogo tickets</legend><div class="fg" id="rie"></div>
-       <p class="mu sm" style="margin:0">Più valori separati da virgola; anteponi <code>-</code> per escludere; <code>*</code> come jolly. I campi "non mappati" si attivano da Impostazioni.</p></fieldset>
+       <p class="mu sm" style="margin:0">Più valori separati da virgola; anteponi <code>-</code> per escludere; <code>*</code> come jolly. I filtri "da imparare" si attivano da soli dopo una ricerca fatta dalla pagina Zucchetti con quel filtro impostato.</p></fieldset>
      </div>
     </details>
     <div class="qp"><span class="mu sm">Query Solr</span><code id="qprev" class="mono"></code>
@@ -938,13 +1095,34 @@ dialog{border:1px solid var(--bd2);border-radius:12px;padding:20px;width:min(480
 
   // ===================================================================== form
   function renderFieldInputs() {
+    const prevVals = {};
+    for (const i of $$("#rie [data-f]")) prevVals[i.dataset.f] = i.value;
     const grid = clear($("#rie"));
     for (const f of FIELD_DEFS.filter((x) => x.group === "riepilogo")) {
       const on = !!solrField(f.key);
-      const prev = (S.fieldValues || {})[f.key] || "";
-      const inp = h("input", { "data-f": f.key, placeholder: f.hint, disabled: !on, title: on ? f.hint || f.label : "Campo non mappato: configuralo in Impostazioni" });
+      const prev = prevVals[f.key] ?? (S.fieldValues || {})[f.key] ?? "";
+      const off = "Si attiva da solo dopo che hai fatto, dalla pagina Zucchetti, una ricerca con questo filtro impostato (oppure da Impostazioni, Mappatura).";
+      const opts = settings.options[f.key];
+      let inp;
+      if (opts && opts.length) {
+        const first = f.key === "centro_servizi" && settings.cenSer
+          ? `Predefinito: ${(opts.find(([v]) => v === settings.cenSer) || [settings.cenSer, settings.cenSer])[1]}`
+          : "Tutti";
+        inp = h("select", { "data-f": f.key, disabled: !on, title: on ? f.hint || f.label : off },
+          h("option", { value: "" }, first), opts.map(([v, l]) => h("option", { value: v }, l)));
+      } else {
+        inp = h("input", { "data-f": f.key, placeholder: f.key === "centro_servizi" && settings.cenSer ? `Predefinito: ${settings.cenSer}` : f.hint, disabled: !on, title: on ? f.hint || f.label : off });
+      }
       inp.value = prev;
-      grid.appendChild(h("label", { class: "fld" }, h("span", null, f.label, on ? null : h("span", { class: "off mu", text: "non mappato" })), inp));
+      grid.appendChild(h("label", { class: "fld" }, h("span", null, f.label, on ? null : h("span", { class: "off mu", text: "da imparare" })), inp));
+    }
+    const dr = $("#dateref");
+    if (dr) {
+      const cur = dr.value || "1";
+      clear(dr);
+      const labels = settings.options.data_rif && settings.options.data_rif.length ? settings.options.data_rif : [["1", "Data ultimo aggiornamento"], ["2", "Data di apertura"]];
+      for (const [v, l] of labels) dr.appendChild(h("option", { value: v, disabled: !settings.dateRefs[v] }, l + (settings.dateRefs[v] ? "" : " (da imparare)")));
+      dr.value = settings.dateRefs[cur] ? cur : "1";
     }
     for (const o of $$("#scope option")) {
       const off = (o.value === "subject" && !solrField("subject")) || (o.value === "text" && !solrField("text"));
@@ -981,14 +1159,14 @@ dialog{border:1px solid var(--bd2);border-radius:12px;padding:20px;width:min(480
   }
   function spec() {
     const fields = {};
-    for (const i of $$("#rie input")) if (!i.disabled && i.value.trim()) fields[i.dataset.f] = i.value.trim();
+    for (const i of $$("#rie [data-f]")) if (!i.disabled && i.value.trim()) fields[i.dataset.f] = i.value.trim();
     let text = $("#q").value.trim();
     let numbers = $("#numbers").value.trim();
     if (S.mode !== "solr" && /^#\s*\d+(\s*[,;\s]\s*#?\s*\d+)*$/.test(text)) { numbers = [numbers, text.replace(/#/g, "")].filter(Boolean).join(", "); text = ""; }
     return {
       text, mode: S.mode, exclude: $("#exclude").value.trim(), phrase: $("#phrase").value.trim(),
       proximity: Math.max(0, Math.min(50, parseInt($("#prox").value, 10) || 0)), prefix: $("#prefix").checked, fuzzy: $("#fuzzy").checked,
-      scope: $("#scope").value, numbers, date_from: $("#dfrom").value || null, date_to: $("#dto").value || null,
+      scope: $("#scope").value, numbers, date_from: $("#dfrom").value || null, date_to: $("#dto").value || null, date_ref: $("#dateref").value || "1",
       products_in: chipsIn.values(), products_out: chipsOut.values(), fields,
       core: $("#core").value.trim(), area: $("#area").value.trim(), langs: $("#langs").value.trim(),
     };
@@ -1000,7 +1178,8 @@ dialog{border:1px solid var(--bd2);border-radius:12px;padding:20px;width:min(480
     $("#numbers").value = s.numbers || ""; $("#dfrom").value = s.date_from || ""; $("#dto").value = s.date_to || "";
     $("#preset").value = s.date_from || s.date_to ? "custom" : "";
     chipsIn.set(s.products_in); chipsOut.set(s.products_out);
-    for (const i of $$("#rie input")) i.value = (s.fields || {})[i.dataset.f] || "";
+    for (const i of $$("#rie [data-f]")) i.value = (s.fields || {})[i.dataset.f] || "";
+    if (s.date_ref && settings.dateRefs[s.date_ref]) $("#dateref").value = s.date_ref;
     $("#core").value = s.core ?? settings.core; $("#area").value = s.area ?? settings.area; $("#langs").value = s.langs ?? settings.langs;
     advCount(); preview();
   }
@@ -1389,6 +1568,7 @@ dialog{border:1px solid var(--bd2);border-radius:12px;padding:20px;width:min(480
       m_cID: conn.mcid, template: conn.template ? { method: conn.template.method, url: conn.template.url, body: conn.template.body, keywordParam: conn.template.kw, where: conn.template.where } : null,
       lastRequest: strip(conn.lastRequest), lastQuery: S.query, responseSummary: conn.lastSummary, responseSample: sample,
       pageSearches: conn.pageRequests, pageParams: store.get("pageParams", null), solrFieldsSeen: [...conn.seenFields], settings,
+      filterScripts: conn.filterScripts,
       filtersFormHtml: filters,
     };
   }
@@ -1409,6 +1589,9 @@ dialog{border:1px solid var(--bd2);border-radius:12px;padding:20px;width:min(480
       `Modulo "Filtri" leggibile: ${d.filtersFormHtml ? "sì" : "no (apri la pagina di ricerca Zucchetti)"}`,
       `Ultima ricerca fatta dalla pagina: ${(() => { const pp = store.get("pageParams", null); return pp ? `lingue "${pp.pLangs ?? "—"}", area "${pp.pArea ?? "—"}", indice "${pp.pCore ?? "—"}" (${fmtDT(pp.at)})` : "nessuna osservata (chiudi il pannello e cerca dalla scheda Filtri)"; })()}`,
       `Campi Solr visti nelle ricerche della pagina: ${conn.seenFields.size ? [...conn.seenFields].join(", ") : "—"}`,
+      `Filtri attivi (campo Solr): ${FIELD_DEFS.filter((f) => solrField(f.key)).map((f) => `${f.label}=${solrField(f.key)}`).join(", ") || "—"}`,
+      `Filtri da imparare: ${FIELD_DEFS.filter((f) => !solrField(f.key) && f.key !== "date").map((f) => f.label).join(", ") || "nessuno"}`,
+      `Centro servizi predefinito: ${settings.cenSer || "— (scegline uno nei filtri o fai una ricerca dalla pagina)"}`,
     ].join("\n");
   }
   $("#ssave").addEventListener("click", () => {
@@ -1422,7 +1605,7 @@ dialog{border:1px solid var(--bd2);border-radius:12px;padding:20px;width:min(480
     Object.assign(settings, { core: $("#s-core").value.trim(), area: $("#s-area").value.trim(), langs: $("#s-langs").value.trim(), cap: Math.max(1, parseInt($("#s-cap").value, 10) || 210), mapping });
     store.set("settings", settings);
     S.fieldValues = {};
-    for (const i of $$("#rie input")) S.fieldValues[i.dataset.f] = i.value;
+    for (const i of $$("#rie [data-f]")) S.fieldValues[i.dataset.f] = i.value;
     renderFieldInputs();
     $("#core").value = settings.core; $("#area").value = settings.area; $("#langs").value = settings.langs;
     $$(".capn").forEach((x) => { x.textContent = settings.cap; });
@@ -1572,9 +1755,17 @@ dialog{border:1px solid var(--bd2);border-radius:12px;padding:20px;width:min(480
   function show() {
     host.style.display = ""; document.documentElement.style.overflow = "hidden"; if (document.body) document.body.inert = true; setTimeout(() => $("#q").focus(), 0);
     const pp = store.get("pageParams", null);
-    if (pp && pp.at && pp.at !== lastSeenAt) { lastSeenAt = pp.at; toast(`Vista una ricerca della pagina Zucchetti (lingue "${pp.pLangs ?? "—"}"): dettagli in Impostazioni`); }
+    if (pp && pp.at && pp.at !== lastSeenAt) { lastSeenAt = pp.at; toast(S.pendingToast || "Vista una ricerca della pagina Zucchetti: userò gli stessi parametri (dettagli in Impostazioni)"); S.pendingToast = ""; }
   }
-  conn.onPageSearch = () => { if (!$("#tab-settings").hidden) renderConnInfo(); };
+  conn.onPageSearch = (p, learned) => {
+    $("#core").value = settings.core; $("#area").value = settings.area; $("#langs").value = settings.langs;
+    renderFieldInputs(); preview();
+    if (!$("#tab-settings").hidden) renderSettings();
+    if (learned && learned.length) {
+      const names = learned.map((k) => (FIELD_DEFS.find((f) => f.key === k) || { label: k }).label).join(", ");
+      S.pendingToast = `Imparati dalla ricerca della pagina: ${names}`;
+    }
+  };
   function hide() {
     if (S.abort) S.abort.abort();
     root.querySelectorAll("dialog[open]").forEach((d) => d.close());

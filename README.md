@@ -35,32 +35,43 @@ nella console del browser (F12 → Console) sulla pagina Zucchetti.
 ### Come funziona
 
 Il segnalibro viene eseguito dentro la pagina Zucchetti, quindi usa la sessione
-dell'utente e non deve gestire password o cookie. Per ogni ricerca:
+dell'utente e non deve gestire password o cookie. Ogni ricerca è una richiesta
+alla routine `servlet/spsl_fquery_mc` nello stesso formato della scheda Filtri
+della pagina, osservato sul sito reale:
 
-1. se la pagina contiene il componente dei risultati (`spsl_wsolrresultsgrid`,
-   oppure la ricerca veloce `spsl_wfast_search`), usa la sua stessa chiamata
-   `splResults.Link()`: la richiesta è identica a quella della pagina originale;
-2. la prima chiamata viene osservata e le successive la ripetono in modo
-   asincrono (l'interfaccia non si blocca e la ricerca si può interrompere); per
-   testi con lettere accentate si torna al punto 1, per rispettare la codifica
-   della pagina;
-3. su altre pagine dell'area legge il codice `m_cID` dal portlet
-   `jsp/spsl_wsolrresultsgrid_portlet.jsp` e chiama direttamente
-   `servlet/spsl_fquery_mc`.
+```
+pKeyword = IdCenSer:PAOW AND ((IdMeseM:9 AND IdAnnoM:2026) OR ...) AND (Testi:(…) OR Oggetto:(…))
+pArea = TICKOPEXXX   pCore = (vuoto)   pLangs = ITA   cs_SITE = (vuoto)   m_cID = …
+```
+
+- testo cercato nei campi `Testi` e `Oggetto`, centro servizi in `IdCenSer`,
+  periodo per mese e anno (`IdMeseM`/`IdAnnoM`, data di ultimo aggiornamento);
+- la richiesta parte, in ordine di preferenza, ripetendo quella osservata dalla
+  pagina, dal componente dei risultati (`spsl_wsolrresultsgrid`) o direttamente
+  con il codice `m_cID` del portlet; se Zucchetti risponde con un errore se ne fa
+  una sola altra con i parametri dell'ultima ricerca della pagina;
+- le funzioni native del browser vengono prese da un riquadro nascosto, perché
+  la pagina ne ridefinisce alcune (`controls.js` sostituisce `Set`).
+
+**Filtri imparati dalla pagina.** I nomi dei campi Solr di Stato, Priorità,
+Tipologia, Gruppo, Operatore, Prodotto, Numero ticket… non sono documentati. Il
+segnalibro li impara da solo: quando la pagina fa una ricerca (anche prima di
+aprire il segnalibro), confronta i valori scelti nel modulo Filtri
+(`w_StatoDett = CLOSE`, …) con la query inviata e memorizza il campo. Dal modulo
+Filtri prende anche gli elenchi dei valori (stati, priorità, gruppi, centri
+servizi), che diventano menu a tendina. Finché un filtro non è stato imparato
+compare come "da imparare"; si può anche impostare a mano in Impostazioni.
 
 Il pannello è isolato in uno *shadow DOM*: non modifica la pagina Zucchetti e non
-ne eredita gli stili. I risultati sono resi come testo, quindi l'HTML restituito
-dal server non viene mai iniettato.
+ne eredita gli stili; la pagina sotto resta inattiva finché il pannello è aperto.
+I risultati sono resi come testo, quindi l'HTML restituito dal server non viene
+mai iniettato.
 
-In **Impostazioni** si trovano:
-- la **mappatura dei campi Solr**, che attiva i filtri di riepilogo (Stato,
-  Priorità, Operatore…) con righe del tipo `stato = NOMECAMPO`;
-- **Copia/Scarica dati tecnici**: la richiesta osservata (senza cookie), un
-  esempio di risposta e il modulo "Filtri" della pagina. Servono a completare la
-  configurazione: contengono alcuni risultati di esempio, quindi controllali
-  prima di condividerli;
-- esportazione e importazione dei dati personali (preferiti, note, ricerche
-  salvate, cronologia), che altrimenti restano solo in quel browser.
+In **Impostazioni** si trovano lo stato della connessione con i filtri attivi e
+da imparare, la mappatura dei campi, **Copia/Scarica dati tecnici** (richieste
+osservate senza cookie, un esempio di risposta, il modulo Filtri e i suoi script:
+contengono alcuni risultati di esempio, quindi controllali prima di condividerli)
+ed esportazione/importazione dei dati personali.
 
 ### Sviluppo del segnalibro
 
@@ -71,7 +82,9 @@ Dopo una modifica rigenera `dist/` e `installa.html` (serve Node.js ed esbuild):
 cd bookmarklet && npm i --no-save esbuild@0.24.0 && node build.mjs
 ```
 
-Prova completa con un finto sito che riproduce il portlet e la routine:
+Prova completa con un finto sito che riproduce la pagina reale (ricerca veloce,
+portlet dei risultati caricato dopo la prima ricerca, modulo Filtri, routine con
+area obbligatoria, funzioni native ridefinite):
 
 ```bash
 python -m uvicorn bookmarklet.test.fake_zucchetti:app --port 8770

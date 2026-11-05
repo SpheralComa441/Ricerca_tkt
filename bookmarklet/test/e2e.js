@@ -23,6 +23,7 @@ async function clickBookmarklet(page) {
   }, HREF);
   await page.click("#__bm");
   await page.evaluate(() => document.getElementById("__bm").remove());
+  await page.locator("#q").waitFor({ state: "visible", timeout: 5000 }).catch(() => {});
 }
 const log = async (page) => (await (await page.request.get(BASE + "/__log")).json());
 const resetLog = (page) => page.request.post(BASE + "/__reset");
@@ -35,6 +36,7 @@ async function search(page, text) {
   }, null, { timeout: 20000 });
 }
 const txt = (page, sel) => page.locator(sel).first().innerText();
+const year = String(new Date().getFullYear());
 
 (async () => {
   const browser = await chromium.launch();
@@ -73,13 +75,12 @@ const txt = (page, sel) => page.locator(sel).first().innerText();
     await hp.close();
   }
 
-  // ---- pagina di ricerca con il portlet -------------------------------------------------
+  // ---- pagina di ricerca: all'inizio solo la ricerca veloce, come sul sito reale -------------
   await page.goto(BASE + "/areariservata/jsp/gspv_psearch.jsp");
-  // impostazioni salvate dalla versione 1.0.1 (lingue vuote): devono essere aggiornate a ITA
-  await page.evaluate(() => localStorage.setItem("rtkt:settings", JSON.stringify({ core: "TICKET", area: "", langs: "", mapping: {}, cap: 210 })));
+  // impostazioni salvate dalle versioni precedenti: aggiornate al formato della pagina
+  await page.evaluate(() => localStorage.setItem("rtkt:settings", JSON.stringify({ v: 2, core: "TICKET", area: "", langs: "", mapping: {}, cap: 210 })));
   await resetLog(page);
   await clickBookmarklet(page);
-  await page.waitForSelector("#ricerca-tkt-host", { state: "attached" });
   check(await page.locator("#q").isVisible(), "il pannello si apre sopra la pagina");
   check(await page.evaluate(() => document.body.inert === true), "la pagina sotto il pannello non riceve tastiera e clic");
   if (SHOTS) await page.screenshot({ path: SHOTS + "/bm-01-aperto.png" });
@@ -87,28 +88,49 @@ const txt = (page, sel) => page.locator(sel).first().innerText();
   await search(page, "detassazione");
   let l = await log(page);
   check(l.length === 1, `una sola richiesta per ricerca (${l.length})`);
-  check(l[0] && l[0].params.pKeyword === "detassazione" && l[0].params.pCore === "TICKET", "parametri passati dal portlet della pagina");
-  check(l[0] && l[0].params.pLangs === "ITA", `lingua ITA inviata (anche con impostazioni vecchie): "${l[0] && l[0].params.pLangs}"`);
+  const p0 = (l[0] && l[0].params) || {};
+  check(p0.pArea === "TICKOPEXXX" && p0.pCore === "" && p0.pLangs === "ITA" && "cs_SITE" in p0, `parametri come la pagina (area ${p0.pArea}, indice "${p0.pCore}", lingue ${p0.pLangs})`);
+  check(p0.pKeyword === "(IdCenSer:PAOW) AND (Testi:(detassazione) OR Oggetto:(detassazione))", `query nel formato della pagina: ${p0.pKeyword}`);
   check((await txt(page, "#sum")).includes("210 ticket trovati"), "210 risultati mostrati");
   check((await txt(page, "#alert")).includes("al massimo 210"), "avviso del limite di Zucchetti");
   check((await page.locator(".res").count()) === 50, "50 risultati per pagina");
   check((await page.locator(".res mark").count()) > 0, "parole evidenziate");
   if (SHOTS) await page.screenshot({ path: SHOTS + "/bm-02-risultati.png" });
 
-  // seconda ricerca: richiesta appresa, asincrona
-  await resetLog(page);
-  await search(page, "tfr cedolino");
-  l = await log(page);
-  check(l.length === 1 && l[0].params.pKeyword === "tfr AND cedolino", "seconda ricerca con la richiesta appresa");
-  check(l[0] && l[0].params.m_cID && l[0].ctype.includes("x-www-form-urlencoded"), "m_cID e content-type conservati");
-
-  // testo con accenti → passa dal portlet
+  // testo con accenti
   await resetLog(page);
   await search(page, "maternità");
   l = await log(page);
-  check(l.length === 1 && l[0].params.pKeyword === "maternità", "testo accentato inviato correttamente");
+  check(l.length === 1 && l[0].params.pKeyword.includes("Testi:(maternità)"), "testo accentato inviato correttamente");
 
-  // periodo + prodotto
+  // ---- ricerca fatta dalla pagina (scheda Filtri) con il pannello chiuso: impara campi e richiesta
+  await page.keyboard.press("Escape");
+  check(await page.evaluate(() => document.body.inert === false), "la pagina torna utilizzabile dopo la chiusura");
+  const filtri = page.frameLocator("iframe[name=gspv_winf_search]");
+  await filtri.locator("#stato").selectOption("CLOSE");
+  await filtri.locator("#testo").fill("conguaglio");
+  await filtri.locator("#cerca").click();
+  await page.waitForFunction(() => document.getElementById("esito").textContent.length > 0);
+  await clickBookmarklet(page);
+  await page.click('#nav button[data-tab="settings"]');
+  const info = await txt(page, "#conninfo");
+  check(info.includes("Stato tickets=IdStato"), "campo dello stato imparato dalla ricerca della pagina");
+  check(info.includes("Centro servizi predefinito: PAOW"), "centro servizi preso dalla pagina");
+  await page.click('#nav button[data-tab="search"]');
+  await page.click("#adv summary");
+  const statoSel = page.locator('#rie select[data-f="stato"]');
+  check(await statoSel.isEnabled(), "filtro Stato attivo, con i valori del modulo Filtri");
+  await statoSel.selectOption("CLOSE");
+  await page.waitForTimeout(250);
+  check((await txt(page, "#qprev")).includes("IdStato:CLOSE"), "query con il campo imparato");
+  await resetLog(page);
+  await search(page, "cedolino");
+  l = await log(page);
+  check(l.length === 1 && l[0].params.pKeyword.includes("IdStato:CLOSE") && l[0].params.pArea === "TICKOPEXXX", "ricerca con la richiesta appresa dalla pagina");
+  check((await page.locator(".res").count()) > 0, "risultati con il filtro Stato");
+  await statoSel.selectOption("");
+
+  // periodo (mese/anno come la pagina) + prodotto (filtro locale finché il campo non è noto)
   await page.click("#qreset");
   await page.fill("#q", "conguaglio");
   await page.selectOption("#preset", "ytd");
@@ -116,10 +138,10 @@ const txt = (page, sel) => page.locator(sel).first().innerText();
   await page.keyboard.press("Enter");
   await page.waitForTimeout(300);
   const qp = await txt(page, "#qprev");
-  check(/^\(conguaglio\) AND \(PAGHEW\) AND \("01-\d{4}"/.test(qp), `query con prodotto e mesi: ${qp.slice(0, 80)}…`);
+  check(qp.includes(`(IdMeseM:1 AND IdAnnoM:${year})`), `periodo per mese e anno: ${qp.slice(0, 110)}…`);
+  check((await page.locator("#qwarn .note", { hasText: "Prodotto" }).count()) === 1, "avviso: prodotto filtrato solo sui risultati ricevuti");
   await page.click("#go");
   await page.waitForFunction(() => document.getElementById("ricerca-tkt-host").shadowRoot.querySelector("#prog").hidden);
-  const year = String(new Date().getFullYear());
   const dates = await page.locator(".res time").allInnerTexts();
   check(dates.length > 0 && dates.every((d) => d.endsWith(year)), `tutte le date nell'anno corrente (${dates.length})`);
   const prods = await page.locator(".res .badge").allInnerTexts();
@@ -129,8 +151,7 @@ const txt = (page, sel) => page.locator(sel).first().innerText();
   await page.click("#qreset");
   await search(page, "detassazione");
   await page.click("#f-year li:first-child button");
-  const afterYear = await txt(page, "#sum");
-  check(afterYear.includes("dopo i filtri"), "faccetta anno applicata");
+  check((await txt(page, "#sum")).includes("dopo i filtri"), "faccetta anno applicata");
   await page.fill("#refine", "premio");
   await page.waitForTimeout(300);
   await page.selectOption("#sort", "date_desc");
@@ -138,7 +159,7 @@ const txt = (page, sel) => page.locator(sel).first().innerText();
   const iso = ds.map((d) => d.split("/").reverse().join("-"));
   check(iso.join() === [...iso].sort().reverse().join(), "ordinamento per data");
 
-  // preferito con nota
+  // preferito con nota (Invio nel campo etichette salva)
   await page.click(".res .ib[aria-pressed]");
   await page.click('.res .ib[title="Nota ed etichette"]');
   await page.fill("#ntext", "Da rivedere");
@@ -154,7 +175,7 @@ const txt = (page, sel) => page.locator(sel).first().innerText();
   await search(page, "detassazione");
   await page.selectOption("#sort", "date_desc");
 
-  // apertura ticket: link relativo e "function:"
+  // apertura ticket: link relativo e "function:" tramite il portlet dei risultati
   await page.waitForTimeout(300);
   const rows = await page.evaluate(() => {
     const r = document.getElementById("ricerca-tkt-host").shadowRoot;
@@ -184,45 +205,33 @@ const txt = (page, sel) => page.locator(sel).first().innerText();
   check((await txt(page, "#qprev")).includes("Anno non valido"), "anno a 2 cifre segnalato");
   await page.click("#qreset");
 
-  // mappatura di un campo → filtro attivo
+  // mappatura manuale di un campo → filtro attivo
   await page.click('#nav button[data-tab="settings"]');
-  await page.fill("#s-map", "stato = TKSTATO");
+  const mapping = await page.inputValue("#s-map");
+  await page.fill("#s-map", mapping + "\ntipologia = TKTIPOLOGIA");
   await page.click("#ssave");
   await page.click('#nav button[data-tab="search"]');
-  await page.click("#adv summary");
-  check(await page.locator('#rie input[data-f="stato"]').isEnabled(), "campo Stato attivato dalla mappatura");
-  await page.fill('#rie input[data-f="stato"]', "Aperto");
+  check(await page.locator('#rie input[data-f="tipologia"]').isEnabled(), "campo Tipologia attivato dalla mappatura");
+  await page.fill('#rie input[data-f="tipologia"]', "Anomalia");
   await page.fill("#q", "assunzione");
   await page.waitForTimeout(300);
-  check((await txt(page, "#qprev")) === '(assunzione) AND (TKSTATO:"Aperto")', "query con il campo mappato");
+  check((await txt(page, "#qprev")).includes("TKTIPOLOGIA:Anomalia"), "query con il campo mappato a mano");
 
-  // ricerca fatta dalla pagina con il pannello chiuso: parametri e campi osservati
-  await page.keyboard.press("Escape");
-  await page.click("#cerca-pagina");
-  await clickBookmarklet(page);
-  await page.locator("#q").waitFor({ state: "visible", timeout: 5000 });
-  await page.click('#nav button[data-tab="settings"]');
-  const info = await txt(page, "#conninfo");
-  check(info.includes('lingue "ITA,ENG"') && info.includes('area "HR"'), "parametri della ricerca della pagina osservati");
-  check(info.includes("TKSTATO"), "campo Solr visto nella ricerca della pagina");
-  // lingua sbagliata nelle impostazioni -> Zucchetti dà errore -> seconda richiesta con i parametri della pagina
-  await page.fill("#s-langs", "XXX");
-  await page.click("#ssave");
-  await page.click('#nav button[data-tab="search"]');
-  await page.fill('#rie input[data-f="stato"]', "");
+  // lingua sbagliata nelle impostazioni -> errore -> una sola richiesta in più con i parametri della pagina
+  await page.fill('#rie input[data-f="tipologia"]', "");
+  await page.fill("#langs", "XXX");
   await resetLog(page);
   await search(page, "tfr");
   l = await log(page);
-  check(l.length === 2 && l[0].params.pLangs === "XXX" && l[1].params.pLangs === "ITA,ENG", `una sola richiesta in più, con i parametri della pagina (${l.map((x) => x.params.pLangs)})`);
-  check((await page.locator(".res").count()) > 0 && (await page.inputValue("#langs")) === "ITA,ENG", "risultati e parametri corretti salvati");
-  await page.click('#nav button[data-tab="search"]');
+  check(l.length === 2 && l[0].params.pLangs === "XXX" && l[1].params.pLangs === "ITA", `una sola richiesta in più, con i parametri della pagina (${l.map((x) => x.params.pLangs)})`);
+  check((await page.locator(".res").count()) > 0 && (await page.inputValue("#langs")) === "ITA", "risultati e parametri corretti salvati");
 
   // salva ricerca e cronologia
   await page.click("#qsave");
-  await page.fill("#sname", "Assunzioni aperte");
+  await page.fill("#sname", "Assunzioni");
   await page.click('#dsave button[value="ok"]');
   await page.click('#nav button[data-tab="saved"]');
-  check((await txt(page, "#saved")).includes("Assunzioni aperte"), "ricerca salvata");
+  check((await txt(page, "#saved")).includes("Assunzioni"), "ricerca salvata");
   await page.click('#nav button[data-tab="history"]');
   check((await page.locator("#hist .li").count()) >= 4, "cronologia aggiornata");
 
@@ -231,7 +240,8 @@ const txt = (page, sel) => page.locator(sel).first().innerText();
   await page.click("#tcopy");
   const tech = JSON.parse(await page.evaluate(() => navigator.clipboard.readText()));
   check(tech.template && tech.template.keywordParam === "pKeyword", "dati tecnici: richiesta appresa");
-  check((tech.filtersFormHtml || "").includes("w_STATO"), "dati tecnici: modulo Filtri incluso");
+  check(tech.pageSearches && tech.pageSearches[0] && tech.pageSearches[0].params.pKeyword.includes("IdStato:CLOSE"), "dati tecnici: ricerca della pagina");
+  check(tech.filterScripts && Object.keys(tech.filterScripts).some((k) => k.includes("sipv_ffilters_search")), "dati tecnici: script del modulo Filtri");
   check(!JSON.stringify(tech).includes("JSESSIONID"), "dati tecnici senza cookie");
   if (SHOTS) await page.screenshot({ path: SHOTS + "/bm-03-impostazioni.png" });
 
@@ -252,19 +262,15 @@ const txt = (page, sel) => page.locator(sel).first().innerText();
   check((await trap.count()) === 1 && (await trap.locator("button", { hasText: "Apri" }).count()) === 0, "preferito importato con link pericoloso: nessun pulsante Apri");
   await trap.locator(".num").click();
   check(await page.evaluate(() => window.__pwned === undefined), "nessun codice eseguito dal preferito importato");
-  await page.click('#nav button[data-tab="settings"]');
+  await page.click('#nav button[data-tab="search"]');
 
   // Esc chiude, il segnalibro riapre; dopo il ricaricamento i dati restano
-  await page.click('#nav button[data-tab="search"]');
   await page.keyboard.press("Escape");
   check(await page.locator("#ricerca-tkt-host").evaluate((e) => e.style.display === "none"), "Esc chiude il pannello");
-  check(await page.evaluate(() => document.body.inert === false), "la pagina torna utilizzabile dopo la chiusura");
   await clickBookmarklet(page);
-  const reopened = await page.locator("#q").waitFor({ state: "visible", timeout: 5000 }).then(() => true, () => false);
-  check(reopened, "il segnalibro riapre il pannello");
+  check(await page.locator("#q").isVisible(), "il segnalibro riapre il pannello");
   await page.reload();
   await clickBookmarklet(page);
-  await page.locator("#q").waitFor({ state: "visible", timeout: 5000 });
   check((await txt(page, "#fav-count")) === "2", "preferiti conservati dopo il ricaricamento");
 
   // sessione scaduta
@@ -273,14 +279,31 @@ const txt = (page, sel) => page.locator(sel).first().innerText();
   await search(page, "ferie");
   check((await txt(page, "#alert")).includes("sessione"), "messaggio di sessione scaduta");
 
-  // pagina senza portlet: chiamata diretta con m_cID letto dal portlet .jsp
+  // pagina senza portlet né filtri: chiamata diretta con m_cID letto dal portlet .jsp
   await page.goto(BASE + "/areariservata/jsp/home.jsp");
   await resetLog(page);
   await clickBookmarklet(page);
   await search(page, "detassazione");
   l = await log(page);
-  check(l.length >= 1 && l[l.length - 1].params.m_cID === "1ef51ea72b7e79d713e5b1b42030dfa2", "chiamata diretta da un'altra pagina dell'area");
+  const last = (l[l.length - 1] || {}).params || {};
+  check(last.m_cID === "e78b84ad59ea95692c27f98e5e270075" && last.pArea === "TICKOPEXXX", "chiamata diretta da un'altra pagina dell'area");
   check((await txt(page, "#sum")).includes("210 ticket trovati"), "risultati anche dalla chiamata diretta");
+
+  // ricerca fatta dalla pagina PRIMA di aprire il segnalibro: imparata comunque
+  {
+    const p3 = await ctx.newPage();
+    await p3.goto(BASE + "/areariservata/jsp/gspv_psearch.jsp");
+    await p3.evaluate(() => { for (const k of Object.keys(localStorage)) if (k.startsWith("rtkt:")) localStorage.removeItem(k); });
+    const f3 = p3.frameLocator("iframe[name=gspv_winf_search]");
+    await f3.locator("#stato").selectOption("00005");
+    await f3.locator("#testo").fill("tfr");
+    await f3.locator("#cerca").click();
+    await p3.waitForFunction(() => document.getElementById("esito").textContent.length > 0);
+    await clickBookmarklet(p3);
+    await p3.click('#nav button[data-tab="settings"]');
+    check((await p3.locator("#conninfo").innerText()).includes("Stato tickets=IdStato"), "imparato anche da una ricerca fatta prima di aprire il segnalibro");
+    await p3.close();
+  }
 
   // mobile
   await page.setViewportSize({ width: 390, height: 844 });
