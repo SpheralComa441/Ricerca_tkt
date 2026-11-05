@@ -454,6 +454,9 @@ def build_query(spec: SearchSpec, profile: Profile) -> BuiltQuery:
             negatives.append(f"NOT {fname}:{_or_group([_field_value(v) for v in neg])}")
 
     # --- periodo -------------------------------------------------------------
+    for d in (spec.date_from, spec.date_to):
+        if d and not (1900 <= d.year <= 2100):
+            raise QueryError("Anno non valido: scrivi l'anno con 4 cifre (es. 2024).")
     if spec.date_from and spec.date_to and spec.date_from > spec.date_to:
         raise QueryError("La data iniziale è successiva a quella finale")
     dpart = date_clause(profile, spec.date_from, spec.date_to)

@@ -124,3 +124,8 @@ def test_scope_mapped(zcfg):
 def test_inverted_dates_rejected(zprofile):
     with pytest.raises(QueryError):
         build_query(spec(text="x", date_from=date(2026, 2, 1), date_to=date(2026, 1, 1)), zprofile)
+
+
+def test_invalid_year_rejected(zprofile):
+    with pytest.raises(QueryError, match="Anno non valido"):
+        build_query(spec(text="x", date_from=date(26, 1, 1)), zprofile)

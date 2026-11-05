@@ -447,7 +447,14 @@
     let from = null;
     let to = isoDate(today);
     const back = (days) => { const d = new Date(today); d.setDate(d.getDate() - days); return isoDate(d); };
-    const backM = (m) => { const d = new Date(today); d.setMonth(d.getMonth() - m); return isoDate(d); };
+    const backM = (m) => {
+      const d = new Date(today);
+      d.setDate(1);
+      d.setMonth(d.getMonth() - m);
+      const last = new Date(d.getFullYear(), d.getMonth() + 1, 0).getDate();
+      d.setDate(Math.min(today.getDate(), last));
+      return isoDate(d);
+    };
     switch (v) {
       case "30d": from = back(30); break;
       case "3m": from = backM(3); break;
@@ -1037,9 +1044,9 @@
     if (!state.selected.size) return items;
     return items.filter((t) => state.selected.has(t.key));
   }
+  const noFormula = (v) => { const x = v === null || v === undefined ? "" : String(v); return /^[=+\-@\t\r]/.test(x) ? "'" + x : x; }; // evita formule in Excel
   function csvCell(v) {
-    let s = v === null || v === undefined ? "" : String(v);
-    if (/^[=+\-@\t\r]/.test(s)) s = "'" + s; // evita formule in Excel
+    const s = noFormula(v);
     return /[;"\n\r]/.test(s) ? `"${s.replace(/"/g, '""')}"` : s;
   }
   function toCSV(items) {
@@ -1065,7 +1072,7 @@
     } else if (kind === "numbers") {
       copyText(items.map((t) => t.number ?? t.id).join("\n"), `Copiati ${fmtN(items.length)} numeri`);
     } else if (kind === "list") {
-      copyText(items.map((t) => `#${t.number ?? t.id}\t${fmtDate(t.date)}\t${t.product}\t${t.subject}`).join("\n"),
+      copyText(items.map((t) => `#${t.number ?? t.id}\t${fmtDate(t.date)}\t${noFormula(t.product)}\t${noFormula(t.subject)}`).join("\n"),
         `Copiato elenco di ${fmtN(items.length)} ticket`);
     }
   }

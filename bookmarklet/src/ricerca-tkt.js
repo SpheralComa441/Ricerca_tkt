@@ -11,7 +11,7 @@
 (() => {
   "use strict";
   const NS = "__RicercaTKT__";
-  const VERSION = "1.0.2";
+  const VERSION = "1.0.3";
   if (window[NS]) { window[NS].toggle(); return; }
   try {
 
@@ -197,6 +197,7 @@
       : d.m < 12 ? { y: d.y, m: d.m + 1, d: 1 } : { y: d.y + 1, m: 1, d: 1 };
   }
   function datePhraseClause(start, end) {
+    if (cmpDate(start, end) > 0) throw new QueryError("La data iniziale è successiva a quella finale (o alla data di oggi).");
     const build = (years) => {
       const parts = [];
       let d = start;
@@ -298,6 +299,7 @@
       if (neg.length) negatives.push(`NOT ${fname}:${orGroup(neg.map(fieldValue))}`);
     }
     const from = parseISO(s.date_from), to = parseISO(s.date_to);
+    for (const d of [from, to]) if (d && (d.y < 1900 || d.y > 2100)) throw new QueryError("Anno non valido: scrivi l'anno con 4 cifre (es. 2024).");
     if (from && to && cmpDate(from, to) > 0) throw new QueryError("La data iniziale è successiva a quella finale");
     if (from || to) {
       const df = solrField("date");
@@ -448,7 +450,7 @@
       return t;
     });
     const cap = maxResults || settings.cap;
-    return { tickets, rawCount: rows.length, dataLength: data.length, fields, maxResults, capped: rows.length >= cap, errors, facet: ci(payload, "facet") || [] };
+    return { tickets, rawCount: rows.length, dataLength: data.filter((r) => r && typeof r === "object").length, fields, maxResults, capped: rows.length >= cap, errors, facet: ci(payload, "facet") || [] };
   }
 
   // ===================================================================== connessione a Zucchetti
@@ -861,8 +863,8 @@ dialog{border:1px solid var(--bd2);border-radius:12px;padding:20px;width:min(480
    <p class="mu sm">Ricerca TKT ${VERSION} · versione segnalibro</p>
   </section>
  </div></div>
- <dialog id="dnote"><form method="dialog"><h3 id="ntitle">Nota</h3><label class="fld">Nota personale<textarea id="ntext" rows="5"></textarea></label><label class="fld">Etichette (separate da virgola)<input id="ntags" placeholder="es. da verificare, normativa"></label><div class="row end"><button value="cancel" class="btn gh" formnovalidate>Annulla</button><button value="remove" class="btn gh dg" id="nrem">Rimuovi dai preferiti</button><button value="ok" class="btn pri">Salva</button></div></form></dialog>
- <dialog id="dsave"><form method="dialog"><h3>Salva ricerca</h3><label class="fld">Nome<input id="sname" maxlength="200"></label><div class="row end"><button value="cancel" class="btn gh" formnovalidate>Annulla</button><button value="ok" class="btn pri">Salva</button></div></form></dialog>
+ <dialog id="dnote"><form method="dialog"><h3 id="ntitle">Nota</h3><label class="fld">Nota personale<textarea id="ntext" rows="5"></textarea></label><label class="fld">Etichette (separate da virgola)<input id="ntags" placeholder="es. da verificare, normativa"></label><div class="row end"><button type="button" value="cancel" class="btn gh">Annulla</button><button type="button" value="remove" class="btn gh dg" id="nrem">Rimuovi dai preferiti</button><button value="ok" class="btn pri">Salva</button></div></form></dialog>
+ <dialog id="dsave"><form method="dialog"><h3>Salva ricerca</h3><label class="fld">Nome<input id="sname" maxlength="200"></label><div class="row end"><button type="button" value="cancel" class="btn gh">Annulla</button><button value="ok" class="btn pri">Salva</button></div></form></dialog>
  <div class="toast" id="toast" role="status" hidden></div>
 </div>`;
 
@@ -879,6 +881,7 @@ dialog{border:1px solid var(--bd2);border-radius:12px;padding:20px;width:min(480
   const $ = (s) => root.querySelector(s);
   const $$ = (s) => [...root.querySelectorAll(s)];
   const prevOverflow = document.documentElement.style.overflow;
+  const prevInert = !!(document.body && document.body.inert);
   document.documentElement.style.overflow = "hidden";
 
   // ===================================================================== stato
@@ -959,7 +962,12 @@ dialog{border:1px solid var(--bd2);border-radius:12px;padding:20px;width:min(480
   }
   function preset(v) {
     const t = new Date();
-    const back = (days, months) => { const d = new Date(t); if (days) d.setDate(d.getDate() - days); if (months) d.setMonth(d.getMonth() - months); return isoOf(d); };
+    const back = (days, months) => {
+      const d = new Date(t);
+      if (days) d.setDate(d.getDate() - days);
+      if (months) { d.setDate(1); d.setMonth(d.getMonth() - months); d.setDate(Math.min(t.getDate(), lastDay(d.getFullYear(), d.getMonth() + 1))); }
+      return isoOf(d);
+    };
     let from = null, to = isoOf(t);
     switch (v) {
       case "30d": from = back(30); break; case "3m": from = back(0, 3); break; case "6m": from = back(0, 6); break;
@@ -1025,6 +1033,7 @@ dialog{border:1px solid var(--bd2);border-radius:12px;padding:20px;width:min(480
     const ctrl = new AbortController();
     S.abort = ctrl; S.last = s; S.query = built.query;
     Object.assign(S, { results: [], keys: new Set(), page: 1, alerts: [], info: null, refine: "" });
+    renderAlerts();
     S.selected.clear(); S.facet = { prod: new Set(), year: null, month: null, tags: new Set() };
     $("#refine").value = ""; $("#emptyst").hidden = true; $("#results").hidden = false; $("#prog").hidden = false; $("#go").disabled = true;
     S.searching = true;
@@ -1058,6 +1067,7 @@ dialog{border:1px solid var(--bd2);border-radius:12px;padding:20px;width:min(480
       store.set("history", hist.slice(0, 200));
       refreshHistList();
     } catch (e) {
+      if (S.abort !== ctrl) return; // sostituita da una nuova ricerca
       if (e && e.name === "AbortError") pushAlert("warn", "Ricerca interrotta.");
       else { pushAlert("err", e && e.message ? e.message : "Errore durante la ricerca"); if (e && e.sample) conn.lastRaw = e.sample; }
     } finally {
@@ -1066,6 +1076,9 @@ dialog{border:1px solid var(--bd2);border-radius:12px;padding:20px;width:min(480
   }
   function pushAlert(kind, message) {
     if (!S.alerts.some((a) => a.message === message)) S.alerts.push({ kind, message });
+    renderAlerts();
+  }
+  function renderAlerts() {
     const box = clear($("#alert"));
     const items = S.alerts.filter((a) => a.kind !== "info");
     box.hidden = !items.length;
@@ -1148,14 +1161,18 @@ dialog{border:1px solid var(--bd2);border-radius:12px;padding:20px;width:min(480
     if (S.selected.size) parts.push(" · ", h("b", null, fmtN(S.selected.size)), " selezionati ", h("button", { type: "button", class: "btn gh s", onclick: () => { S.selected.clear(); render(); } }, "deseleziona"));
     add(el, parts);
   }
+  const LIT = String.raw`(?:'[^'\\\n]*'|"[^"\\\n]*"|-?\d+(?:\.\d+)?)`;
+  const SAFE_FN = new RegExp(String.raw`^function:\s*[A-Za-z_$][\w$]*\s*\(\s*(?:${LIT}\s*(?:,\s*${LIT}\s*)*)?\)\s*;?\s*$`);
+  const canPortletOpen = (t) => /^function:/i.test(t.rawUrl || "") && (t.row ? true : SAFE_FN.test(t.rawUrl));
   function openTicket(t) {
-    if (t.url) { window.open(t.url, "_blank", "noopener"); return; }
+    const url = t.url ? resolveUrl(t.url) : null;
+    if (url) { window.open(url, "_blank", "noopener"); return; }
     const f = conn.found || findPortlet();
-    if (f && /^function:/i.test(t.rawUrl || "")) {
-      const holder = f.kind === "grid" ? f.p.doResults : f.p.doSearch;
+    if (f && f.kind === "grid" && canPortletOpen(t)) {
+      const holder = f.p.doResults;
       if (holder && typeof f.p.click === "function") {
         const old = holder.rs;
-        try { holder.rs = Object.assign({}, t.row); f.p.click(); return; } catch { /* sotto */ } finally { holder.rs = old; }
+        try { holder.rs = Object.assign({ id: t.id, type: t.type, url1: t.rawUrl, url2: "", urlPublic: "" }, t.row); f.p.click(); return; } catch { /* sotto */ } finally { holder.rs = old; }
       }
     }
     copyText(String(t.number ?? t.id), `Link non disponibile: copiato il numero ${t.number ?? t.id}`);
@@ -1164,13 +1181,13 @@ dialog{border:1px solid var(--bd2);border-radius:12px;padding:20px;width:min(480
     const fav = S.favorites.get(t.key);
     const sel = S.selected.has(t.key);
     const label = t.number != null ? `#${t.number}` : t.id || "ticket";
-    const canOpen = !!t.url || /^function:/i.test(t.rawUrl || "");
+    const canOpen = !!(t.url && resolveUrl(t.url)) || canPortletOpen(t);
     const meta = [];
     if (fav) { for (const g of fav.tags) meta.push(h("span", { class: "tag", text: g })); if (fav.note) meta.push(h("span", { class: "nt", text: fav.note })); }
     return h("article", { class: "res" + (sel ? " sel" : "") },
       h("div", { class: "rh" },
         noSel ? null : h("input", { type: "checkbox", "aria-label": `Seleziona ${label}`, checked: sel, onchange: (e) => { if (e.target.checked) S.selected.add(t.key); else S.selected.delete(t.key); render(); } }),
-        canOpen ? h("a", { class: "num", href: t.url || "#", title: "Apri il ticket", onclick: (e) => { e.preventDefault(); openTicket(t); } }, label) : h("span", { class: "num" }, label),
+        canOpen ? h("a", { class: "num", href: (t.url && resolveUrl(t.url)) || "#", title: "Apri il ticket", onclick: (e) => { e.preventDefault(); openTicket(t); } }, label) : h("span", { class: "num" }, label),
         h("button", { type: "button", class: "ib", title: "Copia numero", "aria-label": "Copia numero", onclick: () => copyText(String(t.number ?? t.id), `Copiato ${label}`) }, "⧉"),
         t.product ? h("span", { class: "badge", text: t.product }) : null,
         t.date ? h("time", { class: "mu", text: fmtDate(t.date) }) : null,
@@ -1243,9 +1260,9 @@ dialog{border:1px solid var(--bd2);border-radius:12px;padding:20px;width:min(480
   }
 
   // ===================================================================== esportazione
+  const noFormula = (v) => { const x = v === null || v === undefined ? "" : String(v); return /^[=+\-@\t\r]/.test(x) ? "'" + x : x; };
   function cell(v) {
-    let s = v === null || v === undefined ? "" : String(v);
-    if (/^[=+\-@\t\r]/.test(s)) s = "'" + s;
+    const s = noFormula(v);
     return /[;"\n\r]/.test(s) ? `"${s.replace(/"/g, '""')}"` : s;
   }
   function toCSV(items) {
@@ -1264,7 +1281,7 @@ dialog{border:1px solid var(--bd2);border-radius:12px;padding:20px;width:min(480
     if (kind === "csv") download(`ticket-${stamp}.csv`, toCSV(items), "text/csv;charset=utf-8");
     else if (kind === "json") download(`ticket-${stamp}.json`, JSON.stringify({ query: S.query, spec: S.last, tickets: items.map(clean) }, null, 2), "application/json");
     else if (kind === "numbers") copyText(items.map((t) => t.number ?? t.id).join("\n"), `Copiati ${fmtN(items.length)} numeri`);
-    else copyText(items.map((t) => `#${t.number ?? t.id}\t${fmtDate(t.date)}\t${t.product}\t${t.subject}`).join("\n"), `Copiato elenco di ${fmtN(items.length)} ticket`);
+    else copyText(items.map((t) => `#${t.number ?? t.id}\t${fmtDate(t.date)}\t${noFormula(t.product)}\t${noFormula(t.subject)}`).join("\n"), `Copiato elenco di ${fmtN(items.length)} ticket`);
   }
 
   // ===================================================================== preferiti, salvate, cronologia
@@ -1283,11 +1300,14 @@ dialog{border:1px solid var(--bd2);border-radius:12px;padding:20px;width:min(480
     $("#ntext").value = f ? f.note : ""; $("#ntags").value = f ? f.tags.join(", ") : ""; $("#nrem").hidden = !f;
     $("#dnote").showModal(); $("#ntext").focus();
   }
-  $("#dnote form").addEventListener("submit", (e) => {
-    const action = e.submitter ? e.submitter.value : "ok";
-    if (action === "cancel" || !noteT) return;
-    if (action === "remove") S.favorites.delete(noteT.key);
-    else S.favorites.set(noteT.key, { key: noteT.key, ticket: clean(noteT), note: $("#ntext").value.trim(), tags: [...new Set($("#ntags").value.split(",").map((x) => x.trim()).filter(Boolean))], updated: new Date().toISOString() });
+  for (const d of ["#dnote", "#dsave"]) $(d + ' button[value="cancel"]').addEventListener("click", () => $(d).close("cancel"));
+  $("#nrem").addEventListener("click", () => {
+    if (noteT) { S.favorites.delete(noteT.key); saveFavs(); updateFavCount(); rerender(); }
+    $("#dnote").close("remove");
+  });
+  $("#dnote form").addEventListener("submit", () => {
+    if (!noteT) return;
+    S.favorites.set(noteT.key, { key: noteT.key, ticket: clean(noteT), note: $("#ntext").value.trim(), tags: [...new Set($("#ntags").value.split(",").map((x) => x.trim()).filter(Boolean))], updated: new Date().toISOString() });
     saveFavs(); updateFavCount(); rerender();
   });
   function favItems() {
@@ -1373,6 +1393,12 @@ dialog{border:1px solid var(--bd2);border-radius:12px;padding:20px;width:min(480
     };
   }
   function renderSettings() {
+    renderConnInfo();
+    $("#s-core").value = settings.core; $("#s-area").value = settings.area; $("#s-langs").value = settings.langs; $("#s-cap").value = settings.cap;
+    $("#s-map").value = Object.entries(settings.mapping).filter(([, v]) => v).map(([k, v]) => `${k} = ${v}`).join("\n");
+    $("#keys").textContent = FIELD_DEFS.map((f) => f.key).join(", ");
+  }
+  function renderConnInfo() {
     const d = techData();
     const modes = { native: "componente di ricerca della pagina (portlet)", template: "richiesta appresa dalla pagina", direct: "richiesta diretta alla routine" };
     $("#conninfo").textContent = [
@@ -1384,9 +1410,6 @@ dialog{border:1px solid var(--bd2);border-radius:12px;padding:20px;width:min(480
       `Ultima ricerca fatta dalla pagina: ${(() => { const pp = store.get("pageParams", null); return pp ? `lingue "${pp.pLangs ?? "—"}", area "${pp.pArea ?? "—"}", indice "${pp.pCore ?? "—"}" (${fmtDT(pp.at)})` : "nessuna osservata (chiudi il pannello e cerca dalla scheda Filtri)"; })()}`,
       `Campi Solr visti nelle ricerche della pagina: ${conn.seenFields.size ? [...conn.seenFields].join(", ") : "—"}`,
     ].join("\n");
-    $("#s-core").value = settings.core; $("#s-area").value = settings.area; $("#s-langs").value = settings.langs; $("#s-cap").value = settings.cap;
-    $("#s-map").value = Object.entries(settings.mapping).filter(([, v]) => v).map(([k, v]) => `${k} = ${v}`).join("\n");
-    $("#keys").textContent = FIELD_DEFS.map((f) => f.key).join(", ");
   }
   $("#ssave").addEventListener("click", () => {
     const mapping = {};
@@ -1420,17 +1443,73 @@ dialog{border:1px solid var(--bd2);border-radius:12px;padding:20px;width:min(480
   $("#tcopy").addEventListener("click", () => copyText(JSON.stringify(techData(), null, 2), "Dati tecnici copiati"));
   $("#tdl").addEventListener("click", () => download("ricerca-tkt-dati-tecnici.json", JSON.stringify(techData(), null, 2), "application/json"));
   $("#pexp").addEventListener("click", () => download("ricerca-tkt-dati-personali.json", JSON.stringify({ favorites: [...S.favorites.values()], saved: store.get("saved", []), history: store.get("history", []), settings }, null, 2), "application/json"));
-  $("#pimp").addEventListener("change", async (e) => {
-    const file = e.target.files[0];
+  const str = (v, max = 2000) => (v === null || v === undefined ? "" : String(v)).slice(0, max);
+  function importTicket(t) {
+    const c = clean(t); // niente "row": i preferiti importati non possono eseguire codice della pagina
+    const n = parseInt(c.number, 10);
+    return {
+      key: str(c.key, 200), id: str(c.id, 200), number: Number.isFinite(n) ? n : null, product: str(c.product, 60),
+      date: /^\d{4}-\d{2}-\d{2}$/.test(c.date || "") ? c.date : null, title: str(c.title), subject: str(c.subject),
+      snippet: str(c.snippet, 5000), rawUrl: str(c.rawUrl, 2000), url: resolveUrl(c.rawUrl) || resolveUrl(c.url), type: str(c.type, 60), rank: 0,
+    };
+  }
+  function importSpec(sp) { return sp && typeof sp === "object" ? JSON.parse(JSON.stringify(sp)) : null; }
+  $("#pimp").addEventListener("change", async () => {
+    const inp = $("#pimp");
+    const file = inp.files[0];
     if (!file) return;
     try {
       const d = JSON.parse(await file.text());
-      if (Array.isArray(d.favorites)) { for (const f of d.favorites) if (f && f.key && f.ticket) S.favorites.set(f.key, f); saveFavs(); }
-      if (Array.isArray(d.saved)) store.set("saved", [...store.get("saved", []), ...d.saved.filter((x) => x && x.name && x.spec)]);
-      if (Array.isArray(d.history)) store.set("history", [...d.history, ...store.get("history", [])].slice(0, 200));
-      updateFavCount(); toast("Dati importati");
-    } catch { toast("File non valido"); }
-    e.target.value = "";
+      let nf = 0, ns = 0, nh = 0;
+      if (Array.isArray(d.favorites)) {
+        for (const f of d.favorites) {
+          if (!f || !f.key || !f.ticket || typeof f.ticket !== "object") continue;
+          const key = str(f.key, 200);
+          S.favorites.set(key, { key, ticket: Object.assign(importTicket(f.ticket), { key }), note: str(f.note, 10000), tags: Array.isArray(f.tags) ? f.tags.map((x) => str(x, 40)).filter(Boolean) : [], updated: str(f.updated, 40) });
+          nf++;
+        }
+        saveFavs();
+      }
+      if (Array.isArray(d.saved)) {
+        const cur = store.get("saved", []);
+        const k = (x) => `${x.name}\u0001${JSON.stringify(x.spec)}`;
+        const seen = new Set(cur.map(k));
+        for (const x of d.saved) {
+          const spc = x && x.name && importSpec(x.spec);
+          if (!spc) continue;
+          const item = { name: str(x.name, 200), spec: spc, created: str(x.created, 40) };
+          if (!seen.has(k(item))) { seen.add(k(item)); cur.push(item); ns++; }
+        }
+        cur.sort((a, b) => a.name.localeCompare(b.name, "it"));
+        store.set("saved", cur);
+      }
+      if (Array.isArray(d.history)) {
+        const cur = store.get("history", []);
+        const k = (x) => `${x.created}\u0001${JSON.stringify(x.spec)}`;
+        const seen = new Set(cur.map(k));
+        for (const x of d.history) {
+          const spc = x && importSpec(x.spec);
+          if (!spc) continue;
+          const item = { spec: spc, results: parseInt(x.results, 10) || 0, created: str(x.created, 40) };
+          if (!seen.has(k(item))) { seen.add(k(item)); cur.push(item); nh++; }
+        }
+        cur.sort((a, b) => (b.created || "").localeCompare(a.created || ""));
+        store.set("history", cur.slice(0, 200));
+      }
+      if (d.settings && typeof d.settings === "object") {
+        const st = d.settings;
+        for (const key of ["core", "area", "langs"]) if (typeof st[key] === "string") settings[key] = st[key].slice(0, 200);
+        if (parseInt(st.cap, 10) > 0) settings.cap = parseInt(st.cap, 10);
+        if (st.mapping && typeof st.mapping === "object") {
+          settings.mapping = {};
+          for (const [k, v] of Object.entries(st.mapping)) if (FIELD_DEFS.some((f) => f.key === k) && /^[A-Za-z_][A-Za-z0-9_.]*$/.test(String(v))) settings.mapping[k] = String(v);
+        }
+        store.set("settings", settings);
+        renderSettings(); renderFieldInputs(); preview();
+      }
+      updateFavCount(); refreshHistList();
+      toast(`Importati: ${nf} preferiti, ${ns} ricerche salvate, ${nh} voci di cronologia`);
+    } catch { toast("File non valido"); } finally { inp.value = ""; }
   });
   $("#pdel").addEventListener("click", () => {
     if (!confirm("Cancellare preferiti, note, ricerche salvate e cronologia da questo browser?")) return;
@@ -1441,10 +1520,10 @@ dialog{border:1px solid var(--bd2);border-radius:12px;padding:20px;width:min(480
     const out = $("#rawout");
     out.hidden = false; out.textContent = "Richiesta in corso…";
     try {
-      const r = await zSearch($("#rawq").value, { core: settings.core, area: settings.area, langs: settings.langs });
+      const r = await zSearch($("#rawq").value, { core: $("#s-core").value.trim() || settings.core, area: $("#s-area").value.trim(), langs: $("#s-langs").value.trim() });
       out.textContent = JSON.stringify({ tramite: conn.mode, risultati: r.rawCount, limite: r.maxResults, errori: r.errors, primo: r.tickets[0] ? clean(r.tickets[0]) : null, rispostaGrezza: conn.lastRaw.slice(0, 4000) }, null, 2);
     } catch (err) { out.textContent = `${err.message}\n${err.sample || ""}`; }
-    renderSettings();
+    renderConnInfo();
   });
 
   // ===================================================================== navigazione ed eventi
@@ -1460,7 +1539,16 @@ dialog{border:1px solid var(--bd2);border-radius:12px;padding:20px;width:min(480
   $("#sf").addEventListener("change", onFormChange);
   $("#preset").addEventListener("change", () => { preset($("#preset").value); onFormChange(); });
   $("#qcopy").addEventListener("click", () => S.query && copyText(S.query, "Query copiata"));
-  $("#qedit").addEventListener("click", () => { if (!S.query) return; const k = spec(); applySpec({ text: S.query, mode: "solr", core: k.core, area: k.area, langs: k.langs }); toast("Criteri convertiti in una query Solr modificabile"); $("#q").focus(); });
+  $("#qedit").addEventListener("click", () => {
+    if (!S.query) return;
+    const k = spec();
+    const keep = { numbers: k.numbers, products_in: k.products_in, products_out: k.products_out, date_from: k.date_from, date_to: k.date_to };
+    let text = "";
+    try { text = buildQuery({ ...k, numbers: "", products_in: [], products_out: [], date_from: null, date_to: null }).query; } catch { /* solo numeri/prodotti/periodo */ }
+    applySpec({ text, mode: "solr", ...keep, core: k.core, area: k.area, langs: k.langs });
+    toast("Testo e filtri convertiti in Solr; numeri, prodotti e periodo restano nei loro campi");
+    $("#q").focus();
+  });
   $("#qreset").addEventListener("click", () => { applySpec({}); $("#q").focus(); });
   $("#qsave").addEventListener("click", () => { const s = spec(); $("#sname").value = s.text || s.phrase || s.numbers || ""; $("#dsave").showModal(); $("#sname").select(); });
   $("#stop").addEventListener("click", () => S.abort && S.abort.abort());
@@ -1482,12 +1570,18 @@ dialog{border:1px solid var(--bd2);border-radius:12px;padding:20px;width:min(480
 
   let lastSeenAt = (store.get("pageParams", null) || {}).at || "";
   function show() {
-    host.style.display = ""; document.documentElement.style.overflow = "hidden"; setTimeout(() => $("#q").focus(), 0);
+    host.style.display = ""; document.documentElement.style.overflow = "hidden"; if (document.body) document.body.inert = true; setTimeout(() => $("#q").focus(), 0);
     const pp = store.get("pageParams", null);
     if (pp && pp.at && pp.at !== lastSeenAt) { lastSeenAt = pp.at; toast(`Vista una ricerca della pagina Zucchetti (lingue "${pp.pLangs ?? "—"}"): dettagli in Impostazioni`); }
   }
-  conn.onPageSearch = () => { if (!$("#tab-settings").hidden) renderSettings(); };
-  function hide() { if (S.abort) S.abort.abort(); host.style.display = "none"; document.documentElement.style.overflow = prevOverflow; }
+  conn.onPageSearch = () => { if (!$("#tab-settings").hidden) renderConnInfo(); };
+  function hide() {
+    if (S.abort) S.abort.abort();
+    root.querySelectorAll("dialog[open]").forEach((d) => d.close());
+    host.style.display = "none";
+    document.documentElement.style.overflow = prevOverflow;
+    if (document.body) document.body.inert = prevInert;
+  }
   $("#close").addEventListener("click", hide);
   // eventi da tastiera: restano dentro il pannello (non arrivano alla pagina Zucchetti)
   const keyHandler = (e) => {

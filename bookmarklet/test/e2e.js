@@ -81,6 +81,7 @@ const txt = (page, sel) => page.locator(sel).first().innerText();
   await clickBookmarklet(page);
   await page.waitForSelector("#ricerca-tkt-host", { state: "attached" });
   check(await page.locator("#q").isVisible(), "il pannello si apre sopra la pagina");
+  check(await page.evaluate(() => document.body.inert === true), "la pagina sotto il pannello non riceve tastiera e clic");
   if (SHOTS) await page.screenshot({ path: SHOTS + "/bm-01-aperto.png" });
 
   await search(page, "detassazione");
@@ -142,12 +143,18 @@ const txt = (page, sel) => page.locator(sel).first().innerText();
   await page.click('.res .ib[title="Nota ed etichette"]');
   await page.fill("#ntext", "Da rivedere");
   await page.fill("#ntags", "normativa");
-  await page.click('#dnote button[value="ok"]');
+  await page.press("#ntags", "Enter");
   check((await txt(page, "#fav-count")) === "1", "preferito salvato");
 
-  // apertura ticket: link relativo e "function:"
-  await page.click('#f-year li:first-child button'); // toglie l'anno
+  // ricerca senza risultati dopo una al limite: nessun avviso vecchio o fuorviante
   await page.fill("#refine", "");
+  await search(page, "parolachenonesiste");
+  const al = await page.locator("#alert").isVisible() ? await txt(page, "#alert") : "";
+  check(!al.includes("al massimo") && !al.includes("non riesco a leggere"), `nessun avviso vecchio o fuorviante a zero risultati ("${al.slice(0, 60)}")`);
+  await search(page, "detassazione");
+  await page.selectOption("#sort", "date_desc");
+
+  // apertura ticket: link relativo e "function:"
   await page.waitForTimeout(300);
   const rows = await page.evaluate(() => {
     const r = document.getElementById("ricerca-tkt-host").shadowRoot;
@@ -168,6 +175,14 @@ const txt = (page, sel) => page.locator(sel).first().innerText();
   const [dl] = await Promise.all([page.waitForEvent("download"), page.click('#expm button[data-x="csv"]')]);
   const csv = fs.readFileSync(await dl.path(), "utf8");
   check(csv.startsWith("﻿Numero;Data;Prodotto;Oggetto") && csv.split("\r\n").length === 211, "CSV con 210 righe");
+
+  // anno scritto male: errore, nessuna richiesta
+  await page.click("#qreset");
+  await page.fill("#q", "tfr");
+  await page.fill("#dfrom", "0026-01-01");
+  await page.waitForTimeout(300);
+  check((await txt(page, "#qprev")).includes("Anno non valido"), "anno a 2 cifre segnalato");
+  await page.click("#qreset");
 
   // mappatura di un campo → filtro attivo
   await page.click('#nav button[data-tab="settings"]');
@@ -220,17 +235,37 @@ const txt = (page, sel) => page.locator(sel).first().innerText();
   check(!JSON.stringify(tech).includes("JSESSIONID"), "dati tecnici senza cookie");
   if (SHOTS) await page.screenshot({ path: SHOTS + "/bm-03-impostazioni.png" });
 
+  // importazione di dati personali: niente duplicati, preferito "malevolo" reso innocuo
+  const [pdl] = await Promise.all([page.waitForEvent("download"), page.click("#pexp")]);
+  const exported = fs.readFileSync(await pdl.path());
+  await page.setInputFiles("#pimp", { name: "dati.json", mimeType: "application/json", buffer: exported });
+  await page.waitForTimeout(300);
+  await page.setInputFiles("#pimp", { name: "dati.json", mimeType: "application/json", buffer: exported });
+  await page.waitForTimeout(300);
+  await page.click('#nav button[data-tab="saved"]');
+  check((await page.locator("#saved .li").count()) === 1, "importare due volte lo stesso file non duplica le ricerche salvate");
+  const evil = { favorites: [{ key: "nX", note: "", tags: "non-un-array", ticket: { number: 1, subject: "trappola", rawUrl: "function:x||(window.__pwned=1)", url: "javascript:window.__pwned=2", row: { url1: "function:x||(window.__pwned=3)" } } }] };
+  await page.setInputFiles("#pimp", { name: "evil.json", mimeType: "application/json", buffer: Buffer.from(JSON.stringify(evil)) });
+  await page.waitForTimeout(300);
+  await page.click('#nav button[data-tab="favorites"]');
+  const trap = page.locator("#favs .res", { hasText: "trappola" });
+  check((await trap.count()) === 1 && (await trap.locator("button", { hasText: "Apri" }).count()) === 0, "preferito importato con link pericoloso: nessun pulsante Apri");
+  await trap.locator(".num").click();
+  check(await page.evaluate(() => window.__pwned === undefined), "nessun codice eseguito dal preferito importato");
+  await page.click('#nav button[data-tab="settings"]');
+
   // Esc chiude, il segnalibro riapre; dopo il ricaricamento i dati restano
   await page.click('#nav button[data-tab="search"]');
   await page.keyboard.press("Escape");
   check(await page.locator("#ricerca-tkt-host").evaluate((e) => e.style.display === "none"), "Esc chiude il pannello");
+  check(await page.evaluate(() => document.body.inert === false), "la pagina torna utilizzabile dopo la chiusura");
   await clickBookmarklet(page);
   const reopened = await page.locator("#q").waitFor({ state: "visible", timeout: 5000 }).then(() => true, () => false);
   check(reopened, "il segnalibro riapre il pannello");
   await page.reload();
   await clickBookmarklet(page);
   await page.locator("#q").waitFor({ state: "visible", timeout: 5000 });
-  check((await txt(page, "#fav-count")) === "1", "preferiti conservati dopo il ricaricamento");
+  check((await txt(page, "#fav-count")) === "2", "preferiti conservati dopo il ricaricamento");
 
   // sessione scaduta
   await search(page, "tfr");
