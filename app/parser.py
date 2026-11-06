@@ -8,7 +8,7 @@ La routine `spsl_fquery_mc` restituisce un JSON del tipo::
 La colonna `description` contiene il titolo HTML con le parole trovate
 evidenziate (`<span solrfound="true">`), ad esempio::
 
-    [#8900042] [PAGHEW] [21-04-<span solrfound="true">2026</span>] detassazione
+    [#1234567] [PAGHEW] [21-04-<span solrfound="true">2026</span>] detassazione
 """
 from __future__ import annotations
 

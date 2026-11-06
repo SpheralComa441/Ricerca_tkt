@@ -15,14 +15,14 @@ def test_parse_sample(zcfg, sample_response):
     assert resp.max_results == 210
     assert not resp.capped
     t = resp.tickets[0]
-    assert t.number == 8900042
+    assert t.number == 1234567
     assert t.product == "PAGHEW"
     assert t.date == "2026-04-21"
     assert t.subject == "detassazione"
     assert t.subject_hl == [["detassazione", True]]
-    assert t.snippet == "detassazione pregresso spiegata la detassazione"
+    assert t.snippet == "detassazione dei premi spiegata la detassazione"
     assert t.url == "https://www.zucchetti.it/areariservata/jsp/gspv_fticket.jsp?TKSERIAL=0000123"
-    assert t.key == "n8900042"
+    assert t.key == "n1234567"
 
     t2 = resp.tickets[1]
     assert t2.subject == "detassazione & premio"

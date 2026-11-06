@@ -103,7 +103,15 @@ L'Area Riservata restituisce al massimo 210 ticket per ricerca: **Quanti per ann
 (un anno al massimo si conta mese per mese) e **Cerca nel …** su un anno così cerca mese per mese,
 per averli tutti. Nell'Area Riservata si cerca solo con testo, oggetto e periodo: con filtri che
 esistono solo nel portale (stato, gruppi e persone…) si cerca solo nel portale e il pannello lo
-dice. **Leggi** su un ticket dell'Area Riservata ne legge la pagina in quella scheda.
+dice. **Leggi** su un ticket dell'Area Riservata ne legge la pagina in quella scheda; un ticket
+che nell'elenco dell'Area Riservata non ha un indirizzo (si apre solo dalla sua pagina) ha
+**Copia numero AR**, da cercare in quella scheda.
+
+Se la scheda dell'Area Riservata si ricarica o cambia pagina (anche per la sessione scaduta), il
+pannello torna «in attesa del segnalibro»: quando lì c'è di nuovo la Ricerca rapida basta premere il
+segnalibro, senza altre conferme. Se il collegamento si rifiuta, la scheda non lo chiede più finché
+non si ricarica. Collegata, la scheda dell'Area Riservata non può più cambiare la scheda del portale
+(le viene tolto `window.opener`).
 
 Il pannello è isolato in uno *shadow DOM*: non modifica il portale e non ne eredita gli stili; la
 pagina sotto resta inattiva finché il pannello è aperto, e il controllo di inattività del portale

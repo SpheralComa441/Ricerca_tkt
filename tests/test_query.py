@@ -55,14 +55,14 @@ def test_only_negative_uses_match_all(zprofile):
 
 
 def test_numbers_term_strategy(zprofile):
-    built = build_query(spec(numbers="#8900042, 8900043"), zprofile)
-    assert built.query == "(8900042 OR 8900043)"
+    built = build_query(spec(numbers="#1234567, 1234568"), zprofile)
+    assert built.query == "(1234567 OR 1234568)"
     with pytest.raises(QueryError, match="intervalli"):
-        build_query(spec(numbers="8900042, 8900000-8910000"), zprofile)
-    built = build_query(spec(text="tfr", numbers="#8900042, 8900043; 8900000-8910000"), zprofile)
+        build_query(spec(numbers="1234567, 1230000-1240000"), zprofile)
+    built = build_query(spec(text="tfr", numbers="#1234567, 1234568; 1230000-1240000"), zprofile)
     assert built.query == "tfr"
-    assert built.post.numbers == [8900042, 8900043]
-    assert built.post.number_ranges == [(8900000, 8910000)]
+    assert built.post.numbers == [1234567, 1234568]
+    assert built.post.number_ranges == [(1230000, 1240000)]
     assert any("intervalli" in w for w in built.warnings)
 
 

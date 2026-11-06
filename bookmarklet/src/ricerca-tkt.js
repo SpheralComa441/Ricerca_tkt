@@ -566,10 +566,12 @@
     // altri filtri del portale (Servizio, Sede, Contatto, Etichette...): quelli voluti, gli altri tolti
     if (s.pf && typeof s.pf === "object") {
       for (const x of pfFields(m)) {
-        if (PEOPLE_KEYS.has(x.suffix) || x.kind === "treemenu") continue;
+        if (PEOPLE_KEYS.has(x.suffix)) continue;
         const want = s.pf[x.suffix];
         doSet(x.suffix, !!want, (f) => setPf(f, want, x.kind));
       }
+      const have = new Set(pfFields(m).map((x) => x.suffix));
+      for (const [k, want] of Object.entries(s.pf)) if (want && !PEOPLE_KEYS.has(k) && !have.has(k)) run.failed.push(`${k}: campo non trovato`);
     }
   }
   async function pressEnter(m) {
@@ -1059,38 +1061,77 @@
   // Apre il ticket con i comandi del portale (Open, doppio clic, Find by ID) e intercetta la nuova scheda:
   // mode "observe" la lascia aprire e ne ricorda l'indirizzo; mode "intercept" non apre nulla e restituisce
   // l'indirizzo (oppure carica la pagina nella cornice indicata, se il portale la apre con un modulo POST).
-  async function portalOpen(m, t, mode, frame) {
+  // Una sola apertura alla volta: chi arriva dopo (Leggi mentre un'altra lettura è in corso, «Apri in Touch» dalla
+  // finestra di lettura) aspetta. Due intercettazioni sovrapposte prenderebbero l'una il window.open dell'altra.
+  let portalLock = Promise.resolve();
+  async function portalOpen(m, t, mode, frame, signal) {
+    const prev = portalLock;
+    let release;
+    portalLock = new Promise((r) => { release = r; });
+    try {
+      await prev;
+      if (signal && signal.aborted) { const e = new Error("Ricerca interrotta."); e.name = "AbortError"; throw e; }
+      return await portalOpenOnce(m, t, mode, frame);
+    } finally { release(); }
+  }
+  async function portalOpenOnce(m, t, mode, frame) {
     const rec = recordFor(m, t);
-    const got = { url: null, posted: false, how: "" };
-    const W = window, origOpen = W.open, FP = HTMLFormElement.prototype, origSubmit = FP.submit;
+    const got = { url: null, posted: false, how: "", manual: false };
+    const W = window, origOpen = W.open, FP = HTMLFormElement.prototype, origSubmit = FP.submit, AP = HTMLAnchorElement.prototype, origClick = AP.click;
+    // richieste del portale partite dopo il nostro comando (Find by ID, Open...): finché sono in corso si aspetta
+    const reqsBefore = new Set(Object.keys((Ext.Ajax && Ext.Ajax.requests) || {}));
+    const pendingNew = () => { try { return Object.entries(Ext.Ajax.requests || {}).some(([id, r]) => !reqsBefore.has(id) && r && typeof r.isLoading === "function" && r.isLoading()); } catch { return false; } };
+    // un clic o un tasto dell'utente nel portale (fuori dal pannello): quello che apre dopo è suo, non si tocca
+    let userAt = -1e9;
+    const onGesture = (e) => { if (e.isTrusted && e.target !== host) userAt = performance.now(); };
+    const byUser = () => performance.now() - userAt < 1500;
     const take = (u) => { const a = u && !/^(about:blank|javascript:)/i.test(String(u)) ? absUrl(u) : null; if (a) got.url = a; return a; };
     const sink = { closed: false, opener: W, focus() {}, blur() {}, close() { this.closed = true; }, document: { write() {}, writeln() {}, open() {}, close() {} } };
     Object.defineProperty(sink, "location", { get: () => ({ get href() { return got.url || "about:blank"; }, set href(v) { take(v); }, assign: take, replace: take, toString: () => got.url || "about:blank" }), set: take });
-    W.open = function (u) {
+    const hookOpen = function (u) {
+      if (byUser()) return origOpen.apply(W, arguments);
       take(u);
       if (mode === "observe") return origOpen.apply(W, arguments);
       return sink;
     };
+    const linkHref = (a) => (a && a.href && a.target && a.target !== "_self" && !/^javascript:/i.test(a.getAttribute("href") || "") && !(a.getAttribute("href") || "").startsWith("#") ? a.href : "");
+    // <a target=_blank> creato al volo e cliccato senza inserirlo nella pagina: il clic non arriva al documento
+    const hookClick = function () {
+      const u = !this.isConnected && !byUser() ? linkHref(this) : "";
+      if (u) { take(u); if (mode !== "observe") return undefined; }
+      return origClick.call(this);
+    };
+    W.open = hookOpen;
+    AP.click = hookClick;
     const onClick = (e) => {
-      const a = (e.composedPath ? e.composedPath() : []).find((x) => x && x.tagName === "A");
-      if (!a || !a.href || /^javascript:/i.test(a.getAttribute("href") || "") || (a.getAttribute("href") || "").startsWith("#")) return;
-      if (a.target && a.target !== "_self") { take(a.href); if (mode !== "observe") e.preventDefault(); }
+      if (e.isTrusted && e.target !== host) return; // clic vero dell'utente nel portale
+      const u = linkHref((e.composedPath ? e.composedPath() : []).find((x) => x && x.tagName === "A"));
+      if (u) { take(u); if (mode !== "observe") e.preventDefault(); }
     };
     const formUrl = (fm) => {
       if ((fm.method || "get").toLowerCase() !== "get") return null;
       try { const u = new URL(fm.action || location.href, location.href); for (const [k, v] of new FormData(fm)) if (typeof v === "string") u.searchParams.append(k, v); return u.href; } catch { return null; }
     };
     const viaForm = (fm) => {
-      if (!fm.target || fm.target === "_self") return false;
+      if (!fm.target || fm.target === "_self" || byUser()) return false;
       const u = formUrl(fm);
       if (u) { take(u); if (mode === "observe") return false; return true; }
-      if (mode !== "observe" && frame) { fm.target = frame.name; got.posted = true; }
+      if (mode !== "observe" && frame) {
+        // solo per questo invio: il modulo del portale torna subito com'era (altrimenti le aperture successive
+        // del portale finirebbero tutte nella stessa scheda con il nome della cornice)
+        const was = fm.getAttribute("target");
+        fm.target = frame.name; got.posted = true;
+        setTimeout(() => { if (fm.getAttribute("target") === frame.name) { if (was === null) fm.removeAttribute("target"); else fm.setAttribute("target", was); } }, 0);
+      }
       return false;
     };
-    FP.submit = function () { if (viaForm(this)) return undefined; return origSubmit.call(this); };
+    const hookSubmit = function () { if (viaForm(this)) return undefined; return origSubmit.call(this); };
+    FP.submit = hookSubmit;
     const onSubmit = (e) => { if (viaForm(e.target)) e.preventDefault(); };
     document.addEventListener("click", onClick, true);
     document.addEventListener("submit", onSubmit, true);
+    W.addEventListener("pointerdown", onGesture, true);
+    W.addEventListener("keydown", onGesture, true);
     try {
       activity(true);
       if (rec) {
@@ -1121,12 +1162,24 @@
           } catch { /* sotto: Find by ID */ }
         }
       }
-      if (!got.how && t.code) got.how = (await findById(m, t.code, true)) ? "Find by ID" : "";
-      if (got.how) await waitUntil(() => !!got.url || got.posted, 4000);
+      if (!got.how && t.code) {
+        // per l'utente («Apri in Touch»): numero negli appunti e finestra lasciata aperta se non si può confermare
+        const r = await findById(m, t.code, mode !== "observe");
+        if (r === true) got.how = "Find by ID"; else if (r === "manual") got.manual = true;
+      }
+      if (got.how) {
+        const done = () => !!got.url || got.posted;
+        // portale lento: si aspetta finché la sua richiesta è in corso (poi la nuova scheda si aprirebbe lo stesso)
+        if (!(await waitUntil(done, 4000)) && pendingNew()) await waitUntil(() => done() || !pendingNew(), 16000);
+      }
     } finally {
-      W.open = origOpen; FP.submit = origSubmit;
+      if (W.open === hookOpen) W.open = origOpen;
+      if (FP.submit === hookSubmit) FP.submit = origSubmit;
+      if (AP.click === hookClick) AP.click = origClick;
       document.removeEventListener("click", onClick, true);
       document.removeEventListener("submit", onSubmit, true);
+      W.removeEventListener("pointerdown", onGesture, true);
+      W.removeEventListener("keydown", onGesture, true);
     }
     if (got.url) learnTemplate(got.url, t, rec);
     return got;
@@ -1140,7 +1193,8 @@
     hide();
     const got = await portalOpen(m, t, "observe");
     if (got.url) { show(); render(); return; } // il ticket è nella nuova scheda; il pannello resta qui con i risultati
-    if (!got.how) { show(); toast(t.code ? `Ticket ${t.code} non presente nell'elenco: numero copiato, aprilo dal portale` : "Ticket non presente nell'elenco"); }
+    if (got.manual) return; // Find by ID compilato (o numero negli appunti): si conferma nel portale
+    if (!got.how && !t.code) { show(); toast("Ticket non presente nell'elenco"); } // con il numero: messaggio già dato da findById
   }
   // quiet: per la lettura nel pannello (nessun messaggio, il pannello resta aperto); true se la richiesta è partita
   async function findById(m, code, quiet) {
@@ -1164,17 +1218,17 @@
       if (f) { field = f; return true; }
       return false;
     }, 2500);
-    if (!field) return false; // il numero è già negli appunti
+    if (!field) return quiet ? false : "manual"; // il numero è già negli appunti
     try { field.setValue(code); if (!quiet) field.focus(true, 30); } catch { /* */ }
     // conferma con il pulsante della finestra (OK / Find / Cerca...), se riconoscibile
     try {
       const w = field.up("window");
       const ok = w && w.query("button").filter((x) => x.isVisible && x.isVisible(true))
-        .find((x) => /^(ok|find|search|cerca|trova|apri|open|vai|go)$/i.test(textOf(String((x.getText ? x.getText() : x.text) || ""))));
+        .find((x) => /^(ok|find|search|cerca|trova|apri|open|vai|go|confirm|conferma|vai al ticket)$/i.test(textOf(String((x.getText ? x.getText() : x.text) || ""))));
       if (ok && String(field.getValue()) === code) { await sleep(80); clickBtn(ok); return true; }
       if (quiet && w) { try { w.close(); } catch { /* */ } }
     } catch { /* l'utente conferma a mano */ }
-    return false;
+    return quiet ? false : "manual";
   }
 
   // ---- lettura del ticket completo: la pagina del ticket in una cornice nascosta, poi il testo nel pannello
@@ -1191,6 +1245,14 @@
     return fr;
   }
   const frameWin = (fr) => { try { const w = fr.contentWindow; return w && w.document ? w : null; } catch { return null; } };
+  // maschera di caricamento visibile; non conta quella fissa che Ext mette sui componenti disabilitati (maskOnDisable)
+  const busyMask = (X, w, el) => {
+    if (!(el.offsetWidth > 0) || w.getComputedStyle(el).display === "none" || w.getComputedStyle(el).visibility === "hidden") return false;
+    const p = el.parentElement;
+    if (p && p.closest(".x-item-disabled")) return false;
+    try { const c = p && X && X.getCmp(p.id); if (c && typeof c.isDisabled === "function" && c.isDisabled()) return false; } catch { /* */ }
+    return true;
+  };
   async function waitFrame(fr, signal) {
     let lastLen = -1, since = 0, cross = false;
     const ok = await waitUntil(() => {
@@ -1207,7 +1269,7 @@
         // una finestra di avviso aperta ha la sua maschera: allora la pagina è pronta (il suo testo si legge)
         let modal = false;
         try { modal = X.ComponentQuery.query("window").some((x) => x.modal && x.isVisible && x.isVisible()); } catch { /* */ }
-        try { if (!modal && [...doc.querySelectorAll(".x-mask")].some((el) => el.offsetWidth > 0 && w.getComputedStyle(el).display !== "none" && w.getComputedStyle(el).visibility !== "hidden")) return false; } catch { /* */ }
+        try { if (!modal && [...doc.querySelectorAll(".x-mask")].some((el) => busyMask(X, w, el))) return false; } catch { /* */ }
       }
       const len = ((doc.body && doc.body.innerText) || "").length;
       if (len !== lastLen) { lastLen = len; since = performance.now(); return false; }
@@ -1238,8 +1300,14 @@
           if (c.ownerCt && c.ownerCt.isXType && (c.ownerCt.isXType("checkboxgroup") || c.ownerCt.isXType("radiogroup"))) continue;
           if ((c.isXType && c.isXType("hiddenfield")) || c.inputType === "password" || (c.isHidden && c.isHidden())) continue;
           const label = plainText((typeof c.getFieldLabel === "function" ? c.getFieldLabel() : c.fieldLabel) || c.boxLabel || c.name || "").replace(/:$/, "");
-          let v = typeof c.getDisplayValue === "function" ? c.getDisplayValue() : null;
-          if (v === null || v === undefined || v === "") v = c.rendered && typeof c.getRawValue === "function" ? c.getRawValue() : c.getValue();
+          let v;
+          if (c.isXType && (c.isXType("checkboxgroup") || c.isXType("radiogroup"))) v = (typeof c.getChecked === "function" ? c.getChecked() : []).map((b) => b.boxLabel || b.inputValue || "").filter(Boolean).join(", ");
+          else if (c.isXType && c.isXType("checkbox")) v = c.getValue() ? "Sì" : "No";
+          else {
+            v = typeof c.getDisplayValue === "function" ? c.getDisplayValue() : null;
+            if (v === null || v === undefined || v === "") v = c.rendered && typeof c.getRawValue === "function" ? c.getRawValue() : c.getValue();
+          }
+          if (v !== null && typeof v === "object" && !Array.isArray(v) && !isDate(v)) continue; // valore strutturato senza testo leggibile
           v = plainText(fmt(v));
           if (!v || emptyJson(v)) continue;
           const key = label + "\u0001" + v;
@@ -1260,6 +1328,17 @@
             return plainText(fmt(v));
           }));
           if (rows.length) out.tables.push({ title: plainText(g.title || (g.tab && g.tab.text) || ""), head: cols.map((c) => plainText(c.text || c.dataIndex)), rows });
+        } catch { /* */ }
+      }
+      // elenchi disegnati con un modello (dataview con itemTpl: comunicazioni, note...), non le griglie e i menu a tendina
+      for (const dv of q("dataview")) {
+        try {
+          if ((dv.isXType && (dv.isXType("tableview") || dv.isXType("boundlist"))) || dv.floating || (dv.up && dv.up("[floating]")) || !dv.rendered || !dv.el) continue;
+          const v = plainText(dv.el.dom.innerText || dv.el.dom.textContent || "");
+          if (!v || seen.has(v)) continue;
+          seen.add(v);
+          const ow = dv.title ? dv : dv.up && dv.up("panel[title]");
+          out.texts.push({ label: plainText((ow && ow.title) || ""), value: v.slice(0, 40000) });
         } catch { /* */ }
       }
       for (const c of q("component")) {
@@ -1297,7 +1376,7 @@
       const ok = await waitUntil(() => {
         const el = pv.body && pv.body.dom;
         if (!el) return false;
-        if ([...pv.el.dom.querySelectorAll(".x-mask")].some((x) => x.offsetWidth > 0 && getComputedStyle(x).display !== "none")) return false;
+        if ([...pv.el.dom.querySelectorAll(".x-mask")].some((x) => busyMask(Ext, window, x))) return false;
         const len = (el.innerText || "").length;
         if (len !== last) { last = len; since = performance.now(); return false; }
         return len > 20 && performance.now() - since > 800;
@@ -1325,7 +1404,7 @@
       let url = touchUrl(t), how = url ? "indirizzo noto" : "";
       if (!url) {
         if (!m) throw new Error("Non trovo l'elenco «All tickets» del portale.");
-        const got = await portalOpen(m, t, "intercept", fr);
+        const got = await portalOpen(m, t, "intercept", fr, signal);
         url = got.url; how = got.how + (got.posted ? " (modulo)" : "");
         if (!url && !got.posted) throw new Error(got.how ? "Il portale non ha aperto il ticket: usa «Apri in Touch»." : "Ticket non presente nell'elenco del portale: cercalo o aprilo con «Apri in Touch».");
       }
@@ -1656,6 +1735,8 @@ dialog{border:1px solid var(--bd2);border-radius:12px;padding:20px;width:min(480
   const busy = () => { if (!S.searching) return false; toast("Attendi la fine della ricerca o premi Interrompi"); return true; };
   // ---- filtri del portale nel pannello: gruppi e persone, poi tutti gli altri (Servizio, Sede, Contatto...)
   const openTrees = new Set(); // alberi aperti nel pannello: restano aperti quando il pannello si ridisegna
+  const listQuery = new Map(); // testo cercato negli elenchi lunghi: resta quando la riga si ridisegna
+  const listLoaded = new Set(); // elenchi senza voci già chiesti al portale (una volta per pagina)
   const openNodes = new Map(); // per campo: rami aperti dell'albero
   function changePf(m, fn) {
     if (busy()) return false;
@@ -1679,7 +1760,8 @@ dialog{border:1px solid var(--bd2);border-radius:12px;padding:20px;width:min(480
       const u = C.TypedLoggedUser || C.LoggedUser || {};
       const H = C.HDAUser || {};
       const id = u.ID || u.Id || u.UserID || H.UserID || "";
-      return { id: String(id || ""), name: textOf(String(u.Name || u.Description || u.FullName || "")), group: String(H.DefaultUserGroupID || ""), groupName: textOf(String(H.DefaultUserGroupDescription || H.DefaultUserGroupName || "")) };
+      const nm = u.Name || u.Description || u.FullName || (String(H.ID || "") === String(id) ? H.FullName || H.ObjectDescription : "") || "";
+      return { id: String(id || ""), name: textOf(String(nm)), group: String(H.DefaultUserGroupID || ""), groupName: textOf(String(H.DefaultUserGroupDescription || H.DefaultUserGroupName || "")) };
     } catch { return null; }
   }
   const ME_FIELDS = new Set(["AssignedUserOrGroupFilter", "ModifiedBy", "OwnerUserID"]);
@@ -1711,12 +1793,16 @@ dialog{border:1px solid var(--bd2);border-radius:12px;padding:20px;width:min(480
       if (openTrees.has(suffix)) cv.appendChild(treeBrowser(m, f, label, suffix));
     }
     const who = me();
-    const quick = (v, t, text) => act.appendChild(h("button", { type: "button", class: "btn gh s", title: t, "data-quick": text, onclick: () => {
+    const quick = (v, t, text) => act.appendChild(h("button", { type: "button", class: "btn gh s", title: t, "data-quick": text, onclick: async () => {
+      if (busy()) return;
+      // nome mancante (il portale vero non lo dà per il gruppo): dall'albero del campo, primo livello
+      if (t === v) { const ts = treeStoreOf(f); if (ts) { try { await expandNode(ts.getRootNode(), ts); const n = ts.getNodeById(v); if (n) t = nodeText(f, n) || v; } catch { /* */ } } }
       if (changePf(m, () => setPerson(f, { v, t }))) afterPf(); else if (!S.searching) toast("Il portale non ha accettato il valore");
     } }, text));
-    if (who && who.id && ME_FIELDS.has(suffix) && (!cur || cur.v !== who.id)) quick(who.id, who.name || "Io", "Io");
-    if (who && who.group && MYGROUP_FIELDS.has(suffix) && (!cur || cur.v !== who.group)) quick(who.group, who.groupName || "Il mio gruppo", "Il mio gruppo");
-    if (kind === "tree" || kind === "treemenu" || kind === "remote") {
+    // senza nome si passa il codice: il nome lo mette il portale (o l'albero); «Io» in una ricerca condivisa indicherebbe chi la apre
+    if (who && who.id && ME_FIELDS.has(suffix) && (!cur || cur.v !== who.id)) quick(who.id, who.name || who.id, "Io");
+    if (who && who.group && MYGROUP_FIELDS.has(suffix) && (!cur || cur.v !== who.group)) quick(who.group, who.groupName || who.group, "Il mio gruppo");
+    if (kind === "tree" || kind === "treemenu" || kind === "remote" || (kind === "list" && !comboOptions(f).length)) {
       act.appendChild(h("button", { type: "button", class: kind === "treemenu" ? "btn s" : "btn gh s", title: "Scegli con il menu del portale: il pannello si nasconde e si riapre dopo la scelta", onclick: () => { if (!busy()) pickInPortal(m, f, label); } }, kind === "treemenu" ? "Scegli nel portale…" : "Menu del portale"));
     }
     return h("div", { class: "pr", "data-pf": suffix }, h("span", { class: "lb" }, label), cv, act);
@@ -1726,14 +1812,21 @@ dialog{border:1px solid var(--bd2);border-radius:12px;padding:20px;width:min(480
     const wrap = h("div", { class: "lk" });
     const sug = h("ul", { class: "sug", hidden: true });
     const inp = h("input", { type: "search", placeholder: has ? "Cambia: scrivi un nome…" : "Scrivi almeno 2 lettere…", "aria-label": `Cerca ${label}`, "data-pfq": suffix, "data-ppl": suffix });
-    let seq = 0;
-    inp.addEventListener("keydown", (e) => {
+    let seq = 0, shownFor = null, pending = null;
+    const first = () => { const b = sug.querySelector("button"); if (b) b.click(); };
+    inp.addEventListener("keydown", async (e) => {
       if (e.key !== "Enter") return;
       e.preventDefault();
-      const b = sug.querySelector("button");
-      if (b) b.click();
+      const q = inp.value.trim();
+      if (shownFor === q) return first();
+      if (q.length < 2) return;
+      if (pending) await pending;
+      if (shownFor !== inp.value.trim()) await find();
+      if (shownFor === inp.value.trim()) first();
     });
-    inp.addEventListener("input", debounce(async () => {
+    const later = debounce(() => { if (inp.isConnected && shownFor !== inp.value.trim()) find(); }, 350);
+    inp.addEventListener("input", () => { shownFor = null; ++seq; later(); });
+    const find = () => (pending = (async () => {
       const q = inp.value.trim();
       const my = ++seq;
       clear(sug); sug.hidden = q.length < 2;
@@ -1749,7 +1842,8 @@ dialog{border:1px solid var(--bd2);border-radius:12px;padding:20px;width:min(480
         if (!ok && !S.searching) toast("Il portale non ha accettato il valore: usa «Menu del portale»");
         afterPf();
       } }, it.t)));
-    }, 350));
+      shownFor = q;
+    })().finally(() => { pending = null; }));
     wrap.append(inp, sug);
     return wrap;
   }
@@ -1760,22 +1854,39 @@ dialog{border:1px solid var(--bd2);border-radius:12px;padding:20px;width:min(480
     const cur = new Set(multi ? asList(f.getValue()) : [(personValue(f) || {}).v].filter(Boolean));
     const wrap = h("div", { class: "lst" });
     const box = h("div", { class: "tg", "data-pfl": suffix });
-    const q = opts.length > 12 ? h("input", { type: "search", placeholder: `Cerca tra ${opts.length} voci…`, "aria-label": `Cerca in ${label}` }) : null;
+    const q = opts.length > 12 ? h("input", { type: "search", placeholder: `Cerca tra ${opts.length} voci…`, "aria-label": `Cerca in ${label}`, "data-pflq": suffix, value: listQuery.get(suffix) || "" }) : null;
     const draw = () => {
       clear(box);
       const n = q ? norm(q.value.trim()) : "";
-      const shown = opts.filter(([v, t]) => cur.has(v) || !n || norm(t).includes(n));
-      for (const [v, t] of shown.slice(0, 60)) box.appendChild(h("button", { type: "button", "aria-pressed": String(cur.has(v)), "data-v": v, onclick: () => {
+      const match = opts.filter(([v, t]) => cur.has(v) || !n || norm(t).includes(n));
+      // le voci scelte restano visibili (e si possono togliere) anche oltre le prime 60
+      const shown = match.slice(0, 60).concat(match.slice(60).filter(([v]) => cur.has(v)));
+      for (const [v, t] of shown) box.appendChild(h("button", { type: "button", "aria-pressed": String(cur.has(v)), "data-v": v, onclick: () => {
         const next = new Set(cur);
         if (next.has(v)) next.delete(v); else { if (!multi) next.clear(); next.add(v); }
         const ok = changePf(m, () => (multi ? setMulti(f, [...next]) : next.size ? setPerson(f, { v, t }) : (clearField(f), true)));
         if (!ok && !S.searching) toast("Il portale non ha accettato il valore");
         afterPf();
       } }, t));
-      if (shown.length > 60) box.appendChild(h("span", { class: "mu sm", text: `… altre ${shown.length - 60}: restringi la ricerca` }));
-      if (!shown.length) box.appendChild(h("span", { class: "mu sm", text: "Nessuna voce" }));
+      if (match.length > shown.length) box.appendChild(h("span", { class: "mu sm", text: `… altre ${match.length - shown.length}: restringi la ricerca` }));
+      if (!shown.length) box.appendChild(h("span", { class: "mu sm", text: loadingList ? "Carico le voci dal portale…" : "Nessuna voce" }));
     };
-    if (q) { q.addEventListener("input", debounce(draw, 150)); wrap.appendChild(q); }
+    // elenco del campo caricato dal portale alla prima apertura del menu: si carica una volta da qui
+    let loadingList = false;
+    try {
+      const st = !opts.length && typeof f.getStore === "function" ? f.getStore() : null;
+      const px = st && typeof st.getProxy === "function" ? st.getProxy() : null;
+      if (px && !px.isMemoryProxy && !loading(st) && !listLoaded.has(suffix)) {
+        listLoaded.add(suffix); loadingList = true;
+        st.load({ callback: () => { loadingList = false; if (wrap.isConnected) afterPf(); } });
+      }
+    } catch { loadingList = false; }
+    if (q) {
+      q.addEventListener("input", () => listQuery.set(suffix, q.value));
+      q.addEventListener("input", debounce(draw, 150));
+      q.addEventListener("keydown", (e) => { if (e.key === "Enter") e.preventDefault(); }); // Invio non invia il modulo (ricerca dei ticket)
+      wrap.appendChild(q);
+    }
     wrap.appendChild(box);
     draw();
     return wrap;
@@ -1787,10 +1898,10 @@ dialog{border:1px solid var(--bd2);border-radius:12px;padding:20px;width:min(480
   // carica i figli di un ramo senza aprirlo (store.load({node}) + flushLoad: due load nello stesso momento si perderebbero)
   function expandNode(n, st) {
     return new Promise((res) => {
-      try { if (!n || n.isLeaf() || (n.isLoaded() && (n.childNodes.length || !n.isRoot()))) return res(); } catch { return res(); }
+      try { if (!n || n.isLeaf() || (n.isLoaded() && (n.childNodes.length || !n.isRoot()))) return res(true); } catch { return res(true); }
       let done = false;
-      const fin = () => { if (!done) { done = true; res(); } };
-      setTimeout(fin, 10000);
+      const fin = (ok) => { if (!done) { done = true; res(ok !== false); } };
+      setTimeout(() => fin(false), 10000);
       try {
         const ts = st || (typeof n.getTreeStore === "function" ? n.getTreeStore() : null);
         const root = ts && typeof ts.getRootNode === "function" ? ts.getRootNode() : null;
@@ -1800,10 +1911,10 @@ dialog{border:1px solid var(--bd2);border-radius:12px;padding:20px;width:min(480
           return;
         }
         if (ts && typeof ts.load === "function" && !n.isLoading()) {
-          ts.load({ node: n, callback: fin });
+          ts.load({ node: n, callback: (recs, op, ok) => fin(ok) });
           if (typeof ts.flushLoad === "function") ts.flushLoad();
-        } else if (n.isLoading && n.isLoading()) { const t = setInterval(() => { if (!n.isLoading()) { clearInterval(t); fin(); } }, 100); } else n.expand(false, fin);
-      } catch { try { n.expand(false, fin); } catch { fin(); } }
+        } else if (n.isLoading && n.isLoading()) { const t = setInterval(() => { if (!n.isLoading()) { clearInterval(t); fin(n.isLoaded()); } }, 100); } else n.expand(false, () => fin(true));
+      } catch { try { n.expand(false, () => fin(true)); } catch { fin(false); } }
     });
   }
   function treeBrowser(m, f, label, suffix) {
@@ -1815,7 +1926,8 @@ dialog{border:1px solid var(--bd2);border-radius:12px;padding:20px;width:min(480
     const note = h("div", { class: "mu sm" });
     const list = h("ul", { class: "tl" });
     wrap.append(q, note, list);
-    let alive = true, deep = null;
+    let alive = true, deep = null, walking = false;
+    const failed = new Set(); // rami che il portale non ha caricato
     const curV = (pfValue(f, "tree") || {}).v;
     const pick = (n) => {
       const ok = changePf(m, () => setPerson(f, { v: nodeValue(f, n), t: nodeText(f, n) }));
@@ -1828,10 +1940,10 @@ dialog{border:1px solid var(--bd2);border-radius:12px;padding:20px;width:min(480
       const isOpen = open.has(id);
       const li = h("li", { style: `padding-left:${depth * 16}px` });
       li.appendChild(leaf ? h("span", { class: "tgl" }) : h("button", { type: "button", class: "tgl", "aria-expanded": String(isOpen), "aria-label": `${isOpen ? "Chiudi" : "Apri"} ${nodeText(f, n)}`, onclick: async () => {
-        if (isOpen) open.delete(id); else { open.add(id); note.textContent = "Carico dal portale…"; await expandNode(n, st); note.textContent = ""; }
+        if (isOpen) open.delete(id); else { open.add(id); note.textContent = "Carico dal portale…"; if (await expandNode(n, st)) failed.delete(id); else failed.add(id); note.textContent = ""; }
         draw();
       } }, isOpen ? "▾" : "▸"));
-      const name = (path ? path + " › " : "") + nodeText(f, n);
+      const name = (path ? path + " › " : "") + nodeText(f, n) + (failed.has(id) ? " — ramo non caricato (chiudi e riapri per riprovare)" : "");
       li.appendChild(selectable(n)
         ? h("button", { type: "button", class: "nm" + (nodeValue(f, n) === curV ? " on" : ""), "data-node": nodeValue(f, n), onclick: () => pick(n) }, name)
         : h("span", { class: "nm off" }, name));
@@ -1848,16 +1960,17 @@ dialog{border:1px solid var(--bd2);border-radius:12px;padding:20px;width:min(480
         const walk = (n, path) => { for (const c of kids(n)) { const t = nodeText(f, c); if (norm(t).includes(text)) out.push([c, path]); walk(c, path ? path + " › " + t : t); } };
         walk(root, "");
         for (const [c, path] of out.slice(0, 80)) list.appendChild(row(c, 0, path));
-        if (!out.length) list.appendChild(h("li", { class: "mu sm", text: deep ? "Cerco in tutto l'elenco…" : "Nessun risultato" }));
+        if (!out.length) list.appendChild(h("li", { class: "mu sm", text: walking ? "Cerco in tutto l'elenco…" : failed.size ? "Nessun risultato nei rami caricati: alcuni rami non si sono caricati" : "Nessun risultato" }));
         return;
       }
       const walk = (n, depth) => { for (const c of kids(n)) { list.appendChild(row(c, depth, "")); if (open.has(String(c.getId()))) walk(c, depth + 1); } };
       walk(root, 0);
-      if (!kids(root).length) list.appendChild(h("li", { class: "mu sm", text: "Elenco vuoto" }));
+      if (!kids(root).length) list.appendChild(h("li", { class: "mu sm", text: failed.has(String(root.getId())) ? "Il portale non ha risposto (sessione scaduta?): riprova o usa «Menu del portale»" : "Elenco vuoto" }));
     };
     // per cercare un nome servono tutti i rami: si caricano (al massimo 80 richieste al portale)
     const loadAll = async () => {
       if (deep) return deep;
+      walking = true;
       deep = (async () => {
         const queue = [st.getRootNode()];
         let loads = 0;
@@ -1865,19 +1978,18 @@ dialog{border:1px solid var(--bd2);border-radius:12px;padding:20px;width:min(480
           const n = queue.shift();
           let need = false;
           try { need = !n.isLeaf() && !n.isLoaded(); } catch { need = false; }
-          if (need) { loads++; note.textContent = `Carico l'elenco dal portale… (${loads})`; await expandNode(n, st); }
+          if (need) { loads++; note.textContent = `Carico l'elenco dal portale… (${loads})`; if (!(await expandNode(n, st))) failed.add(String(n.getId())); draw(); }
           for (const c of kids(n)) queue.push(c);
         }
         note.textContent = queue.length ? "Elenco caricato in parte: restringi la ricerca o apri i rami" : "";
-        deep = null;
-        draw();
-      })();
+      })().finally(() => { walking = false; deep = null; draw(); });
       return deep;
     };
-    q.addEventListener("input", debounce(() => { draw(); if (norm(q.value.trim()).length >= 2) loadAll(); }, 250));
+    q.addEventListener("keydown", (e) => { if (e.key === "Enter") e.preventDefault(); }); // Invio non invia il modulo (ricerca dei ticket)
+    q.addEventListener("input", debounce(() => { if (norm(q.value.trim()).length >= 2) loadAll(); draw(); }, 250));
     if (!st) { note.textContent = "Elenco non leggibile: usa «Menu del portale»"; return wrap; }
     note.textContent = "Carico dal portale…";
-    expandNode(st.getRootNode(), st).then(() => { note.textContent = ""; draw(); });
+    expandNode(st.getRootNode(), st).then((ok) => { if (!ok) failed.add(String(st.getRootNode().getId())); note.textContent = ""; draw(); });
     return wrap;
   }
   async function queryField(f, q) {
@@ -2072,8 +2184,9 @@ dialog{border:1px solid var(--bd2);border-radius:12px;padding:20px;width:min(480
             let sum = 0, capped = false;
             for (let mo = 1; mo <= 12; mo++) {
               if (y === nowY && mo > new Date().getMonth() + 1) break;
-              $("#progt").textContent = `Area Riservata: ${MESI_L[mo - 1]} ${y}…`;
               const from = `${y}-${pad(mo)}-01`, to = `${y}-${pad(mo)}-${pad(lastDay(y, mo))}`;
+              if ((s.dfrom && s.dfrom > to) || (s.dto && s.dto < from)) continue; // mese fuori dal periodo
+              $("#progt").textContent = `Area Riservata: ${MESI_L[mo - 1]} ${y}…`;
               const cm = await arCount(Object.assign({}, yearSpec(y), { dfrom: s.dfrom && s.dfrom > from ? s.dfrom : from, dto: s.dto && s.dto < to ? s.dto : to }), ctrl.signal);
               sum += cm.n; capped = capped || cm.capped;
             }
@@ -2164,13 +2277,15 @@ dialog{border:1px solid var(--bd2);border-radius:12px;padding:20px;width:min(480
     }
     if (m && s.pf && typeof s.pf === "object") {
       for (const x of pfFields(m)) {
-        if (PEOPLE_KEYS.has(x.suffix) || x.kind === "treemenu") continue;
+        if (PEOPLE_KEYS.has(x.suffix)) continue;
         const want = s.pf[x.suffix], cur = pfValue(x.f, x.kind);
         if (!want && !cur) continue;
         if (want && cur && JSON.stringify(cur.v) === JSON.stringify(want.v)) continue;
         ensureSnapshot(m);
         try { if (!setPf(x.f, want, x.kind) && want) bad.push(x.label); } catch { if (want) bad.push(x.label); }
       }
+      const have = new Set(pfFields(m).map((x) => x.suffix));
+      for (const [k, want] of Object.entries(s.pf)) if (want && !PEOPLE_KEYS.has(k) && !have.has(k)) bad.push(want.t ? `${k} (${want.t})` : k);
     }
     renderToggles(); advCount(); preview();
     if (bad.length) toast(`Il portale non ha accettato: ${bad.join(", ")}. Usa «Scegli nel portale».`);
@@ -2262,14 +2377,10 @@ dialog{border:1px solid var(--bd2);border-radius:12px;padding:20px;width:min(480
   function arPost(msg) {
     try { AR.win.postMessage(Object.assign({ ns: "rtkt", v: 1 }, msg), AR.origin); return true; } catch { return false; }
   }
-  function arConnect() {
-    if (AR.state === "on") { arPost({ type: "bye" }); arDrop(); renderArState(); return; }
-    AR.origin = arOriginOf();
+  // in attesa del segnalibro nella scheda dell'Area Riservata: «hello» ogni secondo, con un codice nuovo
+  function arWait() {
     AR.nonce = randomId();
-    try { AR.win = window.open(arUrl(), "rtkt-ar"); } catch { AR.win = null; }
-    if (!AR.win) { toast("Il browser ha bloccato la nuova scheda: consenti le finestre popup per questo sito e riprova"); return; }
     AR.state = "waiting";
-    renderArState();
     clearInterval(AR.timer);
     const t0 = Date.now();
     AR.timer = setInterval(() => {
@@ -2278,10 +2389,26 @@ dialog{border:1px solid var(--bd2);border-radius:12px;padding:20px;width:min(480
       arPost({ type: "hello", nonce: AR.nonce, from: `Ricerca TKT ${VERSION}` });
     }, 1000);
   }
+  function arConnect() {
+    if (AR.state === "on") { arPost({ type: "bye", nonce: AR.nonce }); arDrop(); renderArState(); return; }
+    AR.origin = arOriginOf();
+    try { AR.win = window.open(arUrl(), "rtkt-ar"); } catch { AR.win = null; }
+    if (!AR.win) { toast("Il browser ha bloccato la nuova scheda: consenti le finestre popup per questo sito e riprova"); return; }
+    arWait();
+    renderArState();
+  }
+  window.addEventListener("pagehide", () => { if (AR.state === "on") arPost({ type: "bye", reason: "pagehide", nonce: AR.nonce }); });
   window.addEventListener("message", (e) => {
-    if (!AR.win || e.source !== AR.win || e.origin !== AR.origin) return;
     const d = e.data;
     if (!d || typeof d !== "object" || d.ns !== "rtkt" || d.v !== 1) return;
+    // «bye»: la pagina dell'Area Riservata si chiude o cambia (Chrome lo consegna con e.source null) o l'utente la scollega
+    if (d.type === "bye") {
+      if (!AR.win || e.origin !== AR.origin || (e.source !== AR.win && e.source !== null) || !AR.nonce || d.nonce !== AR.nonce || AR.state !== "on") return;
+      if (d.reason === "pagehide" && !AR.win.closed) { arDrop("La pagina dell'Area Riservata è cambiata: quando è di nuovo la «Ricerca rapida», premi lì il segnalibro"); arWait(); }
+      else arDrop("Area Riservata scollegata");
+      renderArState(); previewNow(); return;
+    }
+    if (!AR.win || e.source !== AR.win || e.origin !== AR.origin) return;
     if (d.type === "ready") {
       if (d.nonce !== AR.nonce || AR.state === "on") return;
       AR.state = "on";
@@ -2293,7 +2420,6 @@ dialog{border:1px solid var(--bd2);border-radius:12px;padding:20px;width:min(480
       arCall("info", {}, null, null, 15000).then((r) => { if (AR.info) { AR.info.updDate = !(r.fields && r.fields.open); AR.info.fields = r.fields && r.fields.how; } }).catch(() => {});
       return;
     }
-    if (d.type === "bye") { arDrop("Area Riservata scollegata"); renderArState(); previewNow(); return; }
     const p = typeof d.id === "string" ? AR.pending.get(d.id) : null;
     if (!p) return;
     if (d.type === "progress") { if (p.progress) p.progress(str(d.text, 200)); return; }
@@ -2355,19 +2481,30 @@ dialog{border:1px solid var(--bd2);border-radius:12px;padding:20px;width:min(480
     const a = /^(\d{4})-(\d{2})/.exec(s.dfrom || "") || [null, String(now.getFullYear()), "01"];
     const b = /^(\d{4})-(\d{2})/.exec(s.dto || "") || [null, String(now.getFullYear()), pad(now.getMonth() + 1)];
     let y = +a[1], mo = +a[2];
-    const tickets = [], seen = new Set(), cappedMonths = [];
-    let max = null, n = 0;
+    const tickets = [], seen = new Set(), cappedMonths = [], failedMonths = [];
+    let max = null, n = 0, lastErr = null, fails = 0, okN = 0;
     while ((y < +b[1] || (y === +b[1] && mo <= +b[2])) && n < 36) {
       n++;
       if (progress) progress(`${MESI_L[mo - 1]} ${y}…`);
       const from = `${y}-${pad(mo)}-01`, to = `${y}-${pad(mo)}-${pad(lastDay(y, mo))}`;
-      const r = await arSearch(Object.assign({}, s, { dfrom: s.dfrom && s.dfrom > from ? s.dfrom : from, dto: s.dto && s.dto < to ? s.dto : to }), signal, null);
+      let r;
+      try { r = await arSearch(Object.assign({}, s, { dfrom: s.dfrom && s.dfrom > from ? s.dfrom : from, dto: s.dto && s.dto < to ? s.dto : to }), signal, null); } catch (e) {
+        if (e && e.name === "AbortError") throw e;
+        lastErr = e;
+        // due mesi di fila non riusciti o scheda scollegata: inutile continuare (sessione scaduta, pagina che non risponde)
+        if (++fails >= 2 || !arOn()) { failedMonths.push(`${fails >= 2 ? failedMonths.pop() : `${MESI[mo - 1]} ${y}`} e seguenti`); break; }
+        failedMonths.push(`${MESI[mo - 1]} ${y}`);
+        mo++; if (mo > 12) { mo = 1; y++; }
+        continue;
+      }
+      fails = 0; okN++;
       max = r.max || max;
       if (r.capped) cappedMonths.push(`${MESI[mo - 1]} ${y}`);
       for (const t of r.tickets) if (!seen.has(t.key)) { seen.add(t.key); tickets.push(t); }
       mo++; if (mo > 12) { mo = 1; y++; }
     }
-    return { tickets, capped: cappedMonths.length > 0, cappedMonths, max, count: tickets.length, months: n, ms: 0 };
+    if (lastErr && !okN) throw lastErr; // nessun mese riuscito: come una ricerca non riuscita
+    return { tickets, capped: cappedMonths.length > 0, cappedMonths, failedMonths, failMsg: lastErr ? str(lastErr.message, 300) : "", max, count: tickets.length, months: n, ms: 0 };
   }
   async function arCount(s, signal) {
     const r = await arCall("search", { spec: arSpec(s), countOnly: true }, signal, null);
@@ -2387,9 +2524,12 @@ dialog{border:1px solid var(--bd2);border-radius:12px;padding:20px;width:min(480
     };
   }
   function arOpen(t) {
-    if (t.url) window.open(t.url, "_blank", "noopener");
-    else if (arOn()) arCall("open", { ticket: { number: t.number, ref: t.arRef } }, null, null, 15000).catch((e) => toast(e.message));
-    else toast("Collega l'Area Riservata per aprire questo ticket");
+    if (t.url) { window.open(t.url, "_blank", "noopener"); return; }
+    // senza indirizzo (url1 «function:…»): si apre solo dalla pagina dell'Area Riservata
+    if (t.number) {
+      copyText(`#${t.number}`, `Questo ticket si apre solo dall'Area Riservata: cercalo lì con il numero #${t.number} (copiato negli appunti)`);
+      try { if (AR.win && !AR.win.closed) AR.win.focus(); } catch { /* */ }
+    } else toast("Questo ticket si apre solo dalla pagina dell'Area Riservata");
   }
 
   // ===================================================================== ricerca
@@ -2415,7 +2555,7 @@ dialog{border:1px solid var(--bd2);border-radius:12px;padding:20px;width:min(480
       if (S.keys.has(t.key)) continue;
       const x = norm([t.subject, t.preview, t.resolution, t.code, t.site, t.classification, t.service].join(" "));
       if ((ex.inc.length || ex.exc.length) && [...ex.inc, ...ex.exc].some((w) => x.includes(w))) { dropped++; continue; }
-      if (need.length && !need.every((w) => x.includes(w))) { dropped++; continue; }
+      if (need.length && t.src !== "ar" && !need.every((w) => x.includes(w))) { dropped++; continue; }
       S.keys.add(t.key); t.rank = S.results.length; S.results.push(t);
     }
     return dropped;
@@ -2450,18 +2590,26 @@ dialog{border:1px solid var(--bd2);border-radius:12px;padding:20px;width:min(480
     // Area Riservata in parallelo (se collegata): i suoi risultati si aggiungono a quelli del portale
     const arProg = (txt) => { if (S.searching) $("#progt").textContent = `Area Riservata: ${txt}`; };
     const arP = withAr ? (wanted && wanted.arMonths ? arSearchMonths(s, ctrl.signal, arProg) : arSearch(s, ctrl.signal, arProg)).then((v) => ({ ok: true, v }), (e) => ({ ok: false, e })) : null;
+    let arStopped = false;
     const addAr = async () => {
       if (!arP) return 0;
       if (S.searching) $("#progt").textContent = "Aspetto i risultati dell'Area Riservata…";
       const a = await arP;
-      if (!a.ok) { if (!(a.e && a.e.name === "AbortError")) pushAlert("warn", `Area Riservata: ${(a.e && a.e.message) || "errore"}. I risultati sono solo quelli del portale Touch.`); return 0; }
+      if (!a.ok) {
+        if (a.e && a.e.name === "AbortError") { arStopped = true; pushAlert("warn", "Ricerca nell'Area Riservata interrotta: i risultati sono solo quelli del portale Touch."); }
+        else pushAlert("warn", `Area Riservata: ${(a.e && a.e.message) || "errore"}. I risultati sono solo quelli del portale Touch.`);
+        return 0;
+      }
       const before = S.results.length;
-      const dropped = addResults(a.v.tickets, s);
+      const inPeriod = (t) => !t.date || ((!s.dfrom || t.date >= s.dfrom) && (!s.dto || t.date <= s.dto));
+      const list = a.v.tickets.filter(inPeriod);
+      const dropped = addResults(list, s) + (a.v.tickets.length - list.length);
       S.info = Object.assign(S.info || { total: 0, loaded: 0, page: 1, pageSize: settings.cap, dropped: 0, ms: 0 }, {});
       S.info.dropped += dropped;
       S.info.ar = { loaded: a.v.tickets.length, added: S.results.length - before, capped: a.v.capped, max: a.v.max, ms: a.v.ms };
+      if (a.v.failedMonths && a.v.failedMonths.length) pushAlert("warn", `Area Riservata, cercata mese per mese: mancano i ticket di ${a.v.failedMonths.join(", ")} (${a.v.failMsg || "errore"}). Ripeti la ricerca per averli.`);
       if (a.v.months) { if (a.v.capped) pushAlert("warn", `Area Riservata, cercata mese per mese: in ${a.v.cappedMonths.join(", ")} ci sono più di ${fmtN(a.v.max || 210)} ticket (il massimo per ricerca): restringi la ricerca per vederli tutti.`); }
-      else if (a.v.capped) pushAlert("warn", `L'Area Riservata restituisce al massimo ${fmtN(a.v.max || a.v.tickets.length)} ticket per ricerca: qui ci sono i primi ${fmtN(a.v.tickets.length)}, non tutti. Restringi il periodo o usa «Quanti per anno?» e cerca un anno alla volta.`);
+      else if (a.v.capped) pushAlert("warn", `L'Area Riservata restituisce al massimo ${fmtN(a.v.max || a.v.tickets.length)} ticket per ricerca: qui ci sono i primi ${fmtN(a.v.tickets.length)}, non tutti. ${S.info.state ? "Restringi il periodo o usa «Quanti per anno?» e cerca un anno alla volta." : "Restringi il periodo e cerca un anno alla volta."}`);
       mergeByDate();
       return S.results.length - before;
     };
@@ -2478,7 +2626,7 @@ dialog{border:1px solid var(--bd2);border-radius:12px;padding:20px;width:min(480
       if (!r.tickets.length && r.total) pushAlert("warn", "Il portale indica dei risultati ma l'elenco è vuoto: manda i dati tecnici da Impostazioni.");
       await addAr();
       const hist = store.get("history", []);
-      hist.unshift({ spec: s, results: S.results.length, total: r.total + (S.info.ar ? S.info.ar.loaded : 0), created: new Date().toISOString() });
+      hist.unshift({ spec: s, arMonths: withAr && !!(wanted && wanted.arMonths) ? true : undefined, stopped: arStopped || undefined, results: S.results.length, total: r.total + (S.info.ar ? S.info.ar.loaded : 0), created: new Date().toISOString() });
       store.set("history", hist.slice(0, 200));
       refreshHistList();
     } catch (e) {
@@ -2511,6 +2659,7 @@ dialog{border:1px solid var(--bd2);border-radius:12px;padding:20px;width:min(480
       const r = await loadNextPage(m, S.info.page + 1, S.info.pageSize, ctrl.signal);
       const before = S.results.length;
       S.info.dropped += addResults(r.tickets, S.last);
+      mergeByDate(); // con l'Area Riservata l'elenco resta in ordine di data
       S.info.loaded += r.tickets.length; S.info.page = r.page; S.info.total = r.total;
       S.info.state = listState(m);
       toast(`Aggiunti ${fmtN(S.results.length - before)} ticket`);
@@ -2597,7 +2746,7 @@ dialog{border:1px solid var(--bd2);border-radius:12px;padding:20px;width:min(480
     else if (S.info && S.info.total > total) parts.push(h("span", { class: "mu" }, `, i più recenti su ${fmtN(S.info.total)} nel portale`));
     if (nv !== total) parts.push(" · ", h("b", null, fmtN(nv)), " dopo i filtri");
     if (S.info) parts.push(h("span", { class: "mu" }, ` · ${(S.info.ms / 1000).toLocaleString("it-IT", { maximumFractionDigits: 1 })} s`));
-    if (S.info && (S.info.total > S.info.loaded || (ar && ar.capped))) {
+    if (S.info && S.info.state && (S.info.total > S.info.loaded || (ar && ar.capped))) {
       parts.push(h("button", { type: "button", class: "btn s", id: "yearsbtn", onclick: yearCounts, title: "Conta i ticket di questa ricerca anno per anno (una richiesta al portale per anno)" }, "Quanti per anno?"));
       if (S.info.total > S.info.loaded) parts.push(h("button", { type: "button", class: "btn s", id: "more", onclick: loadMore }, `Carica i successivi ${fmtN(Math.min(S.info.pageSize || settings.cap, S.info.total - S.info.loaded))}`));
     }
@@ -2640,7 +2789,7 @@ dialog{border:1px solid var(--bd2);border-radius:12px;padding:20px;width:min(480
     const url = t.src === "ar" ? t.url : touchUrl(t);
     const text = t.src === "ar" ? "Area Riservata ↗" : "Apri in Touch ↗";
     if (url) return h("a", { class: "btn s gh", href: url, target: "_blank", rel: "noopener", title: "Apri in una nuova scheda" }, text);
-    return h("button", { type: "button", class: "btn s gh", title: "Apri con il pulsante Open del portale (nuova scheda)", onclick: () => openTicket(t) }, text);
+    return h("button", { type: "button", class: "btn s gh", title: t.src === "ar" ? "Senza indirizzo: copia il numero, da cercare nella scheda dell'Area Riservata" : "Apri con il pulsante Open del portale (nuova scheda)", onclick: () => openTicket(t) }, t.src === "ar" ? "Copia numero AR" : text);
   }
   // ---- lettura nel pannello
   const READ = new Map(); // ticket già letti in questa sessione
@@ -2691,12 +2840,15 @@ dialog{border:1px solid var(--bd2);border-radius:12px;padding:20px;width:min(480
     if (!d.open) d.showModal();
     if (readCtrl) readCtrl.abort();
     const ctrl = readCtrl = new AbortController();
+    // il ticket già letto si riusa solo se l'elenco non lo mostra aggiornato da allora
+    const ver = `${t.status || ""}|${t.updated || ""}|${t.updTime || ""}`;
     const cached = READ.get(t.key);
-    if (cached) { renderRead(box, cached); setReadLink(t, cached.url); return; }
+    if (cached && cached.ver === ver) { renderRead(box, cached); setReadLink(t, cached.url); return; }
     box.appendChild(h("div", { class: "mu", text: t.src === "ar" ? "Leggo il ticket dall'Area Riservata…" : "Leggo il ticket dal portale…" }));
     try {
       const c = t.src === "ar" ? await arRead(t, ctrl.signal) : await loadTouchTicket(t, ctrl.signal);
       if (ctrl !== readCtrl) return;
+      c.ver = ver;
       READ.set(t.key, c);
       clear(box); renderRead(box, c); setReadLink(t, c.url);
       if (t.src !== "ar") render(); // ora i risultati hanno il collegamento diretto
@@ -2841,14 +2993,17 @@ dialog{border:1px solid var(--bd2);border-radius:12px;padding:20px;width:min(480
     for (const f of items) box.appendChild(ticketEl(f.ticket, true));
   }
   // ricerca salvata o della cronologia: si aspetta l'elenco All tickets prima di impostarla (gruppi, persone e stati)
+  // ricerche della 2.x (senza pf, la 2.0 anche senza people): nessun filtro, come dopo l'importazione (importSpec)
+  const fullSpec = (s) => (s && typeof s === "object" ? Object.assign({}, s, { people: s.people && typeof s.people === "object" ? s.people : {}, pf: s.pf && typeof s.pf === "object" && !Array.isArray(s.pf) ? s.pf : {} }) : s);
   async function openSpec(s) {
+    s = fullSpec(s);
     if (busy()) return false;
     tab("search");
     if (!currentModule()) { const p = ensureAllTickets(); previewNow(); await p; } // «Apro la scheda All tickets del portale…»
     applySpec(s);
     return true;
   }
-  async function runSpec(s) { if (await openSpec(s)) runSearch({ people: s && s.people, pf: s && s.pf }); }
+  async function runSpec(s, arMonths) { s = fullSpec(s); if (await openSpec(s)) runSearch({ people: s && s.people, pf: s && s.pf, arMonths: arMonths === true }); }
   function renderSaved() {
     const box = clear($("#saved"));
     const items = store.get("saved", []);
@@ -2865,8 +3020,8 @@ dialog{border:1px solid var(--bd2);border-radius:12px;padding:20px;width:min(480
     const items = store.get("history", []);
     if (!items.length) { box.appendChild(h("div", { class: "empty", text: "La cronologia è vuota." })); return; }
     for (const it of items) box.appendChild(h("div", { class: "li" },
-      h("div", { class: "m" }, h("div", { class: "t", text: safeDescribe(it.spec) }), h("div", { class: "s", text: `${fmtDT(it.created)} · ${fmtN(it.results)} risultati${it.total > it.results ? ` su ${fmtN(it.total)}` : ""}` })),
-      h("button", { type: "button", class: "btn s", onclick: () => runSpec(it.spec) }, "Ripeti"),
+      h("div", { class: "m" }, h("div", { class: "t", text: safeDescribe(it.spec) }), h("div", { class: "s", text: `${fmtDT(it.created)} · ${fmtN(it.results)} risultati${it.total > it.results ? ` su ${fmtN(it.total)}` : ""}${it.stopped ? " (Area Riservata interrotta)" : ""}${it.arMonths ? " · Area Riservata mese per mese" : ""}` })),
+      h("button", { type: "button", class: "btn s", onclick: () => runSpec(it.spec, it.arMonths === true) }, "Ripeti"),
       h("button", { type: "button", class: "btn gh s", onclick: () => openSpec(it.spec) }, "Apri")));
   }
   $("#dsave form").addEventListener("submit", (e) => {
@@ -3015,8 +3170,16 @@ dialog{border:1px solid var(--bd2);border-radius:12px;padding:20px;width:min(480
     } catch (e) { out.textContent = `Errore: ${e && e.message}`; }
   });
   $("#ssave").addEventListener("click", () => {
+    // indirizzo dell'Area Riservata: completo («https://» se manca) e di un altro sito, altrimenti non si salva nulla
+    const raw = $("#s-arurl").value.trim();
+    let arU = AR_DEFAULT;
+    if (raw) {
+      arU = null;
+      try { const x = new URL(/^[a-z][a-z\d+.-]*:\/\//i.test(raw) ? raw : "https://" + raw.replace(/^\/+/, "")); if (/^https?:$/.test(x.protocol) && x.hostname.includes(".") && x.origin !== location.origin) arU = x.href; } catch { /* */ }
+      if (!arU) { toast(`Indirizzo dell'Area Riservata non valido: scrivilo completo, per esempio ${AR_DEFAULT}`); $("#s-arurl").focus(); return; }
+    }
+    settings.arUrl = arU;
     settings.cap = CAPS.includes(+$("#s-cap").value) ? +$("#s-cap").value : 200;
-    { const u = absUrl($("#s-arurl").value.trim()); if (u) settings.arUrl = u; else if (!$("#s-arurl").value.trim()) settings.arUrl = AR_DEFAULT; }
     store.set("settings", settings);
     $("#capq").value = String(settings.cap);
     $$(".capn").forEach((x) => { x.textContent = settings.cap; });

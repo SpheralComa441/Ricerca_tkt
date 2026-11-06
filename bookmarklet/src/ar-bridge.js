@@ -16,7 +16,7 @@
       get(k, d) { try { const v = localStorage.getItem("rtkt2:" + k); return v === null ? d : JSON.parse(v); } catch { return d; } },
       set(k, v) { try { localStorage.setItem("rtkt2:" + k, JSON.stringify(v)); } catch { /* */ } },
     };
-    const BR = { origin: "", src: null, n: 0, aborted: new Set(), observed: null, fields: null, queue: Promise.resolve(), log: [] };
+    const BR = { origin: "", src: null, nonce: "", n: 0, declined: new Set(), aborted: new Set(), observed: null, fields: null, queue: Promise.resolve(), log: [] };
     const sleep2 = (ms) => new Promise((r) => setTimeout(r, ms));
     const strip = (html) => {
       const s = String(html ?? "");
@@ -121,10 +121,19 @@
     function months(dfrom, dto) {
       const now = new Date();
       const a = /^(\d{4})-(\d{2})/.exec(dfrom || ""), b = /^(\d{4})-(\d{2})/.exec(dto || "");
-      let y = a ? +a[1] : Math.max(2000, (b ? +b[1] : now.getFullYear()) - 15), m = a ? +a[2] : 1;
-      const y2 = b ? +b[1] : now.getFullYear(), m2 = b ? +b[2] : b ? 12 : now.getMonth() + 1;
+      let y = a && +a[1] >= 2000 ? +a[1] : 2000, m = a && +a[1] >= 2000 ? +a[2] : 1;
+      const y2 = b ? +b[1] : now.getFullYear(), m2 = b ? +b[2] : now.getMonth() + 1;
       const out = [];
-      while ((y < y2 || (y === y2 && m <= m2)) && out.length < 240) { out.push([m, y]); m++; if (m > 12) { m = 1; y++; } }
+      while (y < y2 || (y === y2 && m <= m2)) { out.push([m, y]); m++; if (m > 12) { m = 1; y++; } }
+      return out;
+    }
+    // clausole del periodo nel formato della pagina; oltre 240 mesi gli anni interi diventano una clausola sull'anno
+    function periodClauses(ms, mf, yf) {
+      const per = new Map();
+      for (const [, y] of ms) per.set(y, (per.get(y) || 0) + 1);
+      const whole = new Set(ms.length > 240 ? [...per].filter(([, n]) => n === 12).map(([y]) => y) : []);
+      const out = [];
+      for (const [m, y] of ms) { if (!whole.has(y)) out.push(`(${mf}:${m} and ${yf}:${y} )`); else if (m === 1) out.push(`(${yf}:${y} )`); }
       return out;
     }
     async function keyword(spec) {
@@ -135,7 +144,8 @@
         const f = learnFields();
         const [mf, yf] = f.open || f.upd;
         const ms = months(spec.dfrom, spec.dto);
-        if (ms.length) parts.push(`( ${ms.map(([m, y]) => `(${mf}:${m} and ${yf}:${y} )`).join(" or ")}  )`);
+        if (!ms.length) return null; // periodo vuoto (o tutto nel futuro): nessun ticket, mai una ricerca senza periodo
+        parts.push(`( ${periodClauses(ms, mf, yf).join(" or ")}  )`);
       }
       for (const w of words(spec.text)) parts.push(`( Testi:("${w}") or Oggetto:("${w}") )`);
       for (const w of words(spec.subject)) parts.push(`Oggetto:("${w}")`);
@@ -158,10 +168,11 @@
         throw new Error("Risposta dell'Area Riservata non riconosciuta.");
       }
       const errors = Array.isArray(p.errors) ? p.errors : p.errors ? [String(p.errors)] : [];
-      if (errors.length) throw new Error(`L'Area Riservata non ha cercato negli indici: ${errors.join(", ")}`);
       const fields = (Array.isArray(p.fields) ? p.fields : []).map((x) => String(x).toLowerCase());
       const idx = (n) => fields.indexOf(n);
       const rows = (Array.isArray(p.data) ? p.data : []).filter((r) => Array.isArray(r));
+      // come phmio.doSearch(): con errori su qualche indice le righe arrivate si usano lo stesso
+      if (errors.length && !(fields.length && rows.length)) throw new Error(`L'Area Riservata non ha cercato negli indici: ${errors.join(", ")}`);
       const max = parseInt(Array.isArray(p.maxResults) ? p.maxResults[0] : p.maxResults, 10) || null;
       const tickets = [];
       for (const r of rows) {
@@ -170,7 +181,8 @@
         if (type && !/ticket/i.test(type)) continue;
         const title = strip(get("description"));
         const x = TITLE.exec(title);
-        const url = resolveUrl(get("urlpublic")) || resolveUrl(get("url1"));
+        const u1 = String(get("url1") || "").trim();
+        const url = u1 ? resolveUrl(u1) : resolveUrl(get("urlpublic"));
         const t = { number: x ? x[1] : String(get("id") || "").replace(/\D/g, ""), product: x ? x[2].trim() : "", date: x ? `${x[5]}-${pad2(x[4])}-${pad2(x[3])}` : "", subject: x ? x[6].trim() : title, snippet: strip(get("altdescription")).slice(0, 3000), url };
         if (t.date && !/^\d{4}-(0[1-9]|1[0-2])-(0[1-9]|[12]\d|3[01])$/.test(t.date)) t.date = "";
         tickets.push(t);
@@ -180,6 +192,7 @@
     async function search(spec, signal) {
       const t0 = performance.now();
       const kw = await keyword(spec || {});
+      if (kw === null) return { tickets: [], rows: 0, max: null, capped: false };
       const body = [["pKeyword", kw], ["pArea", area()], ["pCore", ""], ["pLangs", langs()], ["cs_SITE", ""], ["m_cID", await mcid()]]
         .map(([k, v]) => `${k}=${encodeURIComponent(v)}`).join("&");
       const r = await fetchN(ROOT + "servlet/spsl_fquery_mc", { method: "POST", credentials: "same-origin", headers: { "Content-Type": "application/x-www-form-urlencoded" }, body, signal });
@@ -191,7 +204,7 @@
     }
 
     // ---- lettura di un ticket: la sua pagina in una cornice nascosta di questa scheda
-    async function read(ticket) {
+    async function read(ticket, stopped) {
       const url = ticket && resolveUrl(ticket.url);
       if (!url) throw new Error("Questo ticket dell'Area Riservata non ha un indirizzo da leggere: aprilo da lì.");
       const fr = document.createElement("iframe");
@@ -205,6 +218,7 @@
         const end = performance.now() + 25000;
         for (;;) {
           await sleep2(200);
+          if (stopped && stopped()) throw new Error("Lettura interrotta.");
           let doc = null;
           try { doc = fr.contentWindow.document; } catch { throw new Error("La pagina del ticket non si può leggere da qui: aprila con il collegamento."); }
           if (doc && doc.readyState === "complete" && fr.contentWindow.location.href !== "about:blank") {
@@ -214,6 +228,7 @@
           if (performance.now() > end) throw new Error("La pagina del ticket non ha finito di caricarsi.");
         }
         const doc = fr.contentWindow.document;
+        if (doc.querySelector('input[type="password"], input[name="m_cPassword" i]')) throw new Error("La sessione dell'Area Riservata è scaduta: accedi di nuovo in quella scheda e premi il segnalibro.");
         const fields = [], texts = [];
         for (const el of doc.querySelectorAll("input:not([type=hidden]):not([type=button]):not([type=submit]):not([type=checkbox]):not([type=radio]):not([type=password]), textarea, select")) {
           const v = (el.tagName === "SELECT" ? (el.selectedOptions[0] ? el.selectedOptions[0].textContent : "") : el.value || "").trim();
@@ -247,11 +262,13 @@
       if (BR.origin) {
         const b = document.createElement("button");
         b.type = "button"; b.textContent = "Scollega";
-        b.onclick = () => { post({ type: "bye" }); BR.origin = ""; BR.src = null; status("", "Scollegata dal portale Touch.", "Per ricollegarla premi «Collega l'Area Riservata» in Ricerca TKT nel portale Touch."); };
+        b.onclick = () => { post({ type: "bye", nonce: BR.nonce }); linked(""); BR.origin = ""; BR.src = null; BR.nonce = ""; status("", "Scollegata dal portale Touch.", "Per ricollegarla premi «Collega l'Area Riservata» in Ricerca TKT nel portale Touch."); };
         a.appendChild(b);
       }
     }
     const trusted = () => st2.get("arTrusted", []);
+    // origine del pannello collegato a questa scheda (resta se la scheda si ricarica: sessionStorage)
+    const linked = (v) => { try { if (v !== undefined) { if (v) sessionStorage.setItem("rtkt2:linked", v); else sessionStorage.removeItem("rtkt2:linked"); } return sessionStorage.getItem("rtkt2:linked") || ""; } catch { return ""; } };
     const post = (m) => { try { if (BR.src && BR.origin) BR.src.postMessage(Object.assign({ ns: "rtkt", v: 1 }, m), BR.origin); } catch { /* */ } };
     // operazioni una alla volta (una richiesta per volta all'Area Riservata)
     const run = (fn) => { const p = BR.queue.then(fn, fn); BR.queue = p.catch(() => {}); return p; };
@@ -263,23 +280,35 @@
       if (!okOrigin) return;
       if (d.type === "hello") {
         // solo dalla scheda che ha aperto questa (Ricerca TKT nel portale Touch), con il consenso dell'utente
-        if (!window.opener || e.source !== window.opener) return;
+        // (dopo il collegamento window.opener è tolto: una pagina già autorizzata si riconosce dall'origine)
+        if (!e.source || (e.source !== window.opener && !(e.origin === linked() && trusted().includes(e.origin)))) return;
         if (BR.origin && BR.origin !== e.origin) return;
+        if (BR.declined.has(e.origin)) return; // rifiutato: niente altre domande fino al prossimo caricamento della pagina
         if (!BR.origin) {
           if (!trusted().includes(e.origin)) {
-            if (!confirm(`Collegare questa scheda dell'Area Riservata a Ricerca TKT su ${e.origin}?\n\nLe ricerche fatte lì cercheranno anche qui, con il tuo accesso all'Area Riservata. Puoi scollegarla quando vuoi.`)) { status("", "Collegamento non autorizzato.", ""); return; }
+            if (!confirm(`Collegare questa scheda dell'Area Riservata a Ricerca TKT su ${e.origin}?\n\nLe ricerche fatte lì cercheranno anche qui, con il tuo accesso all'Area Riservata. Puoi scollegarla quando vuoi.`)) {
+              BR.declined.add(e.origin);
+              status("", "Collegamento rifiutato.", `Le richieste di ${e.origin} sono ignorate. Per collegare questa scheda ricaricala e premi di nuovo il segnalibro.`);
+              return;
+            }
             st2.set("arTrusted", [...trusted(), e.origin].slice(-5));
           }
-          BR.origin = e.origin; BR.src = e.source;
+          BR.origin = e.origin; BR.src = e.source; linked(e.origin);
+          try { window.opener = null; } catch { /* */ } // un sito aperto poi in questa scheda non può cambiare la scheda del portale Touch
           status("ok", "Collegata al portale Touch: lascia aperta questa scheda.", `Le ricerche di Ricerca TKT su ${e.origin} cercano anche qui.`);
         }
-        post({ type: "ready", nonce: String(d.nonce || "").slice(0, 80), version: VERSION, page: document.title.slice(0, 120) });
+        BR.nonce = String(d.nonce || "").slice(0, 80);
+        post({ type: "ready", nonce: BR.nonce, version: VERSION, page: document.title.slice(0, 120) });
+        return;
+      }
+      // «bye» del pannello: se la scheda Touch si chiude o si ricarica arriva con e.source null
+      if (d.type === "bye") {
+        if (BR.origin && e.origin === BR.origin && (e.source === BR.src || e.source === null) && BR.nonce && d.nonce === BR.nonce) { BR.origin = ""; BR.src = null; BR.nonce = ""; status("", "Scollegata dal portale Touch.", ""); }
         return;
       }
       if (e.origin !== BR.origin || e.source !== BR.src) return;
       const id = typeof d.id === "string" ? d.id.slice(0, 120) : "";
-      if (d.type === "abort") { BR.aborted.add(id); return; }
-      if (d.type === "bye") { BR.origin = ""; BR.src = null; status("", "Scollegata dal portale Touch.", ""); return; }
+      if (d.type === "abort") { BR.aborted.add(id); if (BR.aborted.size > 500) BR.aborted.delete(BR.aborted.values().next().value); return; }
       if (d.type === "search") {
         run(async () => {
           if (BR.aborted.has(id)) return;
@@ -297,13 +326,16 @@
       }
       if (d.type === "read") {
         run(async () => {
-          try { const c = await read(d.ticket || {}); post({ type: "ticket", id, ok: true, content: c, url: c.url }); } catch (err) { post({ type: "ticket", id, ok: false, error: String((err && err.message) || err).slice(0, 300) }); }
+          if (BR.aborted.has(id)) return;
+          try { const c = await read(d.ticket || {}, () => BR.aborted.has(id)); if (!BR.aborted.has(id)) post({ type: "ticket", id, ok: true, content: c, url: c.url }); } catch (err) { if (!BR.aborted.has(id)) post({ type: "ticket", id, ok: false, error: String((err && err.message) || err).slice(0, 300) }); }
         });
         return;
       }
-      if (d.type === "info") post({ type: "info", id, ok: true, fields: learnFields(), observed: !!BR.observed, log: BR.log.slice(-10) });
+      if (d.type === "info") { post({ type: "info", id, ok: true, fields: learnFields(), observed: !!BR.observed, log: BR.log.slice(-10) }); return; }
+      // ogni richiesta ha una risposta: il pannello non resta ad aspettare
+      if (id) post({ type: "result", id, ok: false, error: d.type === "open" ? "Questo ticket si apre solo dalla pagina dell'Area Riservata: cercalo lì con il suo numero." : "Operazione non gestita dal segnalibro in questa scheda: aggiorna il segnalibro." });
     });
-    window.addEventListener("pagehide", () => post({ type: "bye" }));
+    window.addEventListener("pagehide", () => post({ type: "bye", reason: "pagehide", nonce: BR.nonce }));
     window[NS] = { toggle() { host2.style.display = host2.style.display === "none" ? "" : "none"; }, version: VERSION };
     if (window.opener) status("wait", "In attesa di Ricerca TKT nel portale Touch…", "Se non succede nulla, nel portale Touch premi «Collega l'Area Riservata» e poi di nuovo il segnalibro qui.");
     else status("", "Per cercare anche nell'Area Riservata apri Ricerca TKT nel portale Touch e premi «Collega l'Area Riservata».", "Si aprirà questa pagina in una nuova scheda: lì premi il segnalibro.");

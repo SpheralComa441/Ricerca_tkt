@@ -119,7 +119,7 @@ def test_curl_template(connector, fake, zcfg):
         "curl 'https://www.zucchetti.it/areariservata/servlet/spsl_fquery_mc' \\\n"
         "  -H 'Content-Type: application/x-www-form-urlencoded; charset=UTF-8' \\\n"
         "  -H 'Cookie: JSESSIONID=segreto' \\\n"
-        "  --data-raw $'m_cID=1ef51ea72b7e79d713e5b1b42030dfa2&pKeyword=detassazione&pArea=&pCore=TICKET&pLangs=&cs_SITE=&m_cParameterSequence=pKeyword'"
+        "  --data-raw $'m_cID=a0b1c2d3e4f5a6b7c8d9e0f1a2b3c4d5&pKeyword=detassazione&pArea=&pCore=TICKET&pLangs=&cs_SITE=&m_cParameterSequence=pKeyword'"
     )
     parsed = parse_curl(curl)
     assert parsed["had_cookie"]

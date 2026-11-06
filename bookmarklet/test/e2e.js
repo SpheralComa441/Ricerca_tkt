@@ -817,6 +817,9 @@ const isOpen = async (page) => host(page).evaluate((e) => e.style.display !== "n
     await p.click('[data-pftree="ServiceFilter"]');
     await p.locator('[data-tree="ServiceFilter"] input').fill("presenze");
     await p.locator('[data-tree="ServiceFilter"] button.nm', { hasText: "Informazione / PRESENZE WEB" }).waitFor({ timeout: 15000 });
+    await p.locator('[data-tree="ServiceFilter"] input').press("Enter");
+    await p.waitForTimeout(400);
+    check(!(await p.locator("#go").isDisabled()) && await p.locator("#prog").isHidden(), "Invio nella ricerca dell'albero non avvia la ricerca dei ticket");
     const famNotSelectable = await p.locator('[data-tree="ServiceFilter"] span.nm.off').count() >= 0;
     await p.locator('[data-tree="ServiceFilter"] button.nm', { hasText: "Informazione / PRESENZE WEB" }).click();
     await p.fill('[data-pfq="AccountID"]', "tecno");
@@ -867,11 +870,18 @@ const isOpen = async (page) => host(page).evaluate((e) => e.style.display !== "n
     const [arp] = await Promise.all([ctx.waitForEvent("page"), p.click("#ar-connect")]);
     const arErr = [];
     arp.on("pageerror", (x) => arErr.push(x.message));
-    let asked = "";
-    arp.on("dialog", async (d) => { asked = d.message(); await d.accept(); });
+    let asked = "", nAsk = 0, accept = false;
+    arp.on("dialog", async (d) => { asked = d.message(); nAsk++; if (accept) await d.accept(); else await d.dismiss(); });
     await arp.waitForLoadState("load");
     await arp.waitForTimeout(500);
     check((await txt(p, "#ar-state")).includes("attesa") && (await txt(p, "#ar-help")).includes("premi lì il segnalibro"), "in attesa del segnalibro nella scheda dell'Area Riservata");
+    // collegamento rifiutato: la domanda non torna a ogni «hello» del pannello
+    await clickBookmarklet(arp);
+    await arp.waitForTimeout(3500);
+    check(nAsk === 1 && (await txt(p, "#ar-state")).includes("attesa"), `rifiutato il collegamento, la domanda non si ripete (${nAsk} domande in 3,5 s)`);
+    await arp.reload();
+    await arp.waitForLoadState("load");
+    accept = true;
     await clickBookmarklet(arp);
     await p.waitForFunction(() => document.getElementById("ricerca-tkt-host").shadowRoot.querySelector("#ar-state").textContent === "collegata", null, { timeout: 15000 });
     check(asked.includes(BASE.replace(/\/$/, "")) && await p.locator("#src-ar").isChecked(), `collegamento con la conferma nell'Area Riservata («${asked.slice(0, 60)}…»)`);
@@ -906,6 +916,17 @@ const isOpen = async (page) => host(page).evaluate((e) => e.style.display !== "n
     await waitDone(p);
     const yrs = await txt(p, "#years");
     check(yrs.includes("portale Touch e Area Riservata") && (await p.locator("#years .yr .yn", { hasText: "+" }).count()) > 0, "ticket per anno anche nell'Area Riservata");
+    // periodo che non comincia a gennaio: nel conteggio per anno solo i mesi del periodo, mai una richiesta senza periodo
+    await p.selectOption("#preset", "2y");
+    await search(p, "cedolino");
+    await fetch(BASE_AR + `/__reset?run=${RUN}`, { method: "POST" });
+    if (await p.locator("#yearsbtn").count()) { await p.click("#yearsbtn"); await waitDone(p); }
+    const ykw = (await (await fetch(BASE_AR + `/__log?run=${RUN}`)).json()).filter((x) => x.params).map((x) => x.params.pKeyword || "");
+    const d2 = new Date(); d2.setMonth(d2.getMonth() - 24);
+    const lo = d2.getFullYear() * 12 + d2.getMonth() + 1;
+    const outside = ykw.filter((k) => !/IdAnno\w*:/.test(k) || [...k.matchAll(/IdMese\w*:(\d+) and IdAnno\w*:(\d+)/g)].some(([, mm, yy]) => +yy * 12 + +mm < lo));
+    check(ykw.length > 0 && outside.length === 0, `conteggio per anno con «Ultimi 2 anni»: solo i mesi del periodo (${ykw.length} richieste all'Area Riservata, ${outside.length} fuori)`);
+    await p.selectOption("#preset", "");
     // filtri che l'Area Riservata non ha: si cerca solo nel portale, e lo si dice
     await advOpen(p);
     await p.locator('#ppl [data-pf="ModifiedBy"] button[data-quick="Io"]').click();
@@ -921,6 +942,19 @@ const isOpen = async (page) => host(page).evaluate((e) => e.style.display !== "n
     const tj = JSON.parse(await p.evaluate(() => navigator.clipboard.readText()));
     check(tj.ar && tj.ar.state === "on" && tj.ar.origin === BASE_AR && tj.reader !== undefined, "dati tecnici: stato dell'Area Riservata");
     await p.click('#nav button[data-tab="search"]');
+    // la scheda dell'Area Riservata si ricarica (o cambia pagina): il pannello torna in attesa, un clic sul segnalibro la ricollega
+    const askBefore = nAsk;
+    await arp.reload();
+    await arp.waitForLoadState("load");
+    await p.waitForFunction(() => document.getElementById("ricerca-tkt-host").shadowRoot.querySelector("#ar-state").textContent.includes("attesa"), null, { timeout: 8000 }).catch(() => {});
+    const stReload = await txt(p, "#ar-state");
+    await clickBookmarklet(arp);
+    await p.waitForFunction(() => document.getElementById("ricerca-tkt-host").shadowRoot.querySelector("#ar-state").textContent === "collegata", null, { timeout: 15000 }).catch(() => {});
+    const tR = Date.now();
+    await search(p, "detassazione");
+    const msR = Date.now() - tR;
+    check(stReload.includes("attesa") && (await txt(p, "#ar-state")) === "collegata" && nAsk === askBefore && msR < 30000 && /dall'Area Riservata/.test(await txt(p, "#sum")),
+      `ricaricata la scheda dell'Area Riservata: in attesa, poi ricollegata senza domande (ricerca in ${(msR / 1000).toFixed(1)} s)`);
     await arp.close();
     await p.waitForFunction(() => document.getElementById("ricerca-tkt-host").shadowRoot.querySelector("#ar-state").textContent === "non collegata", null, { timeout: 8000 }).catch(() => {});
     check((await txt(p, "#ar-state")) === "non collegata", "chiusa la scheda, l'Area Riservata risulta scollegata");

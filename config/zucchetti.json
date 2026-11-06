@@ -21,7 +21,7 @@
     "_info": "Routine Solr usata dal portlet spsl_wsolrresultsgrid (splResults.Link()).",
     "endpoint": "servlet/spsl_fquery_mc",
     "method": "POST",
-    "m_cID": "1ef51ea72b7e79d713e5b1b42030dfa2",
+    "m_cID": "a0b1c2d3e4f5a6b7c8d9e0f1a2b3c4d5",
     "m_cID_sources": [
       "jsp/spsl_wsolrresultsgrid_portlet.jsp",
       "jsp/gspv_psearch.jsp?m_cWindowName=main"
@@ -46,7 +46,7 @@
   },
 
   "parse": {
-    "_info": "La colonna 'description' dei risultati ha la forma: [#8900042] [PAGHEW] [21-04-2026] oggetto",
+    "_info": "La colonna 'description' dei risultati ha la forma: [#1234567] [PAGHEW] [21-04-2026] oggetto",
     "title_field": "description",
     "snippet_field": "altDescription",
     "id_field": "id",

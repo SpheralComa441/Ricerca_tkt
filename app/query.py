@@ -67,7 +67,7 @@ def _term_clause(term: str, prefix: bool, fuzzy: bool) -> str:
 
 
 def parse_numbers(text: str) -> tuple[list[int], list[tuple[int, int]]]:
-    """'8900042, 8900000-8910000' -> ([8900042], [(8900000, 8910000)])."""
+    """'1234567, 1230000-1240000' -> ([1234567], [(1230000, 1240000)])."""
     singles: list[int] = []
     ranges: list[tuple[int, int]] = []
     for chunk in re.split(r"[\s,;]+", (text or "").replace("#", " ")):
