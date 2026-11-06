@@ -3,13 +3,16 @@
 Motore di ricerca avanzato per i ticket Zucchetti.
 
 I ticket sono più di un milione, quindi non vengono scaricati: ogni ricerca la fa il
-**portale ticket Zucchetti (HDAPortal)** sui suoi dati aggiornati, con un numero massimo di
-risultati per ricerca. Sopra c'è un'interfaccia più potente: filtri, faccette, ordinamenti e
-raggruppamenti sui risultati, esportazione, preferiti con note e ricerche salvate.
+**portale ticket Zucchetti (HDA TOUCH, HDAPortal)** sui suoi dati aggiornati, con un numero
+massimo di risultati per ricerca, e se collegata anche la **vecchia Ricerca rapida dell'Area
+Riservata**, che contiene altri ticket (numeri come #1234567). Sopra c'è un'interfaccia più
+potente: tutti i filtri del portale scelti dal pannello, faccette, ordinamenti e raggruppamenti
+sui risultati, il ticket completo da leggere nel pannello, esportazione, preferiti con note e
+ricerche salvate.
 
 | | **Segnalibro** (consigliata) | **Applicazione web** |
 |---|---|---|
-| Sito | nuovo portale ticket (HDAPortal) | vecchia Area Riservata (indice Solr "Ricerca rapida"), **non aggiornata** |
+| Sito | portale ticket HDA TOUCH (HDAPortal) e, collegata, la vecchia Ricerca rapida dell'Area Riservata | vecchia Area Riservata (indice Solr "Ricerca rapida"), **non aggiornata** |
 | Installazione | nessuna: un segnalibro nel browser | server con Python 3.11+ o Docker |
 | Accesso | la sessione già aperta nel portale | credenziali Zucchetti o cookie di sessione |
 | Dati personali | nel browser (esportabili) | database SQLite sul server |
@@ -56,18 +59,51 @@ aperti). Il portale ordina per data, quindi arrivano i ticket **più recenti**: 
 più, **Quanti per anno?** conta i ticket della ricerca anno per anno (una richiesta per anno, solo
 fino a coprire il totale) e con un clic si cerca in un anno solo.
 
-**Gruppi e persone** (*Assegnato a* persona o gruppo, *Gruppo proprietario*, *Modificato da* cioè
-chi ha lavorato il ticket, *Responsabile*) sono filtri del portale, quindi valgono su tutti i
-ticket: i nomi si cercano direttamente dal pannello con la ricerca del portale, oppure con
-**Scegli nel portale…** si usa il menu del portale (il pannello si nasconde e si riapre dopo la
-scelta). Restano nelle ricerche salvate. Sui risultati ci sono anche le faccette per gruppo,
-assegnatario, responsabile e "modificato da".
+**Tutti i filtri del portale si scelgono nel pannello** e valgono su tutti i ticket:
 
-Gli altri filtri impostati nella pagina (Servizio, Sede, Contatto…) restano
-attivi e sono mostrati nel pannello. Dopo una ricerca l'elenco del portale mostra la stessa
-ricerca: **Ripristina il portale** rimette i filtri e le righe per pagina di prima. **Apri** su un
-risultato apre il ticket con il pulsante *Open* della pagina; se il ticket non è più nell'elenco
-(ad esempio un preferito) usa *Find by ID…*, compilato e confermato.
+- *gruppi e persone*: *Assegnato a* persona o gruppo, *Gruppo proprietario*, *Modificato da* cioè
+  chi ha lavorato il ticket, *Responsabile*; con le scelte rapide **Io** e **Il mio gruppo**;
+- gli altri filtri dell'elenco All tickets: *Servizio*, *Sede*, *Contatto*, *Etichette* e così via.
+
+Per ogni campo il pannello usa le scelte del portale: i campi ad albero (*tree-field*) diventano un
+elenco ad albero nel pannello, con i rami caricati dal portale quando si aprono e la ricerca di un
+nome in tutto l'albero; i campi con ricerca sul server si cercano scrivendo un nome (richiesta a
+parte, senza aprire il menu del portale); gli elenchi diventano pulsanti; poi date e testo.
+**Menu del portale** resta disponibile come alternativa (il pannello si nasconde e si riapre dopo
+la scelta). I filtri restano nelle ricerche salvate. Sui risultati ci sono anche le faccette per
+fonte, gruppo, assegnatario, responsabile e "modificato da".
+
+**Il ticket completo si legge nel pannello** (**Leggi**): il portale apre ogni ticket in una nuova
+scheda del browser, con un suo indirizzo. La prima volta il segnalibro preme *Open* (o *Find by
+ID…*) e intercetta la nuova scheda senza aprirla; poi carica la pagina del ticket in una cornice
+nascosta e ne legge campi, testi della richiesta e della soluzione, messaggi e altri elenchi (anche
+delle schede interne non ancora disegnate). L'indirizzo imparato serve anche per **Apri in Touch**:
+ogni risultato ha il collegamento diretto alla pagina del ticket. Se la pagina del ticket non si
+può leggere, il segnalibro usa l'anteprima del portale accanto all'elenco.
+
+Dopo una ricerca l'elenco del portale mostra la stessa ricerca: **Ripristina il portale** rimette
+i filtri e le righe per pagina di prima.
+
+### Area Riservata (vecchia Ricerca rapida)
+
+La vecchia **Ricerca rapida** dell'Area Riservata (www.zucchetti.it/areariservata) contiene altri
+ticket, con un'altra numerazione. È un altro sito, quindi il segnalibro la usa da una sua scheda:
+
+1. nel pannello, **Collega l'Area Riservata** apre la Ricerca rapida in una nuova scheda;
+2. lì si accede se serve, si preme il segnalibro **Ricerca TKT** e si conferma il collegamento;
+3. da quel momento le ricerche cercano anche lì e i risultati arrivano mescolati per data, con
+   l'indicazione della fonte. La scheda dell'Area Riservata va lasciata aperta.
+
+Le due schede si parlano con `postMessage`, solo tra loro (la scheda dell'Area Riservata risponde
+solo alla scheda che l'ha aperta, dopo la conferma). Le ricerche le fa la pagina dell'Area
+Riservata con la sessione dell'utente e nel formato delle sue ricerche
+(`servlet/spsl_fquery_mc`, `IdCenSer:… and (IdMeseA:… and IdAnnoA:…) and (Testi:("…") or
+Oggetto:("…"))`); i campi del mese e dell'anno della data di apertura li chiede alla pagina.
+L'Area Riservata restituisce al massimo 210 ticket per ricerca: **Quanti per anno?** conta anche lì
+(un anno al massimo si conta mese per mese) e **Cerca nel …** su un anno così cerca mese per mese,
+per averli tutti. Nell'Area Riservata si cerca solo con testo, oggetto e periodo: con filtri che
+esistono solo nel portale (stato, gruppi e persone…) si cerca solo nel portale e il pannello lo
+dice. **Leggi** su un ticket dell'Area Riservata ne legge la pagina in quella scheda.
 
 Il pannello è isolato in uno *shadow DOM*: non modifica il portale e non ne eredita gli stili; la
 pagina sotto resta inattiva finché il pannello è aperto, e il controllo di inattività del portale
@@ -75,9 +111,9 @@ viene informato che l'utente sta lavorando. I testi dei ticket sono resi come te
 l'HTML della griglia non viene mai iniettato nel pannello.
 
 In **Impostazioni** si trovano lo stato del collegamento (elenco usato, colonne riconosciute,
-filtri gestiti, come è partita l'ultima ricerca), **Leggi l'elenco attuale della pagina**, il
-massimo di ticket per ricerca, **Copia/Scarica dati tecnici** ed esportazione/importazione dei
-dati personali. I dati tecnici descrivono l'elenco del portale (archivio, colonne, filtri,
+filtri gestiti, come è partita l'ultima ricerca, indirizzo dei ticket, Area Riservata),
+**Leggi l'elenco attuale della pagina**, il massimo di ticket per ricerca, l'indirizzo dell'Area
+Riservata, **Copia/Scarica dati tecnici** ed esportazione/importazione dei dati personali. I dati tecnici descrivono l'elenco del portale (archivio, colonne, filtri,
 richieste osservate) senza cookie né token; nomi e testi sono sostituiti da «N car.».
 
 ### Sviluppo del segnalibro
@@ -94,8 +130,13 @@ repository) e dati inventati: stesse schede del portale (My tickets, My Group Ti
 from my groups, All tickets, anche creata solo alla prima apertura con `?lazy=1` o dopo N
 millisecondi con `?lazy=N`), elenchi annidati in contenitori `body_ctlNN` come nel portale vero,
 token anti-falsificazione obbligatorio, filtri applicati in tre modi diversi
-(`?apply=auto|enter|none`), filtri di gruppi e persone (menu e ricerca sul server), pulsanti
-*Open* (con `?openbind=1` abilitato da un binding dopo la selezione) e *Find by ID…*. La prova
+(`?apply=auto|enter|none`), campi ad albero con i rami caricati dal server (Servizio, Assigned to,
+Owner Group) e campi con ricerca sul server (Site, Contact, Resource Owner, Modified by), pulsanti
+*Open* (con `?openbind=1` abilitato da un binding dopo la selezione) e *Find by ID…* che aprono il
+ticket in una nuova scheda (`/HDAPortal/Ticket/View?id=…`, pagina ExtJS con i dati caricati dopo).
+La finta Area Riservata (`bookmarklet/test/fake_areariservata.py`) riproduce la Ricerca rapida
+(portlet ZtVWeb, modulo Filtri nell'iframe `gspv_winf_search`, `servlet/spsl_fquery_mc` con il
+limite di 210 risultati, pagina del ticket disegnata da JavaScript). La prova
 registra le proprie richieste a parte (intestazione `x-e2e-run`), quindi più prove possono usare
 lo stesso finto portale; risposte lente, limiti di righe e filtri aggiunti dal server sono
 simulati intercettando le richieste dal browser.
@@ -105,10 +146,15 @@ Scarica ExtJS una volta:
 mkdir -p bookmarklet/test/vendor && cd bookmarklet/test/vendor && npm pack extjs-gpl@6.2.0 && tar -xzf extjs-gpl-6.2.0.tgz package/build/ext-all.js package/build/classic/theme-triton/resources && rm extjs-gpl-6.2.0.tgz
 ```
 
-Poi avvia il finto portale (<http://127.0.0.1:8770/HDAPortal/>) e la prova:
+Poi avvia il finto portale (<http://127.0.0.1:8770/HDAPortal/>), la finta Area Riservata su
+un'altra porta (un altro sito, come nella realtà) e la prova:
 
 ```bash
 python -m uvicorn bookmarklet.test.fake_hdaportal:app --port 8770
+```
+
+```bash
+python -m uvicorn bookmarklet.test.fake_areariservata:app --port 8772
 ```
 
 ```bash

@@ -108,7 +108,8 @@ def data() -> list[dict]:
                     "Subject": d.subject, "Description": d.text,
                     "Resolution": ("Risolto: " + d.text.split(". ")[-1]) if closed else "-",
                     "AccountName": d.azienda.upper(), "AccountCode": str(200000 + zlib.crc32(d.azienda.encode()) % 90000),
-                    "ContactName": d.persona.upper(), "TicketStatusID": st, "TicketStatusText": dict(STATUSES)[st],
+                    "ContactName": d.persona.upper(), "ContactCode": "C" + str(zlib.crc32(d.persona.encode()) % 900000),
+                    "TicketStatusID": st, "TicketStatusText": dict(STATUSES)[st],
                     "TicketPriorityID": PRIO_MAP.get(d.priorita, "P3"),
                     "TicketPriorityText": dict(PRIORITIES)[PRIO_MAP.get(d.priorita, "P3")],
                     "ServiceID": SERVICE_IDS.get(service, ""), "ServiceText": service,
@@ -117,6 +118,7 @@ def data() -> list[dict]:
                     "OwnerGroup": d.gruppo, "GroupCode": GROUP_CODES[d.gruppo],
                     "ModifiedByText": ", ".join(d.op_part), "_modifiers": sorted(USER_CODES[o] for o in d.op_part),
                     "Tags": "normativa" if rng.random() < 0.1 else "",
+                    "_interactions": d.idx,
                     "Sla": rng.choice(["", "OK", "In scadenza", "Scaduto"]),
                     "_hay": norm(" ".join([d.subject, d.text, d.azienda, f"{d.number + 3_000_000}Z"])),
                 })
@@ -163,6 +165,11 @@ def apply_filters(rows: list[dict], filters: list[dict]) -> list[dict]:
             out = [r for r in out if norm(str(v)) in norm(r["CatalogItemText"])]
         elif name == "AccountID":
             out = [r for r in out if r["AccountCode"] == v]
+        elif name == "ContactID":
+            out = [r for r in out if r["ContactCode"] == v]
+        elif name == "Relations.ObjectTag.ID":
+            vals = set(v if isinstance(v, list) else str(v).split(","))
+            out = [r for r in out if ("T1" in vals and r["Tags"] == "normativa")]
         elif name == "AssignedUserOrGroupID":
             out = [r for r in out if v in (r["AssignedCode"], r["GroupCode"])]
         elif name == "OwnerUserGroupID":
@@ -184,7 +191,7 @@ __HOSTILE__
 __BM__
 <script>
 window.__opened = []; window.__activity = 0;
-window.Portal = { Const: { LoggedUser: { Name: "Utente di prova" } }, PageManager: {}, MessageBus: {} };
+window.Portal = { Const: { LoggedUser: { Name: "Utente di prova" }, TypedLoggedUser: { ID: "U005", Name: __ME__ }, HDAUser: { DefaultUserGroupID: "G3" } }, PageManager: {}, MessageBus: {} };
 var CFG = { apply: "__APPLY__", tab: "__TAB__", lazy: __LAZY__, openbind: __OPENBIND__, statuses: __STATUSES__, open: __OPEN__, priorities: __PRIORITIES__, services: __SERVICES__, users: __USERS__, groups: __GROUPS__ };
 Ext.onReady(function () {
   Ext.ns("Ext.ux");
@@ -199,11 +206,36 @@ Ext.onReady(function () {
   function multi(a, b) { return '<div class="list-cell"><div class="list-cell-multitext"><div class="text-default">' + enc(a || "") + '</div><div class="text-caption">' + enc(b || "") + "</div></div></div>"; }
   function dt(v) { return v ? '<div class="list-cell list-cell-datetime"><div class="list-cell-multitext"><div class="text-datetime-date">' + Ext.Date.format(v, "n/j/Y") + '</div><div class="text-datetime-time">' + Ext.Date.format(v, "g:i a") + "</div></div></div>" : ""; }
   var tabs;
-  function openTicket(code, subject) {
+  // come nel portale vero: il ticket si apre in una nuova scheda del browser, con un suo indirizzo
+  function openTicket(code, recId) {
     window.__opened.push(code);
-    var id = "ticket_" + code.replace(/\\W/g, "");
-    var t = Ext.getCmp(id) || tabs.add({ title: "Ticket " + code, id: id, closable: true, html: '<div class="tkt-open">' + enc(code) + "</div><p>" + enc(subject || "") + "</p>" });
-    tabs.setActiveTab(t);
+    window.open("/HDAPortal/Ticket/View?id=" + encodeURIComponent(recId), "_blank");
+  }
+  // come il tree-field del portale: campo in sola lettura con un menu ad albero, rami caricati quando si aprono
+  Ext.define("Fake.TreeField", {
+    extend: "Ext.form.field.Picker", alias: "widget.faketreefield", editable: false, valueField: "id", displayField: "text",
+    initComponent: function () { this.callParent(arguments); this.addCls("tree-field userorgroup-treefield-extension"); },
+    getStore: function () { return this.store; },
+    createPicker: function () {
+      var me = this;
+      return Ext.create("Ext.tree.Panel", { floating: true, hidden: true, ownerCmp: me, store: me.store, rootVisible: false, width: 380, height: 320, cls: "fake-tree-picker",
+        listeners: { itemclick: function (v, rec) { if (rec.get("selectable") === false) return; me.setValue(rec.getId(), rec.get("text")); me.collapse(); } } });
+    },
+    setValue: function (v, text) {
+      var me = this, n = v && me.store ? me.store.getNodeById(v) : null;
+      me.value = v === undefined || v === "" ? null : v;
+      me.setRawValue(me.value ? (text || (n && n.get("text")) || me.value) : "");
+      me.checkChange();
+      return me;
+    },
+    getValue: function () { return this.value === undefined ? null : this.value; },
+    getSubmitValue: function () { return this.getValue(); },
+    clearValue: function () { this.setValue(null); },
+    isEqual: function (a, b) { return a === b; }
+  });
+  function treeStore(kind) {
+    return Ext.create("Ext.data.TreeStore", { root: { id: "root", text: "", expanded: false },
+      proxy: { type: "ajax", url: "/HDAPortal/Lookup/Tree?kind=" + kind, reader: { type: "json" } } });
   }
   function makeModule(prefix, key, defaultStatuses) {
     var P = prefix + "_UC_";
@@ -223,18 +255,24 @@ Ext.onReady(function () {
     }
     combo("StatusFilter", "TicketStatusID", "Status", CFG.statuses, true, defaultStatuses);
     combo("PriorityFilter", "TicketPriorityID", "Priority", CFG.priorities, true, null);
-    combo("ServiceFilter", "ServiceID", "Service", CFG.services, false, null);
-    // come sul portale: "Assigned to" e "Owner Group" con menu a scelta (non digitabili),
-    // "Resource Owner" e "Modified by" con ricerca sul server mentre si scrive
-    combo("AssignedUserOrGroupFilter", "AssignedUserOrGroupID", "Assigned to", CFG.groups.map(function (g) { return [g[0], "[Gruppo] " + g[1]]; }).concat(CFG.users), false, null);
-    combo("OwnerUserGroupID", "OwnerUserGroupID", "Owner Group", CFG.groups, false, null);
-    function lookup(id, name, label) {
-      return fld({ xclass: "Ext.form.field.ComboBox", id: P + "filter_default_" + id, name: name, fieldLabel: label, queryMode: "remote", minChars: 2,
+    // come sul portale: "Service", "Assigned to" e "Owner Group" con menu ad albero (non digitabili),
+    // "Site", "Contact", "Resource Owner" e "Modified by" con ricerca sul server mentre si scrive
+    function tree(id, name, label, kind) { return fld({ xclass: "Fake.TreeField", id: P + "filter_default_" + id, name: name, fieldLabel: label, store: treeStore(kind) }); }
+    tree("ServiceFilter", "ServiceID", "Service", "service");
+    tree("AssignedUserOrGroupFilter", "AssignedUserOrGroupID", "Assigned to", "assigned");
+    tree("OwnerUserGroupID", "OwnerUserGroupID", "Owner Group", "group");
+    function lookup(id, name, label, url) {
+      var f = fld({ xclass: "Ext.form.field.ComboBox", id: P + "filter_default_" + id, name: name, fieldLabel: label, queryMode: "remote", minChars: 2,
         queryParam: "query", valueField: "value", displayField: "text", forceSelection: true, typeAhead: false, hideTrigger: false,
-        store: Ext.create("Ext.data.Store", { fields: ["value", "text"], proxy: { type: "ajax", url: "/HDAPortal/Lookup/Users", reader: { type: "json", rootProperty: "data" } } }) });
+        store: Ext.create("Ext.data.Store", { fields: ["value", "text"], proxy: { type: "ajax", url: url || "/HDAPortal/Lookup/Users", reader: { type: "json", rootProperty: "data" } } }) });
+      f.addCls("objectlink-field");
+      return f;
     }
+    lookup("AccountID", "AccountID", "Site", "/HDAPortal/Lookup/Accounts");
+    lookup("ContactFilter", "ContactID", "Contact", "/HDAPortal/Lookup/Contacts");
     lookup("OwnerUserID", "OwnerUserID", "Resource Owner");
     lookup("ModifiedBy", "ModifiedBy", "Modified by");
+    combo("TagFilter", "Relations.ObjectTag.ID", "Tags", [["T1", "normativa"], ["T2", "cliente importante"]], true, null);
     fld({ id: P + "filter_default_CatalogItemTxt", name: "CTITM.TranslatedDescription", fieldLabel: "Classification (txt)" });
     fld({ id: P + "filter_default_ClassCliTxt", name: "CLASSCLI.TranslatedDescription", fieldLabel: "Client Classification(txt)" });
 
@@ -262,7 +300,7 @@ Ext.onReady(function () {
         f.on("specialkey", function (fd, e) { if (e.getKey() === e.ENTER) applyFilters(); });
     });
     var vm = CFG.openbind ? Ext.create("Ext.app.ViewModel", { data: { sel: null } }) : null;
-    var dbl = function (v, r) { openTicket(r.get("TicketCode"), r.get("Subject")); };
+    var dbl = function (v, r) { openTicket(r.get("TicketCode"), r.getId()); };
     var grid = Ext.create("Ext.grid.Panel", { id: P + "grd", store: store, flex: 1, cls: "list-view list-grid listViewGrid",
       selModel: { selType: "checkboxmodel", mode: "MULTI" },
       // openbind: come in un portale MVVM, il doppio clic è ascoltato dalla view e Open si abilita con un binding
@@ -298,10 +336,10 @@ Ext.onReady(function () {
             Ext.Msg.prompt("Find by ID", "Ticket ID:", function (btn, text) {
               if (btn !== "ok" || !text) return;
               Ext.Ajax.request({ url: "/HDAPortal/Ticket/Find", params: { code: text.trim() }, success: function (resp) {
-                var o = Ext.decode(resp.responseText); if (o.found) openTicket(o.code, o.subject); else Ext.Msg.alert("Find by ID", "Ticket not found"); } });
+                var o = Ext.decode(resp.responseText); if (o.found) openTicket(o.code, o.id); else Ext.Msg.alert("Find by ID", "Ticket not found"); } });
             });
           } },
-        Ext.apply({ text: "Open", handler: function () { var s = grid.getSelection()[0]; if (s) openTicket(s.get("TicketCode"), s.get("Subject")); } },
+        Ext.apply({ text: "Open", handler: function () { var s = grid.getSelection()[0]; if (s) openTicket(s.get("TicketCode"), s.getId()); } },
           CFG.openbind ? { disabled: true, bind: { disabled: "{!sel}" } } : {}),
         { text: "Discard ticket", handler: function () { window.__discarded = (window.__discarded || 0) + 1; } },
         { text: "Change status...", handler: function () {} }
@@ -356,7 +394,7 @@ async def portal(apply: str = "auto", tab: str = "home", ostile: int = 0, lazy: 
             .replace("__STATUSES__", json.dumps(STATUSES)).replace("__OPEN__", json.dumps(OPEN_DEFAULT))
             .replace("__PRIORITIES__", json.dumps(PRIORITIES)).replace("__SERVICES__", json.dumps(SERVICES))
             .replace("__USERS__", json.dumps(USERS)).replace("__GROUPS__", json.dumps(GROUPS)).replace("__LAZY__", str(max(0, min(lazy, 20000)))).replace("__OPENBIND__", "true" if openbind else "false")
-            .replace("__TOKEN__", TOKEN).replace("__HOSTILE__", HOSTILE if ostile else "").replace("__BM__", bm))
+            .replace("__ME__", json.dumps(USERS[4][1])).replace("__TOKEN__", TOKEN).replace("__HOSTILE__", HOSTILE if ostile else "").replace("__BM__", bm))
     r = HTMLResponse(page)
     r.set_cookie("ASP.NET_SessionId", "ok", path="/")
     return r
@@ -426,6 +464,124 @@ async def lookup_users(request: Request, query: str = ""):
     return {"data": [{"value": c, "text": n} for c, n in USERS if q and q in norm(n)][:20]}
 
 
+# alberi dei campi tree-field: gruppi con le persone (Assigned to), solo gruppi (Owner Group), servizi per tipo
+FAMILIES = [("F1", "Informazione"), ("F2", "Anomalia"), ("F3", "Richiesta")]
+
+
+@app.get("/HDAPortal/Lookup/Tree")
+async def lookup_tree(request: Request, kind: str = "assigned", node: str = "root"):
+    denied = _auth(request)
+    if denied:
+        return denied
+    LOG.append({"run": _run(request), "tree": kind, "node": node})
+    if kind == "group":
+        return [{"id": c, "text": n, "leaf": True, "iconCls": "x-fa fa-users"} for c, n in GROUPS] if node == "root" else []
+    if kind == "service":
+        if node == "root":
+            return [{"id": c, "text": n, "leaf": False, "selectable": False} for c, n in FAMILIES]
+        fam = dict(FAMILIES).get(node)
+        return [{"id": c, "text": t, "leaf": True} for c, t in SERVICES if fam and t.startswith(fam + " /")]
+    if node == "root":
+        return [{"id": c, "text": n, "leaf": False, "iconCls": "x-fa fa-users"} for c, n in GROUPS]
+    gi = next((i for i, (c, _) in enumerate(GROUPS) if c == node), None)
+    if gi is None:
+        return []
+    return [{"id": c, "text": n, "leaf": True, "iconCls": "x-fa fa-user"} for i, (c, n) in enumerate(USERS) if i % len(GROUPS) == gi]
+
+
+def _lookup(rows: list[tuple[str, str]], query: str) -> dict:
+    q = norm(query)
+    return {"data": [{"value": c, "text": n} for c, n in rows if q and q in norm(n)][:20]}
+
+
+@app.get("/HDAPortal/Lookup/Accounts")
+async def lookup_accounts(request: Request, query: str = ""):
+    denied = _auth(request)
+    if denied:
+        return denied
+    LOG.append({"run": _run(request), "lookup": query, "kind": "accounts"})
+    return _lookup(sorted({(r["AccountCode"], r["AccountName"]) for r in data()}, key=lambda x: x[1]), query)
+
+
+@app.get("/HDAPortal/Lookup/Contacts")
+async def lookup_contacts(request: Request, query: str = ""):
+    denied = _auth(request)
+    if denied:
+        return denied
+    LOG.append({"run": _run(request), "lookup": query, "kind": "contacts"})
+    return _lookup(sorted({(r["ContactCode"], r["ContactName"]) for r in data()}, key=lambda x: x[1]), query)
+
+
+def interactions(r: dict) -> list[dict]:
+    """Messaggi inventati del ticket (deterministici)."""
+    rng = random.Random(r["RecId"])
+    out = [{"When": ms(r["Date"]), "Author": r["ContactName"].title(), "Kind": "Richiesta", "Text": r["Description"]}]
+    t = r["Date"]
+    for i in range(rng.randint(1, 4)):
+        t = t + timedelta(hours=rng.randint(1, 30))
+        who = rng.choice([r["AssignedTo"], *r["ModifiedByText"].split(", ")])
+        out.append({"When": ms(min(t, r["LastChange"])), "Author": who, "Kind": "Risposta" if i % 2 == 0 else "Nota interna",
+                    "Text": f"Messaggio {i + 1} sul ticket {r['TicketCode']}: verificato il caso di {r['AccountName'].title()}, " + r["Description"].split(". ")[0] + "."})
+    if r["Resolution"] != "-":
+        out.append({"When": ms(r["LastChange"]), "Author": r["AssignedTo"], "Kind": "Soluzione", "Text": r["Resolution"]})
+    return out
+
+
+TICKET_PAGE = """<!doctype html><html><head><meta charset="utf-8"><title>Ticket (finto) - HDA TOUCH</title>
+<link rel="stylesheet" href="/__vendor/classic/theme-triton/resources/theme-triton-all.css">
+<script src="/__vendor/ext-all.js"></script></head><body>
+<form id="_AntiForgeryForm"><input type="hidden" name="_RVT" value="__TOKEN__"></form>
+<script>
+Ext.onReady(function () {
+  Ext.Ajax.setDefaultHeaders({ RequestVerificationToken: document.querySelector("#_AntiForgeryForm input[name=_RVT]").value });
+  var id = new URLSearchParams(location.search).get("id");
+  var vp = Ext.create("Ext.container.Viewport", { layout: "fit", items: [{ xtype: "panel", title: "Caricamento…", id: "tktpanel" }] });
+  var mask = new Ext.LoadMask({ msg: "Loading...", target: vp }); mask.show();
+  // come un portale vero: i dati arrivano dopo, con una richiesta a parte
+  setTimeout(function () {
+    Ext.Ajax.request({ url: "/HDAPortal/Ticket/Get", method: "GET", params: { id: id }, success: function (resp) {
+      var o = Ext.decode(resp.responseText); mask.hide();
+      if (!o.success) { vp.removeAll(); vp.add({ xtype: "panel", html: "Ticket non trovato" }); return; }
+      var d = o.data, f = function (v) { return v ? Ext.Date.format(new Date(parseInt(String(v).replace(/\\D/g, ""), 10)), "n/j/Y g:i a") : ""; };
+      vp.removeAll();
+      vp.add({ xtype: "tabpanel", id: "tkttabs", items: [
+        { title: "Ticket " + d.TicketCode, xtype: "form", scrollable: true, bodyPadding: 12, defaults: { xtype: "displayfield", labelWidth: 130, width: 700 }, items: [
+          { fieldLabel: "Ticket", value: d.TicketCode }, { fieldLabel: "Status", value: d.TicketStatusText }, { fieldLabel: "Priority", value: d.TicketPriorityText },
+          { fieldLabel: "Opened", value: f(d.Date) }, { fieldLabel: "Last update", value: f(d.LastChange) }, { fieldLabel: "Site", value: d.AccountName },
+          { fieldLabel: "Contact", value: d.ContactName }, { fieldLabel: "Service", value: d.ServiceText }, { fieldLabel: "Classification", value: d.CatalogItemText },
+          { fieldLabel: "Assigned to", value: d.AssignedTo }, { fieldLabel: "Owner group", value: d.OwnerGroup }, { fieldLabel: "Modified by", value: d.ModifiedByText },
+          { xtype: "textfield", fieldLabel: "Subject", value: d.Subject, readOnly: true },
+          { xtype: "textareafield", fieldLabel: "Issue/Request", value: d.Description, readOnly: true, height: 160 },
+          { xtype: "textareafield", fieldLabel: "Resolution", value: d.Resolution, readOnly: true, height: 80 }] },
+        { title: "Interactions", xtype: "grid", store: { fields: ["When", "Author", "Kind", "Text"], data: d.Interactions },
+          columns: [{ text: "Date", dataIndex: "When", width: 140, renderer: f }, { text: "Author", dataIndex: "Author", width: 160 }, { text: "Type", dataIndex: "Kind", width: 110 }, { text: "Message", dataIndex: "Text", flex: 1, cellWrap: true }] }
+      ] });
+      document.title = "Ticket " + d.TicketCode + " - HDA TOUCH";
+      window.__ticketReady = true;
+    } });
+  }, 500);
+});
+</script></body></html>"""
+
+
+@app.get("/HDAPortal/Ticket/View")
+async def ticket_view(request: Request, id: str = ""):
+    LOG.append({"run": _run(request), "view": id})
+    return HTMLResponse(TICKET_PAGE.replace("__TOKEN__", TOKEN))
+
+
+@app.get("/HDAPortal/Ticket/Get")
+async def ticket_get(request: Request, id: str = ""):
+    denied = _auth(request)
+    if denied:
+        return denied
+    LOG.append({"run": _run(request), "get": id})
+    for r in data():
+        if str(r["RecId"]) == id:
+            return {"success": True, "data": {**to_json(r), "Interactions": interactions(r)}}
+    return {"success": False}
+
+
 @app.post("/HDAPortal/Ticket/Find")
 async def find(request: Request):
     denied = _auth(request)
@@ -436,7 +592,7 @@ async def find(request: Request):
     LOG.append({"run": _run(request), "find": code})
     for r in data():
         if r["TicketCode"] == code:
-            return {"found": True, "code": code, "subject": r["Subject"]}
+            return {"found": True, "code": code, "id": r["RecId"], "subject": r["Subject"]}
     return {"found": False}
 
 

@@ -5,6 +5,9 @@ const fs = require("fs");
 const path = require("path");
 
 const BASE = process.env.BASE || "http://127.0.0.1:8770";
+// finta Area Riservata su un'altra porta (un altro sito, come nella realtà)
+const BASE_AR = process.env.BASE_AR || "http://127.0.0.1:8772";
+const AR_PAGE = BASE_AR + "/areariservata/jsp/sipv_psearch_infi.jsp";
 const SHOTS = process.env.SHOTS || "";
 const HREF = fs.readFileSync(path.join(__dirname, "..", "dist", "bookmarklet.txt"), "utf8").trim();
 let failures = 0;
@@ -92,15 +95,16 @@ const isOpen = async (page) => host(page).evaluate((e) => e.style.display !== "n
     await hp.close();
   }
 
-  // ---- vecchia Area Riservata e pagina qualsiasi: avviso -------------------------------------
+  // ---- vecchia Area Riservata aperta da sola: il segnalibro spiega come collegarla ----------
   {
     const op = await ctx.newPage();
     let alerted = "";
     op.on("dialog", async (d) => { alerted = d.message(); await d.dismiss(); });
-    await op.goto(BASE + "/areariservata/jsp/gspv_psearch.jsp");
+    await op.goto(AR_PAGE + "?ostile=1");
     await clickBookmarklet(op);
-    await op.waitForTimeout(300);
-    check(alerted.includes("HDAPortal") && alerted.includes("All tickets"), "sulla vecchia Area Riservata indica il nuovo portale");
+    await op.waitForTimeout(400);
+    const card = await op.evaluate(() => { const h = document.getElementById("ricerca-tkt-ponte"); return h ? h.shadowRoot.textContent : ""; });
+    check(!alerted && card.includes("Collega l'Area Riservata"), "nell'Area Riservata aperta da sola il segnalibro spiega come collegarla");
     await op.close();
   }
 
@@ -115,7 +119,7 @@ const isOpen = async (page) => host(page).evaluate((e) => e.style.display !== "n
   check((await page.inputValue("#st")) === "all", "stato predefinito: tutti");
   await page.click("#adv summary");
   check((await page.locator("#pr-list button").count()) === 5, "priorità lette dal filtro della pagina");
-  check((await txt(page, "#kept")).includes("Nessuno"), "nessun altro filtro impostato nella pagina");
+  check((await page.locator("#pf .pr").count()) === 4 && (await page.locator("#pf .chip").count()) === 0, `altri filtri del portale nel pannello, nessuno impostato (${await page.locator("#pf .pr .lb").allInnerTexts()})`);
   if (SHOTS) await page.screenshot({ path: SHOTS + "/bm-01-aperto.png" });
 
   await search(page, "detassazione");
@@ -223,18 +227,24 @@ const isOpen = async (page) => host(page).evaluate((e) => e.style.display !== "n
   // filtro impostato nella pagina del portale: mantenuto e mostrato
   await page.keyboard.press("Escape");
   check(await page.evaluate(() => document.body.inert === false), "il portale torna utilizzabile dopo la chiusura");
-  await page.evaluate(() => Ext.getCmp("id0a9c7e5b3d1f2468_UC_filter_default_ServiceFilter").setValue("SV1"));
+  await page.evaluate(async (P) => {
+    // come una scelta fatta nel menu del portale: ramo del servizio aperto, poi il valore
+    const f = Ext.getCmp(P + "filter_default_ServiceFilter"), st = f.getStore();
+    await new Promise((r) => st.getRootNode().expand(false, r));
+    await new Promise((r) => st.getNodeById("F1").expand(false, r));
+    f.setValue("SV1");
+  }, P0);
   await page.waitForTimeout(1200);
   await clickBookmarklet(page);
-  check((await txt(page, "#kept")).includes("Informazione / PAGHE INFINITY"), "filtro Servizio della pagina mostrato");
-  check((await txt(page, "#qprev")).includes("dalla pagina: Service"), "e indicato tra i filtri inviati");
+  check((await txt(page, '#pf [data-pf="ServiceFilter"]')).includes("Informazione / PAGHE INFINITY"), "filtro Servizio della pagina mostrato nel pannello");
+  check((await txt(page, "#qprev")).includes("Service = Informazione / PAGHE INFINITY"), "e indicato tra i filtri inviati");
   await resetLog(page);
   await search(page, "detassazione");
   e = lastList(await log(page));
   check(fval(e, "ServiceID") === "SV1", "filtro della pagina mantenuto nella ricerca");
   const svc = await page.locator("#list .res").allInnerTexts();
   check(svc.length > 0 && svc.every((s) => s.includes("Informazione / PAGHE INFINITY")), "risultati del servizio scelto");
-  await page.click("#kept .chip button");
+  await page.click('#pf [data-pf="ServiceFilter"] .chip button');
   check(await page.evaluate(() => !Ext.getCmp("id0a9c7e5b3d1f2468_UC_filter_default_ServiceFilter").getValue()), "il filtro della pagina si può togliere dal pannello");
 
   // più risultati del massimo: avviso e "carica i successivi"
@@ -290,17 +300,28 @@ const isOpen = async (page) => host(page).evaluate((e) => e.style.display !== "n
   await page.locator("#ppl .sug button").first().click();
   await page.waitForTimeout(200);
   check((await txt(page, "#ppl")).includes(who) && (await txt(page, "#qprev")).includes(`Modificato da = ${who}`), `persona scelta con la ricerca del portale (${who})`);
-  await page.locator("#ppl .pr", { hasText: "Assegnato a" }).locator("button", { hasText: "Scegli nel portale" }).click();
-  await page.waitForTimeout(400);
+  // Assegnato a: elenco ad albero dentro il pannello (gruppi, poi le persone del gruppo caricate dal portale)
+  await page.click('[data-pftree="AssignedUserOrGroupFilter"]');
+  await page.locator('[data-tree="AssignedUserOrGroupFilter"] .nm').first().waitFor({ timeout: 10000 });
+  const groupsShown = await page.locator('[data-tree="AssignedUserOrGroupFilter"] .nm').allInnerTexts();
+  await page.locator('[data-tree="AssignedUserOrGroupFilter"] li', { hasText: "HR Fiscale" }).locator(".tgl").click();
+  await page.waitForFunction(() => document.getElementById("ricerca-tkt-host").shadowRoot.querySelectorAll('[data-tree="AssignedUserOrGroupFilter"] .nm').length > 5, null, { timeout: 10000 });
+  const inGroup = (await page.locator('[data-tree="AssignedUserOrGroupFilter"] .nm').count()) - groupsShown.length;
+  await page.locator('[data-tree="AssignedUserOrGroupFilter"] .nm', { hasText: /^HR Fiscale$/ }).click();
+  await page.waitForTimeout(300);
+  check(groupsShown.length === 5 && inGroup > 0 && (await txt(page, '#ppl [data-pf="AssignedUserOrGroupFilter"]')).includes("HR Fiscale"), `gruppo scelto dall'elenco ad albero nel pannello (${groupsShown.length} gruppi, ${inGroup} persone nel ramo)`);
+  // Gruppo proprietario: con il menu del portale (resta come alternativa)
+  await page.locator('#ppl [data-pf="OwnerUserGroupID"]').locator("button", { hasText: "Menu del portale" }).click();
+  await page.waitForTimeout(500);
   check(!(await isOpen(page)) && (await page.locator("#ricerca-tkt-pill button").isVisible()), "scelta nel portale: il pannello si nasconde e compare il promemoria");
-  await page.locator(".x-boundlist-item", { hasText: "[Gruppo] HR Fiscale" }).click();
+  await page.locator(".fake-tree-picker .x-tree-node-text", { hasText: "HR Fiscale" }).click();
   await page.waitForTimeout(800);
-  check(await isOpen(page) && (await txt(page, "#ppl")).includes("[Gruppo] HR Fiscale"), "dopo la scelta Ricerca TKT si riapre con il gruppo");
+  check(await isOpen(page) && (await txt(page, '#ppl [data-pf="OwnerUserGroupID"]')).includes("HR Fiscale"), "dopo la scelta Ricerca TKT si riapre con il gruppo");
   await resetLog(page);
   await search(page, "");
   e = lastList(await log(page));
   const whoCode = await page.evaluate((n) => (CFG.users.find((u) => u[1] === n) || [])[0], who);
-  check(fval(e, "ModifiedBy") === whoCode && fval(e, "AssignedUserOrGroupID") === "G3", `filtri di gruppo e persona inviati al portale (${fval(e, "ModifiedBy")}, ${fval(e, "AssignedUserOrGroupID")})`);
+  check(fval(e, "ModifiedBy") === whoCode && fval(e, "AssignedUserOrGroupID") === "G3" && fval(e, "OwnerUserGroupID") === "G3", `filtri di gruppo e persona inviati al portale (${fval(e, "ModifiedBy")}, ${fval(e, "AssignedUserOrGroupID")}, ${fval(e, "OwnerUserGroupID")})`);
   const metas = await page.locator("#list .res .meta").allInnerTexts();
   check(metas.length > 0 && metas.every((x) => x.includes(who) && x.includes("HR Fiscale")), `risultati del gruppo e della persona (${metas.length})`);
   check((await page.locator("#f-modifiers").count()) === 1, "faccetta Modificato da");
@@ -321,13 +342,34 @@ const isOpen = async (page) => host(page).evaluate((e) => e.style.display !== "n
   await page.selectOption("#sort", "rank");
   await search(page, "detassazione");
   const code0 = await page.locator("#list .res .num").first().innerText();
-  await page.locator("#list .res").first().locator("button", { hasText: "Apri" }).click();
-  await page.waitForTimeout(500);
-  check(!(await isOpen(page)), "il pannello si chiude all'apertura del ticket");
-  check(await page.evaluate((c) => window.__opened.includes(c) && Ext.getCmp("navbar").getActiveTab().title === "Ticket " + c, code0), `ticket ${code0} aperto nel portale`);
+  await page.evaluate(() => localStorage.removeItem("rtkt2:touchUrl"));
+  await search(page, "detassazione");
+  const [tab0] = await Promise.all([ctx.waitForEvent("page"), page.locator("#list .res").first().locator("button", { hasText: "Apri in Touch" }).click()]);
+  await tab0.waitForLoadState("domcontentloaded");
+  await page.waitForTimeout(400);
+  check(/\/HDAPortal\/Ticket\/View\?id=\d+/.test(tab0.url()) && await page.evaluate((c) => window.__opened.includes(c), code0), `ticket ${code0} aperto dal portale in una nuova scheda (${tab0.url().replace(BASE, "")})`);
+  await tab0.close();
+  check(await isOpen(page), "il pannello resta aperto nella scheda del portale");
+  const learned = await page.evaluate(() => JSON.parse(localStorage.getItem("rtkt2:touchUrl") || "null"));
+  check(learned && learned.field === "recId" && (await page.locator("#list .res a.btn", { hasText: "Apri in Touch" }).count()) === 50, `indirizzo dei ticket imparato: ogni risultato ha il collegamento diretto (${learned && learned.field})`);
   if (SHOTS) await page.screenshot({ path: SHOTS + "/bm-05-ticket.png" });
 
-  // preferito non più nell'elenco: Find by ID della pagina, già compilato
+  // ticket completo nel pannello: la pagina del ticket letta senza aprire schede
+  await resetLog(page);
+  let tabs0 = ctx.pages().length;
+  await page.locator("#list .res").nth(1).locator("button", { hasText: "Leggi" }).click();
+  await page.locator("#rbody .pre").first().waitFor({ timeout: 30000 });
+  const rd = { title: await txt(page, "#rtitle"), fields: await page.locator("#rbody .rdf dt").count(), texts: (await page.locator("#rbody .pre").allInnerTexts()).map((x) => x.length), rows: await page.locator("#rbody .rdtab tbody tr").count(), link: await page.locator("#rlink").getAttribute("href") };
+  const views = (await log(page)).filter((x) => x.view).length;
+  check(rd.fields >= 10 && rd.texts.some((n) => n > 100) && rd.rows >= 2 && /Ticket\/View\?id=/.test(rd.link || "") && ctx.pages().length === tabs0 && views === 1,
+    `ticket completo letto nel pannello: campi, testo, messaggi e collegamento (${JSON.stringify(rd)}, ${views} pagina)`);
+  await page.click("#rcopy");
+  check((await page.evaluate(() => navigator.clipboard.readText())).includes("Issue/Request"), "testo del ticket copiato");
+  await page.click("#rclose");
+
+  // preferito non più nell'elenco e indirizzo non ancora noto: Find by ID della pagina, già compilato
+  await page.evaluate(() => localStorage.removeItem("rtkt2:touchUrl"));
+  await page.keyboard.press("Escape");
   await clickBookmarklet(page);
   check(await isOpen(page), "il segnalibro riapre il pannello");
   check((await page.locator("#list .res").count()) === 50, "risultati conservati alla riapertura");
@@ -335,10 +377,22 @@ const isOpen = async (page) => host(page).evaluate((e) => e.style.display !== "n
   await page.click('#nav button[data-tab="favorites"]');
   check((await page.locator("#favs .res").count()) === 1 && (await txt(page, "#favs")).includes("Da rivedere"), "preferito con nota");
   await resetLog(page);
-  await page.locator("#favs .res button", { hasText: "Apri" }).click();
-  await page.waitForTimeout(1500);
+  // lettura: Find by ID compilato e confermato, la nuova scheda intercettata e letta nel pannello
+  tabs0 = ctx.pages().length;
+  await page.locator("#favs .res button", { hasText: "Leggi" }).click();
+  await page.locator("#rbody .pre").first().waitFor({ timeout: 30000 }).catch(() => {});
+  const finds0 = (await log(page)).filter((x) => x.find).map((x) => x.find);
+  check(finds0.includes(favCode) && (await txt(page, "#rbody")).includes(favCode) && ctx.pages().length === tabs0, `preferito letto con Find by ID, senza aprire schede (${finds0})`);
+  await page.click("#rclose");
+  await page.evaluate(() => localStorage.removeItem("rtkt2:touchUrl"));
+  await page.click('#nav button[data-tab="search"]');
+  await page.click('#nav button[data-tab="favorites"]');
+  await resetLog(page);
+  const [tab1] = await Promise.all([ctx.waitForEvent("page"), page.locator("#favs .res button", { hasText: "Apri in Touch" }).click()]);
+  await tab1.waitForLoadState("domcontentloaded");
   const finds = (await log(page)).filter((x) => x.find).map((x) => x.find);
-  check(finds.includes(favCode) && await page.evaluate((c) => window.__opened.includes(c) && !Ext.Msg.isVisible(), favCode), `preferito aperto con Find by ID, compilato e confermato (${finds})`);
+  check(finds.includes(favCode) && await page.evaluate((c) => window.__opened.includes(c) && !Ext.Msg.isVisible(), favCode) && tab1.url().includes("/Ticket/View"), `preferito aperto con Find by ID, compilato e confermato (${finds})`);
+  await tab1.close();
 
   // Find by ID con un'altra finestra del portale aperta (Change status...): non scrive e non conferma in quella
   await sh(page, () => {
@@ -346,15 +400,20 @@ const isOpen = async (page) => host(page).evaluate((e) => e.style.display !== "n
     Ext.create("Ext.window.Window", { id: "chgwin", title: "Change status", modal: true, width: 420, items: [{ xtype: "textareafield", itemId: "note", fieldLabel: "Note" }],
       buttons: [{ text: "OK", handler: function () { window.__changed = this.up("window").down("#note").getValue(); this.up("window").close(); } }] }).show();
   });
-  await clickBookmarklet(page);
+  await page.evaluate(() => localStorage.removeItem("rtkt2:touchUrl"));
+  if (!(await isOpen(page))) await clickBookmarklet(page);
+  await page.click('#nav button[data-tab="search"]');
   await page.click('#nav button[data-tab="favorites"]');
-  await page.locator("#favs .res button", { hasText: "Apri" }).click();
-  await page.waitForTimeout(1500);
+  const tabsCw = ctx.pages().length;
+  await page.locator("#favs .res button", { hasText: "Apri in Touch" }).click();
+  await page.waitForTimeout(2000);
+  for (const pg of ctx.pages().slice(tabsCw)) await pg.close();
   const cw = await sh(page, (c) => ({ changed: window.__changed, opened: window.__opened.includes(c), open: !!Ext.getCmp("chgwin") && Ext.getCmp("chgwin").isVisible() }), favCode);
   check(cw.changed === null && cw.opened && cw.open, `Find by ID non tocca un'altra finestra aperta (${JSON.stringify(cw)})`);
   await sh(page, () => { Ext.getCmp("chgwin").destroy(); });
 
   // dati tecnici: struttura dell'elenco, richieste, niente token né dati dei clienti
+  if (await isOpen(page)) await page.keyboard.press("Escape");
   await sh(page, () => { Ext.Ajax.request({ url: "/HDAPortal/Account/Save", params: { Note: "ZZ_998877" }, failure() {} }); }); // a pannello chiuso
   await clickBookmarklet(page);
   await sh(page, () => { Ext.Ajax.request({ url: "/HDAPortal/Account/Save", params: { Login: "utente.prova", Phone: "3471234567", VatNumber: "01234567890", Password: "Estate.2025" }, failure() {} }); });
@@ -493,7 +552,7 @@ const isOpen = async (page) => host(page).evaluate((e) => e.style.display !== "n
     p.on("pageerror", (x) => p.__err.push(x.message));
     if (setup) await setup(p);
     await portal(p, q);
-    await p.evaluate(() => localStorage.removeItem("rtkt2:settings"));
+    await p.evaluate(() => { localStorage.removeItem("rtkt2:settings"); localStorage.removeItem("rtkt2:touchUrl"); });
     return p;
   };
   const advOpen = (p) => p.evaluate(() => { document.getElementById("ricerca-tkt-host").shadowRoot.querySelector("#adv").open = true; });
@@ -596,7 +655,7 @@ const isOpen = async (page) => host(page).evaluate((e) => e.style.display !== "n
     await p.waitForTimeout(300);
     await clickBookmarklet(p);
     await advOpen(p);
-    await p.locator("#ppl .pr", { hasText: "Gruppo proprietario" }).locator("button", { hasText: "Scegli nel portale" }).click();
+    await p.locator('#ppl [data-pf="OwnerUserGroupID"]').locator("button", { hasText: "Menu del portale" }).click();
     await p.waitForTimeout(500);
     const st = await p.evaluate((P) => { const f = Ext.getCmp(P + "filter_default_OwnerUserGroupID"); return { tab: Ext.getCmp("navbar").getActiveTab().id, vis: f.isVisible(true), exp: !!f.isExpanded }; }, P0);
     check(st.tab === "body_INC_ALLGRP_EXTENDED" && st.vis && st.exp, `scelta nel portale da un'altra scheda: si apre All tickets (${JSON.stringify(st)})`);
@@ -616,9 +675,10 @@ const isOpen = async (page) => host(page).evaluate((e) => e.style.display !== "n
     await clickBookmarklet(p);
     await search(p, "detassazione");
     const c0 = await p.locator("#list .res .num").first().innerText();
-    await p.locator("#list .res").first().locator("button", { hasText: "Apri" }).click();
-    await p.waitForTimeout(1500);
-    check(await p.evaluate((c) => window.__opened.includes(c), c0), `ticket aperto con Open abilitato in ritardo dal portale (${c0})`);
+    const [tb] = await Promise.all([ctx.waitForEvent("page", { timeout: 8000 }).catch(() => null), p.locator("#list .res").first().locator("button", { hasText: "Apri in Touch" }).click()]);
+    await p.waitForTimeout(500);
+    check(!!tb && await p.evaluate((c) => window.__opened.includes(c), c0), `ticket aperto con Open abilitato in ritardo dal portale (${c0})`);
+    if (tb) await tb.close();
     check(p.__err.length === 0, `nessun errore con Open legato alla selezione ${p.__err.length ? JSON.stringify(p.__err) : ""}`);
     await p.close();
   }
@@ -747,6 +807,125 @@ const isOpen = async (page) => host(page).evaluate((e) => e.style.display !== "n
     await p.waitForTimeout(300);
     check(await p.evaluate(() => window.__pwned3 === undefined) && perr.length === 0, "nessun codice dal nome di un gruppo importato");
     await c2.close();
+  }
+
+  // ---- 3.0: tutti i filtri del portale nel pannello, scelta rapida «Io», ricerca salvata che li rimette
+  {
+    const p = await fresh("?apply=auto&tab=all");
+    await clickBookmarklet(p);
+    await advOpen(p);
+    await p.click('[data-pftree="ServiceFilter"]');
+    await p.locator('[data-tree="ServiceFilter"] input').fill("presenze");
+    await p.locator('[data-tree="ServiceFilter"] button.nm', { hasText: "Informazione / PRESENZE WEB" }).waitFor({ timeout: 15000 });
+    const famNotSelectable = await p.locator('[data-tree="ServiceFilter"] span.nm.off').count() >= 0;
+    await p.locator('[data-tree="ServiceFilter"] button.nm', { hasText: "Informazione / PRESENZE WEB" }).click();
+    await p.fill('[data-pfq="AccountID"]', "tecno");
+    await p.locator('[data-pf="AccountID"] .sug button').first().waitFor({ timeout: 10000 });
+    const site = await p.locator('[data-pf="AccountID"] .sug button').first().innerText();
+    await p.locator('[data-pf="AccountID"] .sug button').first().click();
+    await p.locator('[data-pfl="TagFilter"] button', { hasText: "normativa" }).click();
+    await p.locator('#ppl [data-pf="ModifiedBy"] button[data-quick="Io"]').click();
+    await p.waitForTimeout(300);
+    const qp = await txt(p, "#qprev");
+    await resetLog(p);
+    await search(p, "");
+    let le = lastList(await log(p));
+    const me = await p.evaluate(() => Portal.Const.TypedLoggedUser);
+    check(fval(le, "ServiceID") && fval(le, "AccountID") && JSON.stringify(fval(le, "Relations.ObjectTag.ID")) === '["T1"]' && fval(le, "ModifiedBy") === me.ID && famNotSelectable,
+      `filtri scelti nel pannello e inviati al portale (servizio ${fval(le, "ServiceID")}, sede ${site}, etichetta, «Io» = ${fval(le, "ModifiedBy")})`);
+    check(qp.includes("Service = Informazione / PRESENZE WEB") && qp.includes(`Site = ${site}`) && qp.includes("Tags = normativa") && qp.includes(`Modificato da = ${me.Name}`), "anteprima con i nomi dei filtri del portale");
+    await p.click("#qsave");
+    await p.fill("#sname", "Filtri del portale");
+    await p.click('#dsave button[value="ok"]');
+    await p.click("#qreset");
+    check(await p.evaluate((P) => !Ext.getCmp(P + "filter_default_ServiceFilter").getValue() && !Ext.getCmp(P + "filter_default_AccountID").getValue() && !(Ext.getCmp(P + "filter_default_TagFilter").getValue() || []).length, P0), "Azzera toglie anche gli altri filtri del portale");
+    await p.reload();
+    await p.waitForFunction(() => window.__ready === true);
+    await p.waitForTimeout(800);
+    await clickBookmarklet(p);
+    await p.click('#nav button[data-tab="saved"]');
+    await resetLog(p);
+    await p.locator("#saved .li", { hasText: "Filtri del portale" }).locator("button", { hasText: "Esegui" }).click();
+    await waitDone(p);
+    le = lastList(await log(p));
+    const qp2 = await txt(p, "#qprev");
+    check(fval(le, "ServiceID") && fval(le, "AccountID") && fval(le, "ModifiedBy") === me.ID && qp2.includes("Service = Informazione / PRESENZE WEB"), `la ricerca salvata rimette i filtri del portale in una pagina nuova, con i nomi (${fval(le, "ServiceID")})`);
+    await p.evaluate(() => { const all = JSON.parse(localStorage.getItem("rtkt2:saved") || "[]").filter((x) => x.name !== "Filtri del portale"); localStorage.setItem("rtkt2:saved", JSON.stringify(all)); });
+    check(p.__err.length === 0, `nessun errore con i filtri nel pannello ${p.__err.length ? JSON.stringify(p.__err) : ""}`);
+    await p.close();
+  }
+
+  // ---- 3.0: Area Riservata collegata (un altro sito, in un'altra scheda): ricerca su tutte e due le fonti
+  {
+    const p = await fresh("?apply=auto&tab=all");
+    await clickBookmarklet(p);
+    await p.click('#nav button[data-tab="settings"]');
+    await p.fill("#s-arurl", AR_PAGE);
+    await p.click("#ssave");
+    await p.click('#nav button[data-tab="search"]');
+    check((await txt(p, "#ar-state")) === "non collegata" && await p.locator("#src-ar").isDisabled(), "Area Riservata non collegata all'inizio");
+    const [arp] = await Promise.all([ctx.waitForEvent("page"), p.click("#ar-connect")]);
+    const arErr = [];
+    arp.on("pageerror", (x) => arErr.push(x.message));
+    let asked = "";
+    arp.on("dialog", async (d) => { asked = d.message(); await d.accept(); });
+    await arp.waitForLoadState("load");
+    await arp.waitForTimeout(500);
+    check((await txt(p, "#ar-state")).includes("attesa") && (await txt(p, "#ar-help")).includes("premi lì il segnalibro"), "in attesa del segnalibro nella scheda dell'Area Riservata");
+    await clickBookmarklet(arp);
+    await p.waitForFunction(() => document.getElementById("ricerca-tkt-host").shadowRoot.querySelector("#ar-state").textContent === "collegata", null, { timeout: 15000 });
+    check(asked.includes(BASE.replace(/\/$/, "")) && await p.locator("#src-ar").isChecked(), `collegamento con la conferma nell'Area Riservata («${asked.slice(0, 60)}…»)`);
+    await fetch(BASE_AR + `/__reset?run=${RUN}`, { method: "POST" });
+    await search(p, "detassazione");
+    const sumAr = await txt(p, "#sum");
+    const arLog = (await (await fetch(BASE_AR + `/__log?run=${RUN}`)).json()).filter((x) => x.params);
+    const q0 = arLog[0] || { params: {}, order: [] };
+    check(/dal portale Touch/.test(sumAr) && /dall'Area Riservata/.test(sumAr) && (await p.locator("#list .res .badge.src").count()) > 0, `risultati di tutte e due le fonti (${sumAr.replace(/\s+/g, " ").slice(0, 120)})`);
+    check(arLog.length === 1 && q0.order.join(",") === "pKeyword,pArea,pCore,pLangs,cs_SITE,m_cID" && q0.params.pArea === "TICKOPEXXX" && q0.params.pCore === "" && /^IdCenSer:PAOW +and \( Testi:\("detassazione"\) or Oggetto:\("detassazione"\) \)$/.test(q0.params.pKeyword),
+      `richiesta all'Area Riservata nel formato della sua pagina (${q0.params.pKeyword})`);
+    check((await p.locator("#f-source li").count()) === 2, "faccetta Fonte (Touch / Area Riservata)");
+    await p.locator("#f-source button", { hasText: "Area Riservata" }).click();
+    const arCard = p.locator("#list .res", { has: p.locator("a.btn", { hasText: "Area Riservata" }) }).first();
+    const arNum = await arCard.locator(".num").innerText();
+    await arCard.locator("button", { hasText: "Leggi" }).click();
+    await p.locator("#rbody .pre").first().waitFor({ timeout: 30000 });
+    const arRead = await txt(p, "#rbody");
+    check(arRead.includes(arNum.replace("#", "")) && /Testo/.test(arRead) && (await p.locator("#rlink").getAttribute("href") || "").startsWith(BASE_AR) && (await txt(p, "#rsrc")) === "Area Riservata", `ticket dell'Area Riservata letto nel pannello (${arNum})`);
+    await p.click("#rclose");
+    await p.click("#active .chip button");
+    // periodo: nell'Area Riservata un mese alla volta, con il campo della data di apertura chiesto alla sua pagina
+    await fetch(BASE_AR + `/__reset?run=${RUN}`, { method: "POST" });
+    await p.selectOption("#preset", "py");
+    await search(p, "detassazione");
+    const py = new Date().getFullYear() - 1;
+    const kwP = ((await (await fetch(BASE_AR + `/__log?run=${RUN}`)).json()).filter((x) => x.params)[0] || { params: {} }).params.pKeyword || "";
+    check(kwP.includes(`(IdMeseA:1 and IdAnnoA:${py} )`) && kwP.includes(`(IdMeseA:12 and IdAnnoA:${py} )`), `periodo nell'Area Riservata con la data di apertura (${kwP.slice(0, 90)}…)`);
+    await p.selectOption("#preset", "");
+    await search(p, "detassazione");
+    await p.click("#yearsbtn");
+    await waitDone(p);
+    const yrs = await txt(p, "#years");
+    check(yrs.includes("portale Touch e Area Riservata") && (await p.locator("#years .yr .yn", { hasText: "+" }).count()) > 0, "ticket per anno anche nell'Area Riservata");
+    // filtri che l'Area Riservata non ha: si cerca solo nel portale, e lo si dice
+    await advOpen(p);
+    await p.locator('#ppl [data-pf="ModifiedBy"] button[data-quick="Io"]').click();
+    await p.waitForTimeout(300);
+    const note = await txt(p, "#qwarn");
+    await fetch(BASE_AR + `/__reset?run=${RUN}`, { method: "POST" });
+    await search(p, "detassazione");
+    const none = (await (await fetch(BASE_AR + `/__log?run=${RUN}`)).json()).filter((x) => x.params).length;
+    check(note.includes("Area Riservata: non usata") && none === 0 && !/dall'Area Riservata/.test(await txt(p, "#sum")), "con gruppi e persone si cerca solo nel portale Touch, e il pannello lo dice");
+    await p.click("#qreset");
+    await p.click('#nav button[data-tab="settings"]');
+    await p.click("#tcopy");
+    const tj = JSON.parse(await p.evaluate(() => navigator.clipboard.readText()));
+    check(tj.ar && tj.ar.state === "on" && tj.ar.origin === BASE_AR && tj.reader !== undefined, "dati tecnici: stato dell'Area Riservata");
+    await p.click('#nav button[data-tab="search"]');
+    await arp.close();
+    await p.waitForFunction(() => document.getElementById("ricerca-tkt-host").shadowRoot.querySelector("#ar-state").textContent === "non collegata", null, { timeout: 8000 }).catch(() => {});
+    check((await txt(p, "#ar-state")) === "non collegata", "chiusa la scheda, l'Area Riservata risulta scollegata");
+    check(p.__err.length === 0 && arErr.length === 0, `nessun errore con l'Area Riservata ${JSON.stringify(p.__err.concat(arErr))}`);
+    await p.close();
   }
 
   // ---- altri modi di applicare i filtri: solo con Invio, o mai (il segnalibro ricarica l'elenco)

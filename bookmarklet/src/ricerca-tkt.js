@@ -6,11 +6,13 @@
  * archivio dati), quindi passano per la sessione, i controlli e i permessi del portale, senza
  * password, server o installazioni. Una richiesta per ricerca, con un numero massimo di risultati.
  * Preferiti, note, ricerche salvate e cronologia restano nel browser (localStorage del portale).
+ * Cliccato nella vecchia Ricerca rapida dell'Area Riservata fa da ponte (ar-bridge.js): le ricerche del
+ * portale cercano anche lì, con la sessione dell'Area Riservata, e i risultati arrivano con postMessage.
  */
 (() => {
   "use strict";
   const NS = "__RicercaTKT__";
-  const VERSION = "2.1.0";
+  const VERSION = "3.0.0";
   if (window[NS]) { window[NS].toggle(); return; }
   try {
 
@@ -44,13 +46,14 @@
   // eslint-disable-next-line no-shadow
   const { Set, Map, URL, DOMParser, Blob, AbortController, Promise, Intl, JSON } = PRISTINE;
 
+// @include ar-bridge.js
+
   // ===================================================================== ambiente: il portale ExtJS
+  // Nella vecchia Area Riservata il segnalibro fa da ponte per Ricerca TKT nel portale Touch.
+  if (/\/areariservata\//i.test(location.pathname) || (window.ZtVWeb && !window.Ext)) { arBridgeMain(); return; }
   const Ext = window.Ext;
   if (!Ext || !Ext.ComponentQuery || typeof Ext.getCmp !== "function") {
-    const old = !!window.ZtVWeb || /\/areariservata\//i.test(location.pathname);
-    alert(old
-      ? "Ricerca TKT 2 funziona sul nuovo portale ticket (HDAPortal), non sulla vecchia Area Riservata.\n\nApri il portale ticket, vai nella scheda \u00abAll tickets\u00bb e clicca di nuovo il segnalibro."
-      : "Ricerca TKT: apri il portale ticket Zucchetti (dopo l'accesso), vai nella scheda \u00abAll tickets\u00bb e clicca di nuovo il segnalibro.");
+    alert("Ricerca TKT: apri il portale ticket Zucchetti (HDA TOUCH, dopo l'accesso), vai nella scheda \u00abAll tickets\u00bb e clicca di nuovo il segnalibro.");
     return;
   }
   const LIST_NAMES = { INC_ALLGRP_EXTENDED: "All tickets", MYTKT: "My tickets", DEFGRP: "My Group Tickets" };
@@ -139,7 +142,8 @@
       try { localStorage.setItem("rtkt2:" + key, JSON.stringify(value)); return true; } catch { return false; }
     },
   };
-  const DEFAULT_SETTINGS = { v: 1, cap: 200, list: "" };
+  const AR_DEFAULT = "https://www.zucchetti.it/areariservata/jsp/sipv_psearch_infi.jsp";
+  const DEFAULT_SETTINGS = { v: 1, cap: 200, list: "", arUrl: AR_DEFAULT, arOn: true };
   const settings = Object.assign({}, DEFAULT_SETTINGS, store.get("settings", {}) || {});
   const CAPS = [50, 100, 200, 500];
   if (!CAPS.includes(+settings.cap)) settings.cap = 200;
@@ -311,7 +315,10 @@
       if (!st || typeof st.getRange !== "function") return [];
       const vf = f.valueField || "value", df = f.displayField || "text";
       const out = [];
-      for (const r of st.getRange()) {
+      // tutte le voci, non solo quelle filtrate dopo una ricerca nel campo
+      let recs = st.getRange();
+      try { const d = st.getData && st.getData(); const src = d && typeof d.getSource === "function" ? d.getSource() : null; if (src && typeof src.getRange === "function") recs = src.getRange(); } catch { /* */ }
+      for (const r of recs) {
         const v = r.get(vf);
         if (v === null || v === undefined || v === "") continue;
         out.push([String(v), textOf(String(r.get(df) ?? v))]);
@@ -391,17 +398,24 @@
     }
     return v === null || v === undefined ? "" : String(v);
   }
+  // nomi già visti per i codici (ricerche salvate, scelte nel pannello): un campo ad albero appena caricato
+  // mostra il codice finché il suo ramo non viene aperto
+  const NAMES = new Map();
+  const rememberName = (v, t) => { if (v && t && String(t) !== String(v) && NAMES.size < 2000) NAMES.set(String(v), String(t).slice(0, 200)); };
   function personValue(f) {
     try {
       const v = scalarValue(f, f.getValue());
       if (!v || /^\[\{"value":""/.test(v)) return null;
-      return { v, t: fieldDisplay(f) || v };
+      const t = fieldDisplay(f) || v;
+      if (t !== v) rememberName(v, t);
+      return { v, t: t === v && NAMES.has(v) ? NAMES.get(v) : t };
     } catch { return null; }
   }
   const canLookup = (f) => !!(f && typeof f.doQuery === "function" && typeof f.getStore === "function" && !f.readOnly && f.editable !== false);
   // Imposta un gruppo o una persona ({v: codice, t: nome}) in un campo del portale.
   function setPerson(f, d) {
     const code = String(d.v);
+    rememberName(code, String(d.t || "").replace(/[<>"`]/g, "").trim());
     const same = () => scalarValue(f, f.getValue()) === code;
     const vf = f.valueField || "value", df = f.displayField || "text";
     // il nome può arrivare da un file importato e finire nel menu del portale (BoundList: {text} senza codifica HTML)
@@ -414,12 +428,24 @@
     const asRecord = () => {
       try { if (!plain || typeof st.getModel !== "function") return false; const M = st.getModel(); f.setValue(new M({ [vf]: code, [df]: label })); return same(); } catch { return false; }
     };
-    try { const r = st && typeof st.findRecord === "function" ? st.findRecord(vf, code, 0, false, true, true) : null; if (r) { f.setValue(r); if (same()) return true; } } catch { /* */ }
+    // campi ad albero (tree-field): il valore è il codice del nodo, non il nodo
+    if (st && st.isTreeStore) {
+      // un TreePicker non segnala il cambio da solo: checkChange avvisa il portale (che ricarica l'elenco)
+      const changed = () => { try { if (typeof f.checkChange === "function") f.checkChange(); } catch { /* */ } };
+      try { f.setValue(code); changed(); if (same()) return true; } catch { /* */ }
+      try { const n = st.getNodeById(code); if (n) { f.setValue(n); changed(); if (same() && typeof f.getValue() !== "object") return true; } } catch { /* */ }
+      try { f.setValue(code); changed(); } catch { /* */ }
+      return same();
+    }
+    // con l'elenco del campo non caricato setValue(codice) non segnala il cambio: checkChange lo fa (solo se è cambiato)
+    const signal = () => { try { if (typeof f.checkChange === "function") f.checkChange(); } catch { /* */ } };
+    try { const r = st && typeof st.findRecord === "function" ? st.findRecord(vf, code, 0, false, true, true) : null; if (r) { f.setValue(r); if (same()) { signal(); return true; } } } catch { /* */ }
     try {
       f.setValue(code);
       if (same()) {
         // elenco del campo mai caricato (pagina nuova): Ext tiene il codice ma il campo resta vuoto; con il nome noto si mostra quello
         if (!raw() && label !== code && !asRecord()) { try { f.setValue(code); } catch { /* */ } }
+        signal();
         return same();
       }
     } catch { /* */ }
@@ -437,10 +463,68 @@
   function clearField(f) {
     try { if (typeof f.clearValue === "function") f.clearValue(); else f.setValue(null); } catch { try { f.setValue(""); } catch { /* */ } }
   }
+  // ===================================================================== tutti i filtri del portale nel pannello
+  // Tipo di ogni campo filtro: albero (tree-field), ricerca sul server (objectlink), elenco (combo con le
+  // scelte già nella pagina), data o testo. I valori sono i codici del portale, con il nome per mostrarli.
+  const clsOf = (f) => { try { return `${f.cls || ""} ${f.userCls || ""} ${f.el && f.el.dom ? f.el.dom.className : ""}`; } catch { return ""; } };
+  function treeStoreOf(f) {
+    const gets = [() => f.getStore && f.getStore(), () => f.store, () => f.treeStore, () => f.picker && f.picker.getStore && f.picker.getStore(), () => f.tree && f.tree.getStore && f.tree.getStore()];
+    for (const get of gets) { try { const st = get(); if (st && st.isTreeStore && typeof st.getRootNode === "function") return st; } catch { /* */ } }
+    return null;
+  }
+  function fieldKind(f) {
+    try {
+      if (f.isXType && f.isXType("hiddenfield")) return "hidden";
+      if (f.isXType && f.isXType("datefield")) return "date";
+      if (treeStoreOf(f)) return "tree";
+      if (/\btree-?field\b/i.test(clsOf(f))) return "treemenu"; // albero senza archivio leggibile: solo dal menu del portale
+      if (canLookup(f) && f.queryMode !== "local") return "remote";
+      if (typeof f.getStore === "function" && comboOptions(f).length) return "list";
+      if (f.isXType && f.isXType("combobox")) return canLookup(f) ? "remote" : "list";
+      return "text";
+    } catch { return "text"; }
+  }
+  // campi filtro gestiti dal pannello (oltre a quelli della barra di ricerca): gruppi e persone prima
+  function pfFields(m) {
+    const all = filterFields(m).filter(({ suffix }) => !(suffix in CONTROLLED)).map((x) => Object.assign(x, { kind: fieldKind(x.f) })).filter((x) => x.kind !== "hidden");
+    const rank = (x) => { const i = PEOPLE.findIndex(([k]) => k === x.suffix); return i < 0 ? 100 : i; };
+    return all.map((x, i) => Object.assign(x, { i, label: PEOPLE_KEYS.has(x.suffix) ? PEOPLE.find(([k]) => k === x.suffix)[1] : fieldLabel(x.f, x.suffix) }))
+      .sort((a, b) => rank(a) - rank(b) || a.i - b.i);
+  }
+  const isMulti = (f) => !!(f && f.multiSelect);
+  const emptyJson = (v) => /^\[\{"value":""/.test(String(v || ""));
+  // valore di un campo come {v, t}: v = codice (o elenco di codici, testo, data AAAA-MM-GG)
+  function pfValue(f, kind) {
+    try {
+      kind = kind || fieldKind(f);
+      if (kind === "date") { const v = f.getValue(); return isDate(v) ? { v: isoOf(v), t: fmtDate(isoOf(v)) } : null; }
+      if (kind === "text") { const v = String(f.getValue() ?? "").trim(); return v && !emptyJson(v) ? { v, t: v } : null; }
+      if (kind === "list" && isMulti(f)) {
+        const codes = asList(f.getValue());
+        if (!codes.length) return null;
+        const names = new Map(comboOptions(f));
+        return { v: codes, t: codes.map((c) => names.get(c) || c).join(", ") };
+      }
+      return personValue(f);
+    } catch { return null; }
+  }
+  function setPf(f, want, kind) {
+    kind = kind || fieldKind(f);
+    const cur = pfValue(f, kind);
+    if (!want || want.v === undefined || want.v === null || want.v === "" || (Array.isArray(want.v) && !want.v.length)) {
+      if (cur) clearField(f);
+      return !pfValue(f, kind);
+    }
+    if (kind === "date") return setDate(f, String(want.v));
+    if (kind === "text") return setText(f, String(want.v));
+    if (kind === "list" && isMulti(f)) return setMulti(f, (Array.isArray(want.v) ? want.v : String(want.v).split(",")).map(String));
+    if (cur && cur.v === String(want.v)) return true;
+    return setPerson(f, { v: Array.isArray(want.v) ? want.v[0] : want.v, t: want.t });
+  }
+  // filtri del pannello con un valore (esclusi gruppi e persone): per descrizione e confronti
   function keptFilters(m) {
-    return filterFields(m).filter(({ suffix, f }) => !(suffix in CONTROLLED) && !PEOPLE_KEYS.has(suffix) && !(f.isXType && f.isXType("hiddenfield")))
-      .map(({ suffix, f }) => ({ suffix, f, label: fieldLabel(f, suffix), value: fieldDisplay(f) }))
-      .filter((x) => x.value && !/^\[\{"value":""/.test(x.value));
+    return pfFields(m).filter((x) => !PEOPLE_KEYS.has(x.suffix)).map((x) => Object.assign(x, { val: pfValue(x.f, x.kind) })).filter((x) => x.val)
+      .map((x) => ({ suffix: x.suffix, f: x.f, label: x.label, value: x.val.t, val: x.val }));
   }
   function statusCodes(m, s) {
     const opts = comboOptions(m.field("StatusFilter"));
@@ -477,6 +561,14 @@
           if (cur) clearField(f);
           return !personValue(f);
         });
+      }
+    }
+    // altri filtri del portale (Servizio, Sede, Contatto, Etichette...): quelli voluti, gli altri tolti
+    if (s.pf && typeof s.pf === "object") {
+      for (const x of pfFields(m)) {
+        if (PEOPLE_KEYS.has(x.suffix) || x.kind === "treemenu") continue;
+        const want = s.pf[x.suffix];
+        doSet(x.suffix, !!want, (f) => setPf(f, want, x.kind));
       }
     }
   }
@@ -557,7 +649,7 @@
   // valori dei filtri gestiti: se apply() non cambia nulla il portale non può ricaricare da solo
   function fieldSig(m) {
     const out = [];
-    for (const suffix of [...Object.keys(CONTROLLED), ...PEOPLE_KEYS]) {
+    for (const suffix of new Set([...Object.keys(CONTROLLED), ...PEOPLE_KEYS, ...pfFields(m).map((x) => x.suffix)])) {
       const f = m.field(suffix);
       if (!f) continue;
       try { const v = f.getValue(); out.push(isDate(v) ? isoOf(v) : Array.isArray(v) ? asList(v).sort().join(",") : scalarValue(f, v)); } catch { out.push("?"); }
@@ -604,12 +696,13 @@
   // valori dei filtri della pagina prima della prima ricerca, per poterli ripristinare
   function snapshot(m) {
     const values = {};
-    for (const suffix of [...Object.keys(CONTROLLED), ...PEOPLE_KEYS]) {
-      const f = CONTROLLED[suffix] || PEOPLE_KEYS.has(suffix) ? m.field(suffix) : null;
+    const people = {}; // campi con un solo valore scelto da un elenco: {v,t} o null, per rimetterli con il nome
+    const pf = pfFields(m);
+    for (const suffix of new Set([...Object.keys(CONTROLLED), ...pf.map((x) => x.suffix)])) {
+      const f = CONTROLLED[suffix] || pf.some((x) => x.suffix === suffix) ? m.field(suffix) : null;
       if (f) { try { const v = f.getValue(); values[suffix] = Array.isArray(v) ? v.slice() : v; } catch { /* */ } }
     }
-    const people = {};
-    for (const suffix of PEOPLE_KEYS) { const f = m.field(suffix); if (f) people[suffix] = personValue(f); } // {v,t} o null
+    for (const x of pf) if (["tree", "remote", "list"].includes(x.kind) && !isMulti(x.f)) people[x.suffix] = personValue(x.f);
     let quick, pageSize = null;
     try { quick = m.quick ? m.quick.getValue() : undefined; } catch { /* */ }
     try { pageSize = m.store.getPageSize(); } catch { /* */ }
@@ -657,7 +750,7 @@
       }
       for (const [suffix, want] of Object.entries(sn.people || {})) {
         const f = m.field(suffix), now = f && personValue(f);
-        if (f && (want ? !now || now.v !== want.v : now)) missed.push(PEOPLE.find(([k]) => k === suffix)[1].replace(/ \(.*$/, ""));
+        if (f && (want ? !now || now.v !== want.v : now)) missed.push((PEOPLE.find(([k]) => k === suffix) || [, fieldLabel(f, suffix)])[1].replace(/ \(.*$/, ""));
       }
       if (m.quick && sn.quick !== undefined) { try { m.quick.setValue(sn.quick); } catch { /* */ } }
       try { if (sn.pageSize && typeof m.store.setPageSize === "function") m.store.setPageSize(sn.pageSize); } catch { /* */ }
@@ -690,7 +783,7 @@
     if (now.sig === was.sig && now.size === was.size) return true;
     ensureSnapshot(m);
     const run = { applied: [], failed: [], trigger: "", loads: 0 };
-    await reload(m, () => { setPageSize(m.store, S.info.pageSize); applyValues(m, Object.assign({}, S.last, { people: undefined }), run); }, run, signal);
+    await reload(m, () => { setPageSize(m.store, S.info.pageSize); applyValues(m, Object.assign({}, S.last, { people: undefined, pf: undefined }), run); }, run, signal);
     S.info.state = listState(m);
     return true;
   }
@@ -817,7 +910,7 @@
     return out;
   }
   function toTicket(m, rec, row, cols) {
-    const t = { key: "", code: "", recId: "", list: m.key, rank: row, cols: [] };
+    const t = { key: "", code: "", recId: "", list: m.key, source: "Touch", rank: row, cols: [] };
     try { t.recId = String(typeof rec.getId === "function" ? rec.getId() : rec.id); } catch { /* */ }
     for (const col of cols) {
       const { parts, title, value } = cellParts(m, rec, col, row);
@@ -851,6 +944,9 @@
       } else if (!t[sem]) t[sem] = text;
     }
     t.key = t.code ? `c:${t.code}` : `r:${m.key}:${t.recId}`;
+    // dato del ticket usato nell'indirizzo della sua pagina (se non è l'id o il numero)
+    const tp = touchTemplate();
+    if (tp && tp.field !== "recId" && tp.field !== "code") { try { const v = rec.get(tp.field); if (v !== undefined && v !== null) t.ref = { [tp.field]: String(v).slice(0, 100) }; } catch { /* */ } }
     return t;
   }
   function readStore(m) {
@@ -864,10 +960,14 @@
   }
 
   // ===================================================================== apertura dei ticket nel portale
-  function findButton(m, re) {
+  // pulsanti della barra dell'elenco: per testo o per il nome stabile del comando (aria-label del portale,
+  // es. ACCESSIBILITY_List_Btn_Toolbar_RecordView = Open, ..._WF_FindById = Find by ID)
+  function findButton(m, re, aria) {
     const lists = [];
     try { const tb = Ext.getCmp(m.P + "listToolbar"); if (tb && tb.query) lists.push(tb.query("button")); } catch { /* */ }
     try { if (m.cmp && m.cmp.query) lists.push(m.cmp.query("button")); } catch { /* */ }
+    const ariaOf = (b) => { try { return String(b.ariaLabel || (b.el && b.el.dom && b.el.dom.getAttribute("aria-label")) || ""); } catch { return ""; } };
+    if (aria) for (const list of lists) for (const b of list) if (aria.test(ariaOf(b))) return b;
     for (const list of lists) {
       for (const b of list) {
         const text = textOf(String((typeof b.getText === "function" ? b.getText() : b.text) || "")).replace(/\u00a0/g, " ").trim();
@@ -921,48 +1021,140 @@
     for (let i = 0; i < recs.length; i++) if (codeOf(recs[i], i) === t.code) return recs[i];
     return null;
   }
-  async function openTicket(t) {
-    const m = currentModule();
-    const rec = recordFor(m, t);
-    hide();
-    activity(true);
-    if (rec) {
-      showModuleTab(m);
-      await sleep(50);
-      try { m.grid.getSelectionModel().select([rec]); } catch { /* */ }
-      const b = findButton(m, /^(open|apri)$/i);
-      const usable = () => !!b && !b.destroyed && !(typeof b.isDisabled === "function" && b.isDisabled());
-      // il portale riabilita i comandi dopo il cambio di selezione (binding con timer o disable/enable della barra)
-      if (b) await waitUntil(usable, 1500);
-      if (usable() && clickBtn(b)) return;
-      try {
-        const view = m.grid.getView();
-        const node = view.getNode(rec);
-        const cell = node && [...node.querySelectorAll("td.x-grid-cell")].find((td) => { const c = Ext.getCmp(td.getAttribute("data-columnid")); return c && c.dataIndex; });
-        const was = !!(document.body && document.body.inert);
-        if (document.body) document.body.inert = false;
-        try {
-          // doppio clic vero: Ext genera itemdblclick/rowdblclick/celldblclick sulla view e li ripete sulla griglia
-          if (cell) cell.dispatchEvent(new MouseEvent("dblclick", { bubbles: true, cancelable: true, view: window }));
-          else view.fireEvent("itemdblclick", view, rec, node, m.store.indexOf(rec), new Ext.event.Event(new MouseEvent("dblclick", { bubbles: true })));
-        } finally { if (document.body) document.body.inert = was; }
-        return;
-      } catch { /* sotto: Find by ID */ }
-    }
-    await findById(m, t.code);
+  // ---- indirizzo del ticket nel portale (HDA TOUCH apre ogni ticket in una nuova scheda del browser)
+  // La prima apertura insegna lo schema dell'indirizzo (quale dato del ticket contiene): dopo, ogni risultato
+  // ha il suo collegamento diretto e il ticket si può leggere nel pannello senza aprire schede.
+  const URLKEY = "touchUrl";
+  const absUrl = (u) => { try { const x = new URL(String(u), location.href); return /^https?:$/.test(x.protocol) ? x.href : null; } catch { return null; } };
+  function touchTemplate() { const t = store.get(URLKEY, null); return t && typeof t.tpl === "string" && t.tpl.includes("{v}") && typeof t.field === "string" ? t : null; }
+  function touchUrl(t) {
+    const tp = touchTemplate();
+    if (!tp || !t || t.src === "ar") return null;
+    const v = tp.field === "recId" ? t.recId : tp.field === "code" ? t.code : t.ref && t.ref[tp.field];
+    if (v === undefined || v === null || v === "") return null;
+    return absUrl(tp.tpl.replace("{v}", encodeURIComponent(String(v))));
   }
-  async function findById(m, code) {
-    if (code) await copyText(code, null);
-    const b = m && findButton(m, /^(find by id|trova per id|cerca per id|trova id|vai al ticket)/i);
-    if (!b) { show(); toast(code ? `Ticket ${code} non presente nell'elenco: numero copiato, aprilo dal portale` : "Ticket non presente nell'elenco"); return; }
+  function learnTemplate(url, t, rec) {
+    if (!url || !t) return null;
+    const cands = [["recId", t.recId], ["code", t.code]];
+    try {
+      const d = rec && typeof rec.getData === "function" ? rec.getData() : null;
+      if (d) for (const [k, v] of Object.entries(d)) if ((typeof v === "string" || typeof v === "number") && String(v).length >= 2 && String(v).length <= 64) cands.push([k, String(v)]);
+    } catch { /* */ }
+    for (const [field, v] of cands) {
+      if (v === undefined || v === null || v === "") continue;
+      for (const enc of new Set([encodeURIComponent(String(v)), String(v)])) {
+        const mm = new RegExp(`(^|[^A-Za-z0-9])${escRe(enc)}(?=$|[^A-Za-z0-9])`).exec(url);
+        if (!mm) continue;
+        const at = mm.index + mm[1].length;
+        const tp = { tpl: url.slice(0, at) + "{v}" + url.slice(at + enc.length), field, at: new Date().toISOString() };
+        // il dato scelto deve dare di nuovo lo stesso indirizzo
+        if (absUrl(tp.tpl.replace("{v}", encodeURIComponent(String(v)))) !== absUrl(url) && absUrl(tp.tpl.replace("{v}", String(v))) !== absUrl(url)) continue;
+        store.set(URLKEY, tp);
+        return tp;
+      }
+    }
+    return null;
+  }
+  // Apre il ticket con i comandi del portale (Open, doppio clic, Find by ID) e intercetta la nuova scheda:
+  // mode "observe" la lascia aprire e ne ricorda l'indirizzo; mode "intercept" non apre nulla e restituisce
+  // l'indirizzo (oppure carica la pagina nella cornice indicata, se il portale la apre con un modulo POST).
+  async function portalOpen(m, t, mode, frame) {
+    const rec = recordFor(m, t);
+    const got = { url: null, posted: false, how: "" };
+    const W = window, origOpen = W.open, FP = HTMLFormElement.prototype, origSubmit = FP.submit;
+    const take = (u) => { const a = u && !/^(about:blank|javascript:)/i.test(String(u)) ? absUrl(u) : null; if (a) got.url = a; return a; };
+    const sink = { closed: false, opener: W, focus() {}, blur() {}, close() { this.closed = true; }, document: { write() {}, writeln() {}, open() {}, close() {} } };
+    Object.defineProperty(sink, "location", { get: () => ({ get href() { return got.url || "about:blank"; }, set href(v) { take(v); }, assign: take, replace: take, toString: () => got.url || "about:blank" }), set: take });
+    W.open = function (u) {
+      take(u);
+      if (mode === "observe") return origOpen.apply(W, arguments);
+      return sink;
+    };
+    const onClick = (e) => {
+      const a = (e.composedPath ? e.composedPath() : []).find((x) => x && x.tagName === "A");
+      if (!a || !a.href || /^javascript:/i.test(a.getAttribute("href") || "") || (a.getAttribute("href") || "").startsWith("#")) return;
+      if (a.target && a.target !== "_self") { take(a.href); if (mode !== "observe") e.preventDefault(); }
+    };
+    const formUrl = (fm) => {
+      if ((fm.method || "get").toLowerCase() !== "get") return null;
+      try { const u = new URL(fm.action || location.href, location.href); for (const [k, v] of new FormData(fm)) if (typeof v === "string") u.searchParams.append(k, v); return u.href; } catch { return null; }
+    };
+    const viaForm = (fm) => {
+      if (!fm.target || fm.target === "_self") return false;
+      const u = formUrl(fm);
+      if (u) { take(u); if (mode === "observe") return false; return true; }
+      if (mode !== "observe" && frame) { fm.target = frame.name; got.posted = true; }
+      return false;
+    };
+    FP.submit = function () { if (viaForm(this)) return undefined; return origSubmit.call(this); };
+    const onSubmit = (e) => { if (viaForm(e.target)) e.preventDefault(); };
+    document.addEventListener("click", onClick, true);
+    document.addEventListener("submit", onSubmit, true);
+    try {
+      activity(true);
+      if (rec) {
+        showModuleTab(m);
+        await sleep(50);
+        try { m.grid.getSelectionModel().select([rec]); } catch { /* */ }
+        const b = findButton(m, /^(open|apri)$/i, /_RecordView$/);
+        const usable = () => !!b && !b.destroyed && !(typeof b.isDisabled === "function" && b.isDisabled());
+        // il portale riabilita i comandi dopo il cambio di selezione (binding con timer o disable/enable della barra)
+        if (b) await waitUntil(usable, 1500);
+        let href = "";
+        try { href = typeof b.getHref === "function" ? b.getHref() || "" : b.href || ""; } catch { href = ""; }
+        if (usable() && href && !/^(#|javascript:)/i.test(href)) { take(href); got.how = "Open (collegamento)"; if (mode === "observe") origOpen.call(W, got.url, "_blank"); }
+        else if (usable() && clickBtn(b)) got.how = "Open";
+        else {
+          try {
+            const view = m.grid.getView();
+            const node = view.getNode(rec);
+            const cell = node && [...node.querySelectorAll("td.x-grid-cell")].find((td) => { const c = Ext.getCmp(td.getAttribute("data-columnid")); return c && c.dataIndex; });
+            const was = !!(document.body && document.body.inert);
+            if (document.body) document.body.inert = false;
+            try {
+              // doppio clic vero: Ext genera itemdblclick/rowdblclick/celldblclick sulla view e li ripete sulla griglia
+              if (cell) cell.dispatchEvent(new MouseEvent("dblclick", { bubbles: true, cancelable: true, view: window }));
+              else view.fireEvent("itemdblclick", view, rec, node, m.store.indexOf(rec), new Ext.event.Event(new MouseEvent("dblclick", { bubbles: true })));
+            } finally { if (document.body) document.body.inert = was; }
+            got.how = "doppio clic";
+          } catch { /* sotto: Find by ID */ }
+        }
+      }
+      if (!got.how && t.code) got.how = (await findById(m, t.code, true)) ? "Find by ID" : "";
+      if (got.how) await waitUntil(() => !!got.url || got.posted, 4000);
+    } finally {
+      W.open = origOpen; FP.submit = origSubmit;
+      document.removeEventListener("click", onClick, true);
+      document.removeEventListener("submit", onSubmit, true);
+    }
+    if (got.url) learnTemplate(got.url, t, rec);
+    return got;
+  }
+  // «Apri in Touch»: con l'indirizzo noto si apre direttamente, altrimenti con i comandi del portale
+  async function openTicket(t) {
+    if (t.src === "ar") { arOpen(t); return; }
+    const url = touchUrl(t);
+    if (url) { window.open(url, "_blank", "noopener"); return; }
+    const m = currentModule();
+    hide();
+    const got = await portalOpen(m, t, "observe");
+    if (got.url) { show(); render(); return; } // il ticket è nella nuova scheda; il pannello resta qui con i risultati
+    if (!got.how) { show(); toast(t.code ? `Ticket ${t.code} non presente nell'elenco: numero copiato, aprilo dal portale` : "Ticket non presente nell'elenco"); }
+  }
+  // quiet: per la lettura nel pannello (nessun messaggio, il pannello resta aperto); true se la richiesta è partita
+  async function findById(m, code, quiet) {
+    if (code && !quiet) await copyText(code, null);
+    const b = m && findButton(m, /^(find by id|trova per id|cerca per id|trova id|vai al ticket)/i, /_FindById$/);
+    if (!b) { if (!quiet) { show(); toast(code ? `Ticket ${code} non presente nell'elenco: numero copiato, aprilo dal portale` : "Ticket non presente nell'elenco"); } return false; }
     showModuleTab(m);
     await sleep(50);
     // solo una finestra comparsa DOPO il clic è quella di Find by ID: mai scrivere o confermare in una finestra
     // già aperta dall'utente (Change status..., Reply...)
     const visWins = () => Ext.ComponentQuery.query("window").filter((w) => !w.destroyed && w.isVisible && w.isVisible());
     const before = new Set(visWins());
-    if ((typeof b.isDisabled === "function" && b.isDisabled()) || !clickBtn(b)) { show(); toast(code ? `Numero ${code} copiato: aprilo dal portale` : "Apri il ticket dal portale"); return; }
-    if (!code) return;
+    if ((typeof b.isDisabled === "function" && b.isDisabled()) || !clickBtn(b)) { if (!quiet) { show(); toast(code ? `Numero ${code} copiato: aprilo dal portale` : "Apri il ticket dal portale"); } return false; }
+    if (!code) return false;
     let field = null;
     await waitUntil(() => {
       const fresh = visWins().filter((w) => !before.has(w));
@@ -972,15 +1164,190 @@
       if (f) { field = f; return true; }
       return false;
     }, 2500);
-    if (!field) return; // il numero è già negli appunti
-    try { field.setValue(code); field.focus(true, 30); } catch { /* */ }
+    if (!field) return false; // il numero è già negli appunti
+    try { field.setValue(code); if (!quiet) field.focus(true, 30); } catch { /* */ }
     // conferma con il pulsante della finestra (OK / Find / Cerca...), se riconoscibile
     try {
       const w = field.up("window");
       const ok = w && w.query("button").filter((x) => x.isVisible && x.isVisible(true))
         .find((x) => /^(ok|find|search|cerca|trova|apri|open|vai|go)$/i.test(textOf(String((x.getText ? x.getText() : x.text) || ""))));
-      if (ok && String(field.getValue()) === code) { await sleep(80); clickBtn(ok); }
+      if (ok && String(field.getValue()) === code) { await sleep(80); clickBtn(ok); return true; }
+      if (quiet && w) { try { w.close(); } catch { /* */ } }
     } catch { /* l'utente conferma a mano */ }
+    return false;
+  }
+
+  // ---- lettura del ticket completo: la pagina del ticket in una cornice nascosta, poi il testo nel pannello
+  let readerSeq = 0;
+  function readerFrame() {
+    const fr = document.createElement("iframe");
+    fr.name = `rtkt-reader-${++readerSeq}`;
+    // senza allow-top-navigation e allow-popups: la pagina del ticket non può cambiare la pagina del portale
+    fr.setAttribute("sandbox", "allow-same-origin allow-scripts allow-forms");
+    fr.setAttribute("aria-hidden", "true");
+    fr.tabIndex = -1;
+    fr.style.cssText = "position:fixed;left:-12000px;top:0;width:1280px;height:900px;border:0;opacity:0;pointer-events:none";
+    document.documentElement.appendChild(fr);
+    return fr;
+  }
+  const frameWin = (fr) => { try { const w = fr.contentWindow; return w && w.document ? w : null; } catch { return null; } };
+  async function waitFrame(fr, signal) {
+    let lastLen = -1, since = 0, cross = false;
+    const ok = await waitUntil(() => {
+      let w;
+      try { w = fr.contentWindow; if (!w) return false; void w.document; } catch { cross = true; return true; }
+      const doc = w.document;
+      if (!doc || doc.readyState !== "complete" || w.location.href === "about:blank") return false;
+      const X = w.Ext;
+      if (X) {
+        if (!X.isReady) return false;
+        // tutte le richieste in corso (isLoading() senza argomenti guarda solo l'ultima), tranne quelle continue
+        try { if (X.Ajax && X.Ajax.requests && Object.values(X.Ajax.requests).some((r) => r && typeof r.isLoading === "function" && r.isLoading() && !/signalr|poll|heartbeat|keepalive/i.test(String((r.options && r.options.url) || "")))) return false; } catch { /* */ }
+        try { if (X.ComponentQuery.query("loadmask").some((lm) => lm.isVisible && lm.isVisible())) return false; } catch { /* */ }
+        // una finestra di avviso aperta ha la sua maschera: allora la pagina è pronta (il suo testo si legge)
+        let modal = false;
+        try { modal = X.ComponentQuery.query("window").some((x) => x.modal && x.isVisible && x.isVisible()); } catch { /* */ }
+        try { if (!modal && [...doc.querySelectorAll(".x-mask")].some((el) => el.offsetWidth > 0 && w.getComputedStyle(el).display !== "none" && w.getComputedStyle(el).visibility !== "hidden")) return false; } catch { /* */ }
+      }
+      const len = ((doc.body && doc.body.innerText) || "").length;
+      if (len !== lastLen) { lastLen = len; since = performance.now(); return false; }
+      return len > 0 && performance.now() - since > 900;
+    }, 25000, signal);
+    if (cross) throw new Error("La pagina del ticket è su un altro sito: aprila con «Apri in Touch».");
+    if (!ok) throw new Error("La pagina del ticket non ha finito di caricarsi.");
+  }
+  // testo leggibile (anche da HTML), con gli a capo
+  function plainText(v) {
+    let s = String(v ?? "");
+    if (/<[a-z][\s\S]*>/i.test(s) || /&(#\d+|#x[0-9a-f]+|[a-z]+);/i.test(s)) {
+      const d = new DOMParser().parseFromString(`<body>${s.replace(/<br\s*\/?>/gi, "\n").replace(/<\/(p|div|li|tr|h\d)>/gi, "\n")}`, "text/html");
+      s = d.body.textContent || "";
+    }
+    return s.replace(/\r\n?/g, "\n").replace(/[ \t\u00a0]+/g, " ").replace(/ *\n */g, "\n").replace(/\n{3,}/g, "\n\n").trim();
+  }
+  // contenuto leggibile di una pagina ExtJS (o di un suo pannello, root): campi con etichetta, testi lunghi, elenchi
+  function extractTicket(w, root) {
+    const doc = w.document, X = w.Ext;
+    const out = { title: plainText(doc.title), fields: [], texts: [], tables: [] };
+    const q = (sel) => (root && typeof root.query === "function" ? root.query(sel) : X.ComponentQuery.query(sel));
+    const seen = new Set();
+    const fmt = (v) => (isDate(v) ? `${fmtDate(isoOf(v))} ${pad(v.getHours())}:${pad(v.getMinutes())}` : v);
+    if (X && X.ComponentQuery) {
+      for (const c of q("[isFormField]")) {
+        try {
+          if (c.ownerCt && c.ownerCt.isXType && (c.ownerCt.isXType("checkboxgroup") || c.ownerCt.isXType("radiogroup"))) continue;
+          if ((c.isXType && c.isXType("hiddenfield")) || c.inputType === "password" || (c.isHidden && c.isHidden())) continue;
+          const label = plainText((typeof c.getFieldLabel === "function" ? c.getFieldLabel() : c.fieldLabel) || c.boxLabel || c.name || "").replace(/:$/, "");
+          let v = typeof c.getDisplayValue === "function" ? c.getDisplayValue() : null;
+          if (v === null || v === undefined || v === "") v = c.rendered && typeof c.getRawValue === "function" ? c.getRawValue() : c.getValue();
+          v = plainText(fmt(v));
+          if (!v || emptyJson(v)) continue;
+          const key = label + "\u0001" + v;
+          if (seen.has(key)) continue;
+          seen.add(key);
+          const long = v.length > 160 || v.includes("\n") || (c.isXType && (c.isXType("textareafield") || c.isXType("htmleditor")));
+          (long ? out.texts : out.fields).push({ label, value: v.slice(0, 20000) });
+        } catch { /* */ }
+      }
+      for (const g of q("tablepanel")) {
+        try {
+          const st = g.getStore();
+          const cols = (typeof g.getVisibleColumns === "function" ? g.getVisibleColumns() : typeof g.getColumns === "function" ? g.getColumns() : g.columns || []).filter((c) => c.dataIndex && !c.hidden);
+          if (!st || !cols.length || typeof st.getRange !== "function") continue;
+          const rows = st.getRange().slice(0, 300).map((r, i) => cols.map((c, j) => {
+            let v = r.get(c.dataIndex);
+            if (typeof c.renderer === "function") { try { v = c.renderer.call(c.usingDefaultRenderer ? c : c.scope || g, v, {}, r, i, j, st, g.getView && g.getView()); } catch { /* valore grezzo */ } }
+            return plainText(fmt(v));
+          }));
+          if (rows.length) out.tables.push({ title: plainText(g.title || (g.tab && g.tab.text) || ""), head: cols.map((c) => plainText(c.text || c.dataIndex)), rows });
+        } catch { /* */ }
+      }
+      for (const c of q("component")) {
+        try {
+          // testo libero dei pannelli (Ext cancella c.html dopo averlo disegnato: allora si legge il DOM)
+          const ic = c.initialConfig || {};
+          if (!(ic.html || ic.tpl || ic.contentEl || typeof c.html === "string") || (c.items && c.items.getCount && c.items.getCount())) continue;
+          if (c.isXType && ["htmleditor", "tablepanel", "menu", "toolbar", "tabbar", "boundlist", "field"].some((x) => c.isXType(x))) continue;
+          const el = c.rendered ? (c.body || (typeof c.getTargetEl === "function" ? c.getTargetEl() : null) || c.el) : null;
+          const raw = el && el.dom ? el.dom.innerText : typeof c.html === "string" ? c.html : "";
+          const v = plainText(raw);
+          if (v.length > 30 && !seen.has(v)) { seen.add(v); out.texts.push({ label: plainText(c.title || ""), value: v.slice(0, 20000) }); }
+        } catch { /* */ }
+      }
+    }
+    if (!out.fields.length && !out.texts.length && !out.tables.length) {
+      const el = root && root.el && root.el.dom ? root.el.dom : doc.body;
+      const v = plainText((el && el.innerText) || "");
+      if (v) out.texts.push({ label: "", value: v.slice(0, 40000) });
+    }
+    return out;
+  }
+  // Anteprima del portale accanto all'elenco (<P>PreviewModule): se la pagina del ticket non si può leggere
+  async function previewRead(m, t, signal) {
+    const pv = Ext.getCmp(m.P + "PreviewModule");
+    const rec = recordFor(m, t);
+    if (!pv || !rec || !pv.el) return null;
+    const was = !!pv.collapsed;
+    try {
+      showModuleTab(m);
+      if (was && typeof pv.expand === "function") pv.expand(false);
+      try { m.grid.getSelectionModel().select([rec]); } catch { /* */ }
+      await sleep(300);
+      let last = -1, since = 0;
+      const ok = await waitUntil(() => {
+        const el = pv.body && pv.body.dom;
+        if (!el) return false;
+        if ([...pv.el.dom.querySelectorAll(".x-mask")].some((x) => x.offsetWidth > 0 && getComputedStyle(x).display !== "none")) return false;
+        const len = (el.innerText || "").length;
+        if (len !== last) { last = len; since = performance.now(); return false; }
+        return len > 20 && performance.now() - since > 800;
+      }, 15000, signal);
+      if (!ok) return null;
+      const c = extractTicket(window, pv);
+      return c.fields.length || c.texts.length || c.tables.length ? c : null;
+    } finally { if (was) { try { pv.collapse(); } catch { /* */ } } }
+  }
+  // diagnosi per i dati tecnici (senza contenuti)
+  conn.reader = null;
+  async function loadTouchTicket(t, signal) {
+    try { return await loadTouchPage(t, signal); } catch (e) {
+      if (e && e.name === "AbortError") throw e;
+      const m = currentModule();
+      const pv = m ? await previewRead(m, t, signal).catch(() => null) : null;
+      if (pv) { conn.reader = Object.assign({}, conn.reader, { via: "anteprima", pageError: String(e && e.message) }); return Object.assign(pv, { url: (e && e.url) || touchUrl(t), note: "Dall'anteprima del portale" }); }
+      throw e;
+    }
+  }
+  async function loadTouchPage(t, signal) {
+    const m = currentModule();
+    const fr = readerFrame();
+    try {
+      let url = touchUrl(t), how = url ? "indirizzo noto" : "";
+      if (!url) {
+        if (!m) throw new Error("Non trovo l'elenco «All tickets» del portale.");
+        const got = await portalOpen(m, t, "intercept", fr);
+        url = got.url; how = got.how + (got.posted ? " (modulo)" : "");
+        if (!url && !got.posted) throw new Error(got.how ? "Il portale non ha aperto il ticket: usa «Apri in Touch»." : "Ticket non presente nell'elenco del portale: cercalo o aprilo con «Apri in Touch».");
+      }
+      if (url) { if (new URL(url).origin !== location.origin) throw Object.assign(new Error("La pagina del ticket è su un altro sito: aprila con «Apri in Touch»."), { url }); fr.src = url; }
+      await waitFrame(fr, signal);
+      const w = frameWin(fr);
+      // schede interne non ancora disegnate (deferredRender): si aprono una per volta, poi si torna alla prima
+      try {
+        for (const tp of w.Ext.ComponentQuery.query("tabpanel")) {
+          const cur = tp.getActiveTab();
+          const todo = tp.items.getRange().filter((c) => !c.rendered);
+          for (const c of todo.slice(0, 8)) { try { tp.setActiveTab(c); } catch { /* */ } }
+          if (todo.length) { await sleep(300); await waitFrame(fr, signal); try { tp.setActiveTab(cur); } catch { /* */ } }
+        }
+      } catch { /* */ }
+      const content = extractTicket(w);
+      conn.reader = { at: new Date().toISOString(), how, url: url ? url.replace(/[?#].*$/, "") + (url.includes("?") ? "?…" : "") : null, tpl: touchTemplate() ? touchTemplate().field : null, ext: !!w.Ext, fields: content.fields.length, texts: content.texts.length, tables: content.tables.map((x) => x.rows.length), classes: (() => { try { return [...new Set(w.Ext.ComponentQuery.query("component").map((c) => c.xtype))].slice(0, 60); } catch { return null; } })() };
+      return Object.assign(content, { url: url || touchUrl(t) });
+    } finally {
+      try { const w = frameWin(fr); if (w && w.Ext && w.Ext.Ajax && typeof w.Ext.Ajax.abortAll === "function") w.Ext.Ajax.abortAll(); } catch { /* */ }
+      setTimeout(() => fr.remove(), 0);
+    }
   }
 
   // ===================================================================== interfaccia
@@ -1035,7 +1402,7 @@ input:disabled,select:disabled{opacity:.55;background:var(--sf2);cursor:not-allo
 .btn:hover{background:var(--sf2);text-decoration:none}.btn.pri{background:var(--ac);border-color:var(--ac);color:var(--act);font-weight:600}.btn.pri:hover{background:var(--ac2)}
 .btn.gh{background:transparent;border-color:transparent;color:var(--ac)}.btn.gh:hover{background:var(--acs)}.btn.s{min-height:28px;padding:3px 9px;font-size:13px}.btn.dg{color:var(--er)}.btn:disabled{opacity:.55;cursor:default}
 .ib{display:inline-flex;align-items:center;justify-content:center;width:28px;height:28px;border-radius:6px;border:0;background:transparent;color:var(--mu);cursor:pointer;font-size:15px;line-height:1}.ib:hover{background:var(--sf2);color:var(--tx)}.ib.on{color:var(--st)}
-.badge{display:inline-block;font-size:11.5px;font-weight:600;padding:1px 8px;border-radius:999px;background:var(--acs);color:var(--ac);white-space:nowrap}.badge.cl{background:var(--okb);color:var(--ok)}.badge.pr{background:var(--sf2);color:var(--mu)}
+.badge{display:inline-block;font-size:11.5px;font-weight:600;padding:1px 8px;border-radius:999px;background:var(--acs);color:var(--ac);white-space:nowrap}.badge.cl{background:var(--okb);color:var(--ok)}.badge.pr{background:var(--sf2);color:var(--mu)}.badge.src{background:var(--wnb,#fff4d6);color:var(--wn,#7a5200)}
 .card{background:var(--sf);border:1px solid var(--bd);border-radius:10px;box-shadow:var(--sh);padding:16px}.card+.card{margin-top:14px}
 .top{display:flex;align-items:center;gap:16px;padding:8px 18px;background:var(--sf);border-bottom:1px solid var(--bd);flex:none}
 #close{margin-left:auto}.brand{display:flex;align-items:center;gap:9px;font-weight:700;font-size:16px;white-space:nowrap}
@@ -1054,10 +1421,20 @@ fieldset{border:1px solid var(--bd);border-radius:8px;padding:10px 12px 12px;mar
 .tg{display:flex;flex-wrap:wrap;gap:5px}.tg button{border:1px solid var(--bd2);background:var(--sf);border-radius:999px;padding:3px 10px;cursor:pointer;font-size:12.5px}.tg button[aria-pressed=true]{background:var(--ac);border-color:var(--ac);color:var(--act);font-weight:600}
 .qp{display:flex;align-items:center;gap:10px;background:var(--sf2);border-radius:8px;padding:6px 10px;flex-wrap:wrap}.qp code{flex:1;min-width:200px;background:transparent;padding:0;overflow-wrap:anywhere;white-space:pre-wrap;max-height:4.5em;overflow:auto;font-family:inherit;font-size:13px}
 .note{font-size:12.5px;color:var(--wt);background:var(--wb);border:1px solid var(--wbd);border-radius:6px;padding:4px 9px}
-.kept{display:flex;flex-direction:column;gap:5px}.kept .chip{align-self:flex-start}
+.tree{border:1px solid var(--bd2);border-radius:6px;padding:6px;background:var(--sf);display:flex;flex-direction:column;gap:4px}.tree input{width:100%}
+.tl{list-style:none;margin:0;padding:0;max-height:260px;overflow:auto}.tl li{display:flex;align-items:center;gap:2px}.tl .tgl{width:22px;min-width:22px;height:22px;border:0;background:transparent;cursor:pointer;color:var(--mu);border-radius:4px;padding:0}
+.tl .nm{border:0;background:transparent;text-align:left;padding:3px 6px;border-radius:4px;cursor:pointer;color:var(--tx);font:inherit;overflow-wrap:anywhere}.tl button.nm:hover{background:var(--acs)}.tl .nm.on{background:var(--acs);color:var(--ac);font-weight:600}.tl .nm.off{color:var(--mu)}
+.srcs{display:flex;flex-wrap:wrap;align-items:center;gap:6px 12px;margin-top:8px}.srcs .srcn{font-weight:600}.pill{font-size:12px;border-radius:999px;padding:1px 8px;background:var(--sf2);color:var(--mu)}.pill.on{background:var(--okb);color:var(--ok)}.pill.wait{background:var(--wnb,#fff4d6);color:var(--wn,#7a5200)}
+.lk,.lst{display:flex;flex-direction:column;gap:4px}.lst .tg{max-height:200px;overflow:auto}.yb span.ar{background:var(--wn,#b07a00);opacity:.75}
+dialog.rd{width:min(980px,calc(100vw - 24px));max-width:none;height:min(90vh,1000px);padding:0;display:none;flex-direction:column}dialog.rd[open]{display:flex}
+.rdh{display:flex;gap:10px;align-items:flex-start;justify-content:space-between;flex-wrap:wrap;padding:12px 16px;border-bottom:1px solid var(--bd)}.rdt{min-width:0;flex:1 1 300px}.rdt h3{margin:2px 0 0;font-size:16px;overflow-wrap:anywhere}
+.rdb{overflow:auto;padding:12px 16px 20px;display:flex;flex-direction:column;gap:14px}.rdb h4{margin:0 0 4px;font-size:13px;color:var(--mu);text-transform:uppercase;letter-spacing:.03em}
+.rdf{display:grid;grid-template-columns:minmax(120px,max-content) minmax(0,1fr);gap:3px 14px;margin:0}.rdf dt{color:var(--mu);font-size:13px}.rdf dd{margin:0;overflow-wrap:anywhere}
+.pre{white-space:pre-wrap;overflow-wrap:anywhere;background:var(--sf2);border:1px solid var(--bd);border-radius:6px;padding:8px 10px;line-height:1.5}
+.rdtab{width:100%;border-collapse:collapse;font-size:13px}.rdtab th,.rdtab td{border-bottom:1px solid var(--bd);padding:5px 6px;text-align:left;vertical-align:top;white-space:pre-wrap;overflow-wrap:anywhere}.rdtab th{color:var(--mu);font-weight:600}.rdtw{overflow:auto}
 .ppl{display:flex;flex-direction:column;gap:8px}.pr{display:grid;grid-template-columns:230px minmax(0,1fr) auto;gap:8px;align-items:start}.pr .lb{font-size:13px;padding-top:6px}.pr .cv{display:flex;flex-direction:column;gap:4px;min-width:0}.pr .act{display:flex;gap:4px;flex-wrap:wrap}
 .sug{list-style:none;margin:0;padding:4px;border:1px solid var(--bd2);border-radius:6px;background:var(--sf);max-height:220px;overflow:auto}.sug li button{width:100%;text-align:left;border:0;background:transparent;padding:5px 8px;border-radius:4px;cursor:pointer}.sug li button:hover{background:var(--acs)}
-.yc{margin-bottom:10px;padding:12px 14px}.yc h3{margin:0 0 8px}.yr{display:grid;grid-template-columns:52px minmax(0,1fr) 80px auto;gap:8px;align-items:center;font-size:13px;padding:2px 0}.yr .yb{height:8px;background:var(--sf2);border-radius:4px;overflow:hidden}.yr .yb span{display:block;height:100%;background:var(--ac)}.yr .yn{text-align:right;font-variant-numeric:tabular-nums}.yr.on b{color:var(--ac)}.yr.on .yb span{background:var(--st)}
+.yc{margin-bottom:10px;padding:12px 14px}.yc h3{margin:0 0 8px}.yr{display:grid;grid-template-columns:52px minmax(0,1fr) 110px auto;gap:8px;align-items:center;font-size:13px;padding:2px 0}.yr .yb{height:8px;background:var(--sf2);border-radius:4px;overflow:hidden;display:flex}.yr .yb span{display:block;height:100%;background:var(--ac)}.yr .yn{text-align:right;font-variant-numeric:tabular-nums}.yr.on b{color:var(--ac)}.yr.on .yb span{background:var(--st)}
 .chip{display:inline-flex;align-items:center;gap:3px;background:var(--acs);color:var(--ac);border-radius:999px;padding:1px 4px 1px 9px;font-size:12.5px;font-weight:600}.chip button{border:0;background:transparent;color:inherit;cursor:pointer;padding:0 3px;font-size:14px;line-height:1;border-radius:50%}
 .chips{display:flex;flex-wrap:wrap;gap:6px}.chips:empty{display:none}
 .tips{margin:0;padding-left:18px;display:flex;flex-direction:column;gap:6px;color:var(--mu)}.tips b{color:var(--tx)}
@@ -1112,6 +1489,8 @@ dialog{border:1px solid var(--bd2);border-radius:12px;padding:20px;width:min(480
      <label class="fld">Stato<select id="st"><option value="all">Tutti gli stati</option><option value="open">Aperti</option><option value="closed">Chiusi e risolti</option><option value="custom">Scegli…</option><option value="page">Come nella pagina</option></select></label>
      <label class="fld">Massimo ticket<select id="capq" title="Righe chieste al portale in una ricerca (le più recenti)"><option>50</option><option>100</option><option>200</option><option>500</option></select></label>
     </div>
+    <div class="srcs" id="srcs"><span class="mu sm">Dove cercare:</span><span class="srcn">Portale Touch</span><label class="ck"><input type="checkbox" id="src-ar"> anche nell'Area Riservata <span class="mu sm">(vecchia Ricerca rapida, altri ticket)</span></label><span id="ar-state" class="pill"></span><button type="button" class="btn gh s" id="ar-connect">Collega l'Area Riservata</button></div>
+    <div id="ar-help" class="note" hidden></div>
     <details class="adv" id="adv"><summary>Opzioni avanzate <span class="mu sm" id="adv-n"></span></summary>
      <div class="ag">
       <fieldset><legend>Testo</legend>
@@ -1126,9 +1505,9 @@ dialog{border:1px solid var(--bd2);border-radius:12px;padding:20px;width:min(480
       <fieldset class="full" id="st-box" hidden><legend>Stati</legend><div class="tg" id="st-list"></div><div class="row"><button type="button" class="btn gh s" data-sel="st:all">Tutti</button><button type="button" class="btn gh s" data-sel="st:open">Solo aperti</button><button type="button" class="btn gh s" data-sel="st:closed">Solo chiusi</button><button type="button" class="btn gh s" data-sel="st:none">Nessuno</button></div></fieldset>
       <fieldset class="full"><legend>Priorità <span class="mu sm">(nessuna scelta = tutte)</span></legend><div class="tg" id="pr-list"></div></fieldset>
       <fieldset class="full" id="ppl-box"><legend>Gruppi e persone <span class="mu sm">(filtri del portale, su tutti i ticket)</span></legend><div class="ppl" id="ppl"></div>
-       <p class="mu sm" style="margin:0">Scrivi un nome per cercarlo nel portale, oppure usa <b>Scegli nel portale</b>: si apre il menu del portale per quel campo e, dopo la scelta, Ricerca TKT si riapre da solo.</p></fieldset>
-      <fieldset class="full"><legend>Altri filtri impostati nella pagina del portale</legend><div class="kept" id="kept"></div>
-       <p class="mu sm" style="margin:0">Servizio, Sede, Contatto, Assegnato a, Gruppo… si impostano nei filtri del portale (chiudi con Esc): Ricerca TKT li mantiene in tutte le ricerche.</p></fieldset>
+       <p class="mu sm" style="margin:0">Apri l'elenco con <b>Scegli…</b> (o scrivi un nome) e scegli: il filtro vale nel portale su tutti i ticket. <b>Menu del portale</b> resta disponibile se un campo non si lascia impostare da qui.</p></fieldset>
+      <fieldset class="full" id="pf-box"><legend>Altri filtri del portale</legend><div class="ppl" id="pf"></div>
+       <p class="mu sm" style="margin:0">Servizio, Sede, Contatto, Etichette e gli altri filtri dell'elenco All tickets: si scelgono qui e restano nelle ricerche salvate.</p></fieldset>
      </div>
     </details>
     <div class="qp"><span class="mu sm">Filtri inviati al portale</span><code id="qprev"></code>
@@ -1139,8 +1518,9 @@ dialog{border:1px solid var(--bd2);border-radius:12px;padding:20px;width:min(480
     <li>Il testo va nel campo <b>Search</b> dell'elenco del portale, insieme a periodo, stato e gli altri filtri: la ricerca la fa il portale, sui suoi dati aggiornati. Chiudendo il pannello l'elenco del portale mostra la stessa ricerca; <b>Ripristina il portale</b> rimette i filtri di prima.</li>
     <li>Per i ticket storici lascia <b>Tutti gli stati</b> (la pagina del portale di solito mostra solo quelli aperti).</li>
     <li>La ricerca è su <b>tutti i ticket</b> (elenco All tickets), ma il portale li ordina per data: arrivano i <b class="capn">200</b> più recenti. Se il portale ne ha di più, <b>Quanti per anno?</b> mostra la distribuzione su tutti gli anni e con un clic cerchi in un anno solo.</li>
-    <li>Gruppi e persone (Assegnato a, Gruppo, Modificato da, Responsabile) sono filtri del portale, quindi valgono su tutti i ticket; nei risultati ci sono anche le faccette.</li>
-    <li><b>Apri</b> apre il ticket nel portale; <kbd>/</kbd> per cercare, <kbd>Esc</kbd> per tornare al portale, un altro clic sul segnalibro per riaprire.</li></ul></div>
+    <li>In <b>Opzioni avanzate</b> ci sono tutti i filtri del portale: gruppi e persone (Assegnato a, Gruppo proprietario, Modificato da, Responsabile, con <b>Io</b> e <b>Il mio gruppo</b>), Servizio, Sede, Contatto, Etichette… Valgono su tutti i ticket e restano nelle ricerche salvate.</li>
+    <li>Con <b>Collega l'Area Riservata</b> si cerca anche nella vecchia Ricerca rapida (altri ticket): si apre in una nuova scheda, lì si preme il segnalibro e si conferma.</li>
+    <li><b>Leggi</b> mostra il ticket completo nel pannello (richiesta, soluzione, messaggi); <b>Apri in Touch</b> apre la sua pagina nel portale. <kbd>/</kbd> per cercare, <kbd>Esc</kbd> per tornare al portale, un altro clic sul segnalibro per riaprire.</li></ul></div>
    <div id="results" class="res-grid" hidden>
     <aside class="card facets" id="facets"></aside>
     <div>
@@ -1172,6 +1552,8 @@ dialog{border:1px solid var(--bd2);border-radius:12px;padding:20px;width:min(480
     <p class="mu sm">I dati tecnici servono a correggere il collegamento se qualcosa non va: descrivono l'elenco del portale (colonne, filtri, richieste inviate) senza cookie né token; nomi e testi sono sostituiti da «N car.». Controllali comunque prima di condividerli.</p></div>
    <div class="card"><h2>Risultati</h2><div class="row"><label class="fld" style="max-width:320px">Massimo ticket per ricerca (anche nella scheda Cerca)<select id="s-cap"><option>50</option><option>100</option><option>200</option><option>500</option></select></label></div>
     <p class="mu sm">È il numero di righe chieste al portale in una sola richiesta (la pagina ne mostra 50 alla volta). Valori più bassi sono più leggeri per il portale; dai risultati si possono caricare i successivi.</p></div>
+   <div class="card"><h2>Area Riservata</h2><div class="row"><label class="fld" style="flex:1 1 420px">Indirizzo della Ricerca rapida dell'Area Riservata<input id="s-arurl" type="url" spellcheck="false"></label></div>
+    <p class="mu sm">Con «Collega l'Area Riservata» (scheda Cerca) questa pagina si apre in una nuova scheda: lì si preme il segnalibro e si conferma. Da quel momento le ricerche cercano anche lì (solo testo, oggetto e periodo: gli altri filtri esistono solo nel portale Touch). La sua scheda va lasciata aperta.</p></div>
    <div class="card"><h2>Dati personali</h2><p class="mu sm">Preferiti, note, ricerche salvate e cronologia sono salvati solo in questo browser.</p>
     <div class="row"><button type="button" class="btn" id="pexp">Esporta</button><label class="btn">Importa<input type="file" id="pimp" accept="application/json,.json" hidden></label><button type="button" class="btn gh dg" id="pdel">Cancella tutto</button></div></div>
    <div class="row end" style="margin-top:14px"><button type="button" class="btn pri" id="ssave">Salva impostazioni</button></div>
@@ -1179,6 +1561,7 @@ dialog{border:1px solid var(--bd2);border-radius:12px;padding:20px;width:min(480
   </section>
  </div></div>
  <dialog id="dnote"><form method="dialog"><h3 id="ntitle">Nota</h3><label class="fld">Nota personale<textarea id="ntext" rows="5"></textarea></label><label class="fld">Etichette (separate da virgola)<input id="ntags" placeholder="es. da verificare, normativa"></label><div class="row end"><button type="button" value="cancel" class="btn gh">Annulla</button><button type="button" value="remove" class="btn gh dg" id="nrem">Rimuovi dai preferiti</button><button value="ok" class="btn pri">Salva</button></div></form></dialog>
+ <dialog id="dread" class="rd" aria-labelledby="rtitle"><div class="rdh"><div class="rdt"><span class="mu sm" id="rsrc"></span><h3 id="rtitle"></h3></div><div class="row"><a id="rlink" class="btn s pri" target="_blank" rel="noopener" hidden>Apri in Touch ↗</a><button type="button" class="btn s" id="ropen" hidden>Apri in Touch ↗</button><button type="button" class="btn s gh" id="rcopy">Copia testo</button><button type="button" class="btn s gh" id="rclose">Chiudi</button></div></div><div id="rbody" class="rdb"></div></dialog>
  <dialog id="dsave"><form method="dialog"><h3>Salva ricerca</h3><label class="fld">Nome<input id="sname" maxlength="200"></label><div class="row end"><button type="button" value="cancel" class="btn gh">Annulla</button><button value="ok" class="btn pri">Salva</button></div></form></dialog>
  <div class="toast" id="toast" role="status" hidden></div>
 </div>`;
@@ -1199,7 +1582,7 @@ dialog{border:1px solid var(--bd2);border-radius:12px;padding:20px;width:min(480
   const prevInert = !!(document.body && document.body.inert);
 
   // ===================================================================== stato
-  const emptyFacets = () => ({ status: new Set(), priority: new Set(), service: new Set(), group: new Set(), assigned: new Set(), owner: new Set(), modifiers: new Set(), site: new Set(), year: null, month: null, tags: new Set() });
+  const emptyFacets = () => ({ source: new Set(), status: new Set(), priority: new Set(), service: new Set(), group: new Set(), assigned: new Set(), owner: new Set(), modifiers: new Set(), site: new Set(), year: null, month: null, tags: new Set() });
   const S = {
     results: [], keys: new Set(), facet: emptyFacets(), refine: "", sort: "rank", group: "none", page: 1, size: 50,
     selected: new Set(), searching: false, abort: null, last: null, words: [], alerts: [], visible: [], pageItems: [],
@@ -1271,55 +1654,252 @@ dialog{border:1px solid var(--bd2);border-radius:12px;padding:20px;width:min(480
   }
   // durante una ricerca, un conteggio o un caricamento i filtri della pagina non si toccano
   const busy = () => { if (!S.searching) return false; toast("Attendi la fine della ricerca o premi Interrompi"); return true; };
-  // ---- gruppi e persone
-  function renderPeople(m) {
-    const box = clear($("#ppl"));
-    const present = m ? PEOPLE.filter(([k]) => m.field(k)) : [];
-    $("#ppl-box").hidden = !present.length;
-    for (const [suffix, label] of present) {
-      const f = m.field(suffix);
-      const cur = personValue(f);
-      const sug = h("ul", { class: "sug", hidden: true });
-      const inp = canLookup(f) ? h("input", { type: "search", placeholder: cur ? "Cambia: scrivi un nome…" : "Scrivi almeno 2 lettere del nome…", "aria-label": `Cerca ${label}`, "data-ppl": suffix }) : null;
-      if (inp) {
-        let seq = 0;
-        inp.addEventListener("keydown", (e) => {
-          if (e.key !== "Enter") return;
-          e.preventDefault();
-          const b = sug.querySelector("button");
-          if (b) b.click();
-        });
-        inp.addEventListener("input", debounce(async () => {
-          const q = inp.value.trim();
-          const my = ++seq;
-          clear(sug); sug.hidden = q.length < 2;
-          if (q.length < 2) return;
-          sug.appendChild(h("li", { class: "mu sm", text: "Cerco nel portale…" }));
-          let list = [];
-          try { list = await queryField(f, q); } catch { list = []; }
-          if (my !== seq) return;
-          clear(sug);
-          if (!list.length) sug.appendChild(h("li", { class: "mu sm", text: "Nessun risultato" }));
-          for (const it of list.slice(0, 30)) sug.appendChild(h("li", null, h("button", { type: "button", onclick: () => {
-            if (busy()) return;
-            ensureSnapshot(m);
-            const ok = it.r ? pickRecord(f, it.r) : setPerson(f, { v: it.v, t: it.t });
-            if (!ok) toast("Il portale non ha accettato il valore: usa «Scegli nel portale»");
-            renderPeople(currentModule()); previewNow(); advCount();
-          } }, it.t)));
-        }, 350));
-      }
-      box.appendChild(h("div", { class: "pr" },
-        h("span", { class: "lb" }, label),
-        h("div", { class: "cv" }, cur ? h("span", { class: "chip" }, cur.t, h("button", { type: "button", "aria-label": `Togli ${label}`, title: "Togli il filtro", onclick: () => { if (busy()) return; ensureSnapshot(m); clearField(f); renderPeople(currentModule()); previewNow(); advCount(); } }, "×")) : h("span", { class: "mu sm", style: "padding-top:6px" }, "qualsiasi"), inp, sug),
-        h("div", { class: "act" }, h("button", { type: "button", class: "btn s", onclick: () => { if (!busy()) pickInPortal(m, f, label); } }, "Scegli nel portale…"))));
+  // ---- filtri del portale nel pannello: gruppi e persone, poi tutti gli altri (Servizio, Sede, Contatto...)
+  const openTrees = new Set(); // alberi aperti nel pannello: restano aperti quando il pannello si ridisegna
+  const openNodes = new Map(); // per campo: rami aperti dell'albero
+  function changePf(m, fn) {
+    if (busy()) return false;
+    ensureSnapshot(m);
+    try { return !!fn(); } catch { return false; }
+  }
+  function afterPf() { renderFilters(currentModule()); previewNow(); advCount(); }
+  function renderFilters(m) {
+    const fields = m ? pfFields(m) : [];
+    const people = fields.filter((x) => PEOPLE_KEYS.has(x.suffix)), others = fields.filter((x) => !PEOPLE_KEYS.has(x.suffix));
+    const fill = (box, list) => { clear(box); for (const x of list) box.appendChild(filterRow(m, x)); };
+    fill($("#ppl"), people); $("#ppl-box").hidden = !people.length;
+    fill($("#pf"), others); $("#pf-box").hidden = !others.length;
+  }
+  const renderPeople = renderFilters;
+  // utente collegato e suo gruppo predefinito (Portal.Const del portale): scelte rapide «Io» e «Il mio gruppo»
+  function me() {
+    try {
+      const C = window.Portal && window.Portal.Const;
+      if (!C) return null;
+      const u = C.TypedLoggedUser || C.LoggedUser || {};
+      const H = C.HDAUser || {};
+      const id = u.ID || u.Id || u.UserID || H.UserID || "";
+      return { id: String(id || ""), name: textOf(String(u.Name || u.Description || u.FullName || "")), group: String(H.DefaultUserGroupID || ""), groupName: textOf(String(H.DefaultUserGroupDescription || H.DefaultUserGroupName || "")) };
+    } catch { return null; }
+  }
+  const ME_FIELDS = new Set(["AssignedUserOrGroupFilter", "ModifiedBy", "OwnerUserID"]);
+  const MYGROUP_FIELDS = new Set(["AssignedUserOrGroupFilter", "OwnerUserGroupID"]);
+  function filterRow(m, x) {
+    const { suffix, f, kind, label } = x;
+    const cur = pfValue(f, kind);
+    const multiList = kind === "list" && isMulti(f);
+    const cv = h("div", { class: "cv" });
+    const act = h("div", { class: "act" });
+    if (cur && !multiList && kind !== "text" && kind !== "date") {
+      cv.appendChild(h("span", { class: "chips" }, h("span", { class: "chip" }, cur.t, h("button", { type: "button", "aria-label": `Togli ${label}`, title: "Togli il filtro", onclick: () => { if (changePf(m, () => { clearField(f); return true; })) afterPf(); } }, "×"))));
+    } else if (!cur && (kind === "tree" || kind === "remote" || kind === "treemenu")) cv.appendChild(h("span", { class: "mu sm", style: "padding-top:6px" }, "qualsiasi"));
+    if (kind === "remote") cv.appendChild(lookupEditor(m, f, label, suffix, !!cur));
+    else if (kind === "list") cv.appendChild(listEditor(m, f, label, suffix));
+    else if (kind === "date") {
+      const inp = h("input", { type: "date", value: cur ? cur.v : "", "aria-label": label, "data-pfd": suffix });
+      inp.addEventListener("change", () => { if (changePf(m, () => setPf(f, inp.value ? { v: inp.value } : null, kind))) afterPf(); else { toast("Il portale non ha accettato la data"); afterPf(); } });
+      cv.appendChild(inp);
+    } else if (kind === "text") {
+      const inp = h("input", { type: "text", value: cur ? cur.v : "", "aria-label": label, "data-pft": suffix, placeholder: "qualsiasi" });
+      inp.addEventListener("change", () => { if (changePf(m, () => setPf(f, inp.value.trim() ? { v: inp.value.trim() } : null, kind))) afterPf(); });
+      cv.appendChild(inp);
+    } else if (kind === "tree") {
+      act.appendChild(h("button", { type: "button", class: "btn s", "aria-expanded": String(openTrees.has(suffix)), "data-pftree": suffix, onclick: () => {
+        if (openTrees.has(suffix)) openTrees.delete(suffix); else openTrees.add(suffix);
+        renderFilters(currentModule());
+      } }, openTrees.has(suffix) ? "Chiudi l'elenco" : "Scegli…"));
+      if (openTrees.has(suffix)) cv.appendChild(treeBrowser(m, f, label, suffix));
     }
+    const who = me();
+    const quick = (v, t, text) => act.appendChild(h("button", { type: "button", class: "btn gh s", title: t, "data-quick": text, onclick: () => {
+      if (changePf(m, () => setPerson(f, { v, t }))) afterPf(); else if (!S.searching) toast("Il portale non ha accettato il valore");
+    } }, text));
+    if (who && who.id && ME_FIELDS.has(suffix) && (!cur || cur.v !== who.id)) quick(who.id, who.name || "Io", "Io");
+    if (who && who.group && MYGROUP_FIELDS.has(suffix) && (!cur || cur.v !== who.group)) quick(who.group, who.groupName || "Il mio gruppo", "Il mio gruppo");
+    if (kind === "tree" || kind === "treemenu" || kind === "remote") {
+      act.appendChild(h("button", { type: "button", class: kind === "treemenu" ? "btn s" : "btn gh s", title: "Scegli con il menu del portale: il pannello si nasconde e si riapre dopo la scelta", onclick: () => { if (!busy()) pickInPortal(m, f, label); } }, kind === "treemenu" ? "Scegli nel portale…" : "Menu del portale"));
+    }
+    return h("div", { class: "pr", "data-pf": suffix }, h("span", { class: "lb" }, label), cv, act);
+  }
+  // ricerca del nome nel portale mentre si scrive (campi con ricerca sul server: persone, sedi, contatti...)
+  function lookupEditor(m, f, label, suffix, has) {
+    const wrap = h("div", { class: "lk" });
+    const sug = h("ul", { class: "sug", hidden: true });
+    const inp = h("input", { type: "search", placeholder: has ? "Cambia: scrivi un nome…" : "Scrivi almeno 2 lettere…", "aria-label": `Cerca ${label}`, "data-pfq": suffix, "data-ppl": suffix });
+    let seq = 0;
+    inp.addEventListener("keydown", (e) => {
+      if (e.key !== "Enter") return;
+      e.preventDefault();
+      const b = sug.querySelector("button");
+      if (b) b.click();
+    });
+    inp.addEventListener("input", debounce(async () => {
+      const q = inp.value.trim();
+      const my = ++seq;
+      clear(sug); sug.hidden = q.length < 2;
+      if (q.length < 2) return;
+      sug.appendChild(h("li", { class: "mu sm", text: "Cerco nel portale…" }));
+      let list = [];
+      try { list = await queryField(f, q); } catch { list = []; }
+      if (my !== seq) return;
+      clear(sug);
+      if (!list.length) sug.appendChild(h("li", { class: "mu sm", text: "Nessun risultato" }));
+      for (const it of list.slice(0, 30)) sug.appendChild(h("li", null, h("button", { type: "button", onclick: () => {
+        const ok = changePf(m, () => (it.r ? pickRecord(f, it.r) : setPerson(f, { v: it.v, t: it.t })));
+        if (!ok && !S.searching) toast("Il portale non ha accettato il valore: usa «Menu del portale»");
+        afterPf();
+      } }, it.t)));
+    }, 350));
+    wrap.append(inp, sug);
+    return wrap;
+  }
+  // scelte già presenti nella pagina (elenco del campo): pulsanti da premere, con ricerca se sono tante
+  function listEditor(m, f, label, suffix) {
+    const opts = comboOptions(f);
+    const multi = isMulti(f);
+    const cur = new Set(multi ? asList(f.getValue()) : [(personValue(f) || {}).v].filter(Boolean));
+    const wrap = h("div", { class: "lst" });
+    const box = h("div", { class: "tg", "data-pfl": suffix });
+    const q = opts.length > 12 ? h("input", { type: "search", placeholder: `Cerca tra ${opts.length} voci…`, "aria-label": `Cerca in ${label}` }) : null;
+    const draw = () => {
+      clear(box);
+      const n = q ? norm(q.value.trim()) : "";
+      const shown = opts.filter(([v, t]) => cur.has(v) || !n || norm(t).includes(n));
+      for (const [v, t] of shown.slice(0, 60)) box.appendChild(h("button", { type: "button", "aria-pressed": String(cur.has(v)), "data-v": v, onclick: () => {
+        const next = new Set(cur);
+        if (next.has(v)) next.delete(v); else { if (!multi) next.clear(); next.add(v); }
+        const ok = changePf(m, () => (multi ? setMulti(f, [...next]) : next.size ? setPerson(f, { v, t }) : (clearField(f), true)));
+        if (!ok && !S.searching) toast("Il portale non ha accettato il valore");
+        afterPf();
+      } }, t));
+      if (shown.length > 60) box.appendChild(h("span", { class: "mu sm", text: `… altre ${shown.length - 60}: restringi la ricerca` }));
+      if (!shown.length) box.appendChild(h("span", { class: "mu sm", text: "Nessuna voce" }));
+    };
+    if (q) { q.addEventListener("input", debounce(draw, 150)); wrap.appendChild(q); }
+    wrap.appendChild(box);
+    draw();
+    return wrap;
+  }
+  // ---- elenco ad albero del campo (tree-field): rami caricati dal portale quando si aprono
+  const nodeText = (f, n) => { try { return textOf(String(n.get("text") ?? n.get(f.displayField || "text") ?? n.getId())); } catch { return ""; } };
+  const nodeValue = (f, n) => { try { const v = f.valueField && f.valueField !== "id" ? n.get(f.valueField) : null; return String(v ?? n.getId()); } catch { return ""; } };
+  const selectable = (n) => { try { return n.get("selectable") !== false && !n.get("disabled") && !n.isRoot(); } catch { return true; } };
+  // carica i figli di un ramo senza aprirlo (store.load({node}) + flushLoad: due load nello stesso momento si perderebbero)
+  function expandNode(n, st) {
+    return new Promise((res) => {
+      try { if (!n || n.isLeaf() || (n.isLoaded() && (n.childNodes.length || !n.isRoot()))) return res(); } catch { return res(); }
+      let done = false;
+      const fin = () => { if (!done) { done = true; res(); } };
+      setTimeout(fin, 10000);
+      try {
+        const ts = st || (typeof n.getTreeStore === "function" ? n.getTreeStore() : null);
+        const root = ts && typeof ts.getRootNode === "function" ? ts.getRootNode() : null;
+        // mentre si carica la radice Ext ignora le richieste dei rami (TreeStore.load): si aspetta
+        if (root && root !== n && root.isLoading && root.isLoading()) {
+          const t = setInterval(() => { if (!root.isLoading()) { clearInterval(t); done = true; expandNode(n, ts).then(res); } }, 100);
+          return;
+        }
+        if (ts && typeof ts.load === "function" && !n.isLoading()) {
+          ts.load({ node: n, callback: fin });
+          if (typeof ts.flushLoad === "function") ts.flushLoad();
+        } else if (n.isLoading && n.isLoading()) { const t = setInterval(() => { if (!n.isLoading()) { clearInterval(t); fin(); } }, 100); } else n.expand(false, fin);
+      } catch { try { n.expand(false, fin); } catch { fin(); } }
+    });
+  }
+  function treeBrowser(m, f, label, suffix) {
+    const st = treeStoreOf(f);
+    const open = openNodes.get(suffix) || new Set();
+    openNodes.set(suffix, open);
+    const wrap = h("div", { class: "tree", "data-tree": suffix });
+    const q = h("input", { type: "search", placeholder: "Cerca un nome…", "aria-label": `Cerca in ${label}` });
+    const note = h("div", { class: "mu sm" });
+    const list = h("ul", { class: "tl" });
+    wrap.append(q, note, list);
+    let alive = true, deep = null;
+    const curV = (pfValue(f, "tree") || {}).v;
+    const pick = (n) => {
+      const ok = changePf(m, () => setPerson(f, { v: nodeValue(f, n), t: nodeText(f, n) }));
+      if (!ok) { if (!S.searching) toast("Il portale non ha accettato il valore: usa «Menu del portale»"); return; }
+      alive = false; openTrees.delete(suffix); afterPf();
+    };
+    const row = (n, depth, path) => {
+      const leaf = (() => { try { return n.isLeaf(); } catch { return true; } })();
+      const id = String(n.getId());
+      const isOpen = open.has(id);
+      const li = h("li", { style: `padding-left:${depth * 16}px` });
+      li.appendChild(leaf ? h("span", { class: "tgl" }) : h("button", { type: "button", class: "tgl", "aria-expanded": String(isOpen), "aria-label": `${isOpen ? "Chiudi" : "Apri"} ${nodeText(f, n)}`, onclick: async () => {
+        if (isOpen) open.delete(id); else { open.add(id); note.textContent = "Carico dal portale…"; await expandNode(n, st); note.textContent = ""; }
+        draw();
+      } }, isOpen ? "▾" : "▸"));
+      const name = (path ? path + " › " : "") + nodeText(f, n);
+      li.appendChild(selectable(n)
+        ? h("button", { type: "button", class: "nm" + (nodeValue(f, n) === curV ? " on" : ""), "data-node": nodeValue(f, n), onclick: () => pick(n) }, name)
+        : h("span", { class: "nm off" }, name));
+      return li;
+    };
+    const kids = (n) => { try { return n.childNodes || []; } catch { return []; } };
+    const draw = () => {
+      if (!alive) return;
+      clear(list);
+      const root = st.getRootNode();
+      const text = norm(q.value.trim());
+      if (text.length >= 2) {
+        const out = [];
+        const walk = (n, path) => { for (const c of kids(n)) { const t = nodeText(f, c); if (norm(t).includes(text)) out.push([c, path]); walk(c, path ? path + " › " + t : t); } };
+        walk(root, "");
+        for (const [c, path] of out.slice(0, 80)) list.appendChild(row(c, 0, path));
+        if (!out.length) list.appendChild(h("li", { class: "mu sm", text: deep ? "Cerco in tutto l'elenco…" : "Nessun risultato" }));
+        return;
+      }
+      const walk = (n, depth) => { for (const c of kids(n)) { list.appendChild(row(c, depth, "")); if (open.has(String(c.getId()))) walk(c, depth + 1); } };
+      walk(root, 0);
+      if (!kids(root).length) list.appendChild(h("li", { class: "mu sm", text: "Elenco vuoto" }));
+    };
+    // per cercare un nome servono tutti i rami: si caricano (al massimo 80 richieste al portale)
+    const loadAll = async () => {
+      if (deep) return deep;
+      deep = (async () => {
+        const queue = [st.getRootNode()];
+        let loads = 0;
+        while (queue.length && alive && loads < 80) {
+          const n = queue.shift();
+          let need = false;
+          try { need = !n.isLeaf() && !n.isLoaded(); } catch { need = false; }
+          if (need) { loads++; note.textContent = `Carico l'elenco dal portale… (${loads})`; await expandNode(n, st); }
+          for (const c of kids(n)) queue.push(c);
+        }
+        note.textContent = queue.length ? "Elenco caricato in parte: restringi la ricerca o apri i rami" : "";
+        deep = null;
+        draw();
+      })();
+      return deep;
+    };
+    q.addEventListener("input", debounce(() => { draw(); if (norm(q.value.trim()).length >= 2) loadAll(); }, 250));
+    if (!st) { note.textContent = "Elenco non leggibile: usa «Menu del portale»"; return wrap; }
+    note.textContent = "Carico dal portale…";
+    expandNode(st.getRootNode(), st).then(() => { note.textContent = ""; draw(); });
+    return wrap;
   }
   async function queryField(f, q) {
     const st = f.getStore();
     const vf = f.valueField || "value", df = f.displayField || "text";
     const map = (r) => ({ r, v: String(r.get(vf) ?? ""), t: textOf(String(r.get(df) ?? r.get(vf) ?? "")) });
     if (f.queryMode === "local") { const n = norm(q); return st.getRange().map(map).filter((x) => x.v && norm(x.t).includes(n)); }
+    // richiesta a parte con il proxy del campo: non apre il menu e non ricarica l'elenco del campo (che con
+    // forceSelection cancellerebbe il valore già scelto)
+    try {
+      const px = st.getProxy();
+      if (px && typeof px.createOperation === "function") {
+        const recs = await new Promise((res, rej) => {
+          const to = setTimeout(() => rej(new Error("timeout")), 10000);
+          const op = px.createOperation("read", { params: Object.assign({}, st.lastOptions && st.lastOptions.params, { [f.queryParam || "query"]: q }), page: 1, start: 0, limit: 50,
+            callback: (records, o, ok) => { clearTimeout(to); if (ok === false) rej(new Error("errore")); else res(records || []); } });
+          op.execute();
+        });
+        activity(true);
+        return recs.map(map).filter((x) => x.v);
+      }
+    } catch { /* sotto: con il campo stesso */ }
     let loaded = false;
     const on = () => { loaded = true; };
     st.on("load", on);
@@ -1403,20 +1983,27 @@ dialog{border:1px solid var(--bd2);border-radius:12px;padding:20px;width:min(480
     try { if (typeof f.expand === "function") f.expand(); else if (typeof f.onTriggerClick === "function") f.onTriggerClick(); } catch { /* */ }
   }
   // ---- distribuzione per anno (una richiesta al portale per anno, fino a coprire il totale)
+  // riga per anno: t = ticket nel portale Touch, a = nell'Area Riservata (ac: almeno uno dei conteggi al massimo
+  // di righe, quindi «almeno»)
   function renderYears() {
     const box = clear($("#years"));
     const y = S.years;
     box.hidden = !y;
     if (!y) return;
-    const max = Math.max(1, ...y.rows.map(([, n]) => n));
-    box.appendChild(h("div", { class: "row between" }, h("h3", null, "Ticket per anno nel portale"),
-      h("span", { class: "mu sm" }, y.running ? `conteggio in corso… ${fmtN(y.sum)} su ${fmtN(y.total)}` : `${fmtN(y.sum)} su ${fmtN(y.total)} contati${y.stopped ? " (interrotto)" : ""}`)));
-    for (const [yy, n] of y.rows) {
-      const bar = h("span");
-      bar.style.width = `${(n / max) * 100}%`;
-      box.appendChild(h("div", { class: "yr" + (y.active === yy ? " on" : "") }, h("b", null, String(yy)), h("div", { class: "yb" }, bar), h("span", { class: "yn" }, fmtN(n)),
-        n ? h("button", { type: "button", class: "btn gh s", disabled: y.running, onclick: () => searchYear(yy) }, `Cerca nel ${yy}`) : h("span")));
+    const withAr = y.rows.some((r) => r.a !== null && r.a !== undefined);
+    const max = Math.max(1, ...y.rows.map((r) => (r.t || 0) + (r.a || 0)));
+    const head = y.running ? `conteggio in corso… ${y.phase || ""}` : `${fmtN(y.sum)} su ${fmtN(y.total)} contati nel portale Touch${y.stopped ? " (interrotto)" : ""}`;
+    box.appendChild(h("div", { class: "row between" }, h("h3", null, withAr ? "Ticket per anno: portale Touch e Area Riservata" : "Ticket per anno nel portale"), h("span", { class: "mu sm" }, head)));
+    if (withAr && AR.info && AR.info.updDate) box.appendChild(h("p", { class: "mu sm", style: "margin:0", text: "Nell'Area Riservata l'anno è quello dell'ultimo aggiornamento del ticket." }));
+    for (const r of [...y.rows].sort((a, b) => b.y - a.y)) {
+      const bar = h("span"), bar2 = h("span", { class: "ar" });
+      bar.style.width = `${((r.t || 0) / max) * 100}%`;
+      bar2.style.width = `${((r.a || 0) / max) * 100}%`;
+      const n = withAr ? `${r.t === null || r.t === undefined ? "—" : fmtN(r.t)} + ${r.a === null || r.a === undefined ? "…" : fmtN(r.a) + (r.ac ? "+" : "")}` : fmtN(r.t || 0);
+      box.appendChild(h("div", { class: "yr" + (y.active === r.y ? " on" : "") }, h("b", null, String(r.y)), h("div", { class: "yb" }, bar, bar2), h("span", { class: "yn", title: withAr ? "portale Touch + Area Riservata («+»: almeno)" : "" }, n),
+        (r.t || r.a) ? h("button", { type: "button", class: "btn gh s", disabled: y.running, onclick: () => searchYear(r.y) }, `Cerca nel ${r.y}`) : h("span")));
     }
+    if (withAr) box.appendChild(h("p", { class: "mu sm", style: "margin:0", text: "«+» = l'Area Riservata ne ha almeno tanti: con «Cerca nel …» si cercano mese per mese, per averli tutti." }));
   }
   // ricerca dell'anno scelto: la stessa ricerca che il riepilogo ha contato (anche dopo altri clic sugli anni)
   function searchYear(y) {
@@ -1425,8 +2012,10 @@ dialog{border:1px solid var(--bd2);border-radius:12px;padding:20px;width:min(480
     const from = `${y}-01-01`, to = `${y}-12-31`;
     applySpec(Object.assign({}, base, { dfrom: base.dfrom && base.dfrom > from ? base.dfrom : from, dto: base.dto && base.dto < to ? base.dto : to }));
     onFormChange();
+    const row = S.years && S.years.rows.find((r) => r.y === y);
     if (S.years) { S.years.active = y; S.keepYears = S.years; }
-    runSearch(base.people);
+    // nell'Area Riservata un anno «al massimo» si cerca mese per mese
+    runSearch({ people: base.people, pf: base.pf, arMonths: !!(row && row.yc) });
   }
   async function yearCounts() {
     const m = currentModule();
@@ -1435,6 +2024,7 @@ dialog{border:1px solid var(--bd2);border-radius:12px;padding:20px;width:min(480
     const nowY = new Date().getFullYear();
     const toY = s.dto ? Math.min(nowY, +s.dto.slice(0, 4)) : nowY;
     const fromY = s.dfrom ? +s.dfrom.slice(0, 4) : 1990;
+    const withAr = !!(S.info.ar && arOn());
     const ctrl = new AbortController();
     S.abort = ctrl; S.searching = true; $("#prog").hidden = false; $("#progt").textContent = "Conto i ticket anno per anno…"; $("#go").disabled = true;
     try {
@@ -1444,24 +2034,55 @@ dialog{border:1px solid var(--bd2);border-radius:12px;padding:20px;width:min(480
       if (!(e && e.name === "AbortError")) pushAlert("err", e && e.message ? e.message : "Errore nel conteggio per anno");
       render(); return;
     }
-    S.years = { base: s, rows: [], sum: 0, total: S.info.total, running: true, stopped: false };
+    S.years = { base: s, rows: [], sum: 0, total: S.info.total, running: true, stopped: false, phase: "portale Touch" };
+    const rowOf = (y) => { let r = S.years.rows.find((x) => x.y === y); if (!r) { r = { y, t: null, a: null, ac: false }; S.years.rows.push(r); } return r; };
     render(); renderYears();
-    // anni dei ticket già caricati: la serie di anni vuoti conta solo sotto il più vecchio
-    const ys = S.results.map((t) => +String(t.date || "").slice(0, 4)).filter((v) => v > 0);
-    const floorY = Math.min(nowY - 2, ys.length ? Math.min(...ys) : toY);
-    let zeros = 0;
+    const yearSpec = (y) => Object.assign({}, s, { dfrom: s.dfrom && s.dfrom > `${y}-01-01` ? s.dfrom : `${y}-01-01`, dto: s.dto && s.dto < `${y}-12-31` ? s.dto : `${y}-12-31`, people: undefined, pf: undefined });
     try {
+      // portale Touch: una richiesta per anno, fino a coprire il totale
+      // anni dei ticket già caricati: la serie di anni vuoti conta solo sotto il più vecchio
+      const ys = S.results.filter((t) => t.src !== "ar").map((t) => +String(t.date || "").slice(0, 4)).filter((v) => v > 0);
+      const floorY = Math.min(nowY - 2, ys.length ? Math.min(...ys) : toY);
+      let zeros = 0;
       for (let y = toY; y >= fromY; y--) {
-        const sp = Object.assign({}, s, { dfrom: s.dfrom && s.dfrom > `${y}-01-01` ? s.dfrom : `${y}-01-01`, dto: s.dto && s.dto < `${y}-12-31` ? s.dto : `${y}-12-31`, people: undefined });
+        const sp = yearSpec(y);
         const run = { applied: [], failed: [], trigger: "", loads: 0 };
         await reload(m, () => { setPageSize(m.store, 1); applyValues(m, sp, run); }, run, ctrl.signal);
         let n = 0;
         try { n = m.store.getTotalCount() || 0; } catch { /* */ }
-        S.years.rows.push([y, n]); S.years.sum += n;
+        rowOf(y).t = n; S.years.sum += n;
         renderYears();
         if (S.years.sum >= S.years.total) break;
         zeros = n ? 0 : zeros + 1;
         if (zeros >= 3 && y < floorY) break;
+      }
+      // Area Riservata: una richiesta per anno; un anno al massimo di righe si conta mese per mese
+      if (withAr) {
+        S.years.phase = "Area Riservata";
+        const ya = S.results.filter((t) => t.src === "ar").map((t) => +String(t.date || "").slice(0, 4)).filter((v) => v > 0);
+        const floorA = Math.min(nowY - 2, ya.length ? Math.min(...ya) : toY);
+        let za = 0;
+        for (let y = toY; y >= Math.max(fromY, 2000); y--) {
+          $("#progt").textContent = `Area Riservata: conto il ${y}…`;
+          const c = await arCount(yearSpec(y), ctrl.signal);
+          const r = rowOf(y);
+          r.a = c.n; r.ac = c.capped; r.yc = c.capped;
+          renderYears();
+          if (c.capped) {
+            let sum = 0, capped = false;
+            for (let mo = 1; mo <= 12; mo++) {
+              if (y === nowY && mo > new Date().getMonth() + 1) break;
+              $("#progt").textContent = `Area Riservata: ${MESI_L[mo - 1]} ${y}…`;
+              const from = `${y}-${pad(mo)}-01`, to = `${y}-${pad(mo)}-${pad(lastDay(y, mo))}`;
+              const cm = await arCount(Object.assign({}, yearSpec(y), { dfrom: s.dfrom && s.dfrom > from ? s.dfrom : from, dto: s.dto && s.dto < to ? s.dto : to }), ctrl.signal);
+              sum += cm.n; capped = capped || cm.capped;
+            }
+            r.a = Math.max(r.a, sum); r.ac = capped;
+            renderYears();
+          }
+          za = r.a ? 0 : za + 1;
+          if (za >= 3 && y < floorA) break;
+        }
       }
     } catch (e) {
       S.years.stopped = true;
@@ -1471,26 +2092,14 @@ dialog{border:1px solid var(--bd2);border-radius:12px;padding:20px;width:min(480
       // l'elenco del portale torna sulla ricerca principale (serve per «Apri» e «Carica i successivi»)
       try {
         const run = { applied: [], failed: [], trigger: "", loads: 0 };
-        await reload(m, () => { setPageSize(m.store, S.info.pageSize); applyValues(m, Object.assign({}, s, { people: undefined }), run); }, run);
+        await reload(m, () => { setPageSize(m.store, S.info.pageSize); applyValues(m, Object.assign({}, s, { people: undefined, pf: undefined }), run); }, run);
         S.info.state = listState(m);
       } catch { /* */ }
       S.abort = null; S.searching = false; $("#prog").hidden = true; $("#go").disabled = false;
       renderYears(); render();
     }
   }
-  function renderKept(m) {
-    const box = clear($("#kept"));
-    const items = m ? keptFilters(m) : [];
-    if (!items.length) { box.appendChild(h("span", { class: "mu sm", text: "Nessuno." })); return; }
-    for (const k of items) {
-      box.appendChild(h("span", { class: "chip" }, `${k.label}: ${k.value}`, h("button", { type: "button", title: "Togli il filtro dalla pagina", "aria-label": `Togli ${k.label}`, onclick: () => {
-        if (busy()) return;
-        ensureSnapshot(m);
-        try { if (typeof k.f.clearValue === "function") k.f.clearValue(); else k.f.setValue(null); } catch { /* */ }
-        renderKept(currentModule()); preview();
-      } }, "×")));
-    }
-  }
+  function renderKept() { /* i filtri della pagina sono ora nel pannello (renderFilters) */ }
   function preset(v) {
     const t = new Date();
     const back = (days, months) => {
@@ -1515,13 +2124,19 @@ dialog{border:1px solid var(--bd2);border-radius:12px;padding:20px;width:min(480
       text: $("#q").value.trim(), subject: $("#subject").value.trim(), exclude: $("#exclude").value.trim(), allWords: $("#allw").checked,
       dfrom: $("#dfrom").value || "", dto: $("#dto").value || "", ufrom: $("#ufrom").value || "", uto: $("#uto").value || "",
       st: $("#st").value || "all", stCodes: [...S.stCodes], pr: [...S.prCodes], classif: $("#classif").value.trim(), classcli: $("#classcli").value.trim(),
-      people: peopleSpec(currentModule()),
+      people: peopleSpec(currentModule()), pf: pfSpec(currentModule()),
     };
   }
   function peopleSpec(m) {
     const out = {};
     if (!m) return out;
     for (const [suffix] of PEOPLE) { const f = m.field(suffix); const v = f ? personValue(f) : null; if (v) out[suffix] = v; }
+    return out;
+  }
+  function pfSpec(m) {
+    const out = {};
+    if (!m) return out;
+    for (const k of keptFilters(m)) out[k.suffix] = k.val;
     return out;
   }
   function applySpec(s) {
@@ -1547,13 +2162,23 @@ dialog{border:1px solid var(--bd2);border-radius:12px;padding:20px;width:min(480
         } catch { if (want && want.v) bad.push(short); }
       }
     }
+    if (m && s.pf && typeof s.pf === "object") {
+      for (const x of pfFields(m)) {
+        if (PEOPLE_KEYS.has(x.suffix) || x.kind === "treemenu") continue;
+        const want = s.pf[x.suffix], cur = pfValue(x.f, x.kind);
+        if (!want && !cur) continue;
+        if (want && cur && JSON.stringify(cur.v) === JSON.stringify(want.v)) continue;
+        ensureSnapshot(m);
+        try { if (!setPf(x.f, want, x.kind) && want) bad.push(x.label); } catch { if (want) bad.push(x.label); }
+      }
+    }
     renderToggles(); advCount(); preview();
     if (bad.length) toast(`Il portale non ha accettato: ${bad.join(", ")}. Usa «Scegli nel portale».`);
     return bad;
   }
   function advCount() {
     const s = spec();
-    const n = [s.subject, s.exclude, s.allWords, s.ufrom || s.uto, s.classif, s.classcli, s.pr.length, s.st === "custom"].filter(Boolean).length + Object.keys(s.people || {}).length;
+    const n = [s.subject, s.exclude, s.allWords, s.ufrom || s.uto, s.classif, s.classcli, s.pr.length, s.st === "custom"].filter(Boolean).length + Object.keys(s.people || {}).length + Object.keys(s.pf || {}).length;
     $("#adv-n").textContent = n ? `(${n} attiv${n === 1 ? "a" : "e"})` : "";
   }
   const onFormChange = () => { preview(); advCount(); };
@@ -1573,7 +2198,10 @@ dialog{border:1px solid var(--bd2);border-radius:12px;padding:20px;width:min(480
     if (s.classif) p.push(`Classificazione ~ "${s.classif}"`);
     if (s.classcli) p.push(`Classif. cliente ~ "${s.classcli}"`);
     for (const [suffix, label] of PEOPLE) { const v = s.people && s.people[suffix]; if (v) p.push(`${label.replace(/ \(.*$/, "")} = ${v.t || v.v}`); }
-    if (m) { const k = keptFilters(m); if (k.length) p.push(`dalla pagina: ${k.map((x) => `${x.label} = ${x.value}`).join(", ")}`); }
+    if (s.pf && typeof s.pf === "object") {
+      const labels = m ? new Map(pfFields(m).map((x) => [x.suffix, x.label])) : new Map();
+      for (const [suffix, v] of Object.entries(s.pf)) if (v && v.v !== undefined) p.push(`${labels.get(suffix) || suffix} = ${v.t || (Array.isArray(v.v) ? v.v.join(", ") : v.v)}`);
+    }
     if (s.exclude) p.push(`poi senza: ${s.exclude}`);
     return p.join(" · ");
   }
@@ -1584,6 +2212,11 @@ dialog{border:1px solid var(--bd2);border-radius:12px;padding:20px;width:min(480
     const box = clear($("#qwarn"));
     if (!m) box.appendChild(h("div", { class: "note", text: S.opening ? "Apro la scheda «All tickets» del portale…" : "Non trovo l'elenco «All tickets» del portale: aprilo una volta dalla barra delle schede e riapri il segnalibro." }));
     $("#qrestore").hidden = !(m && S.snaps[m.key]);
+    if (arOn() && settings.arOn !== false) {
+      const bl = arBlockers(s);
+      if (bl.length) box.appendChild(h("div", { class: "note", text: `Area Riservata: non usata con questi filtri (${bl.join(", ")}): lì non esistono. Toglili per cercare anche nell'Area Riservata.` }));
+      else if (!(s.text || s.subject || s.dfrom || s.dto)) box.appendChild(h("div", { class: "note", text: "Area Riservata: scrivi un testo o scegli un periodo per cercare anche lì." }));
+    }
     if (s.st === "custom" && !s.stCodes.length) box.appendChild(h("div", { class: "note", text: "Nessuno stato scelto: verrà tolto il filtro sullo stato." }));
   }
   const preview = debounce(previewNow, 120);
@@ -1594,6 +2227,170 @@ dialog{border:1px solid var(--bd2);border-radius:12px;padding:20px;width:min(480
     for (const it of store.get("history", [])) { const t = it.spec && it.spec.text; if (t && !seen.has(t)) { seen.add(t); dl.appendChild(h("option", { value: t })); } if (seen.size >= 15) break; }
   }
   const wordsOf = (s) => [...new Set(`${s.text || ""} ${s.subject || ""}`.replace(/["()]/g, " ").split(/\s+/).map((w) => w.trim()).filter((w) => w.length >= 2 && !/^(and|or|not|e|o)$/i.test(w)))];
+
+  // ===================================================================== Area Riservata (vecchia Ricerca rapida)
+  // È un altro sito con altri ticket (numeri come #1234567). Ricerca TKT la apre in una scheda; dopo un clic
+  // sul segnalibro in quella scheda e una conferma, le due schede si parlano con postMessage: le ricerche
+  // le fa la pagina dell'Area Riservata, con la sessione dell'utente, e i risultati arrivano qui.
+  const AR = { win: null, origin: "", state: "off", info: null, seq: 0, pending: new Map(), timer: 0, nonce: "" };
+  const arUrl = () => absUrl(settings.arUrl || AR_DEFAULT) || AR_DEFAULT;
+  const arOriginOf = () => { try { return new URL(arUrl()).origin; } catch { return ""; } };
+  const randomId = () => { try { const a = new Uint32Array(4); crypto.getRandomValues(a); return [...a].map((x) => x.toString(36)).join(""); } catch { return String(Math.random()).slice(2) + Date.now().toString(36); } };
+  const arOn = () => AR.state === "on" && !!AR.win && !AR.win.closed;
+  function renderArState() {
+    if (AR.state === "on" && (!AR.win || AR.win.closed)) arDrop("La scheda dell'Area Riservata è stata chiusa");
+    const st = $("#ar-state"), help = $("#ar-help"), btn = $("#ar-connect");
+    st.className = "pill" + (AR.state === "on" ? " on" : AR.state === "waiting" ? " wait" : "");
+    st.textContent = AR.state === "on" ? "collegata" : AR.state === "waiting" ? "in attesa del segnalibro…" : "non collegata";
+    btn.textContent = AR.state === "on" ? "Scollega" : AR.state === "waiting" ? "Riapri la scheda" : "Collega l'Area Riservata";
+    $("#src-ar").checked = settings.arOn !== false && AR.state === "on";
+    $("#src-ar").disabled = AR.state !== "on";
+    help.hidden = AR.state !== "waiting";
+    if (AR.state === "waiting") {
+      clear(help);
+      help.append(h("b", null, "Collega l'Area Riservata: "), "nella scheda che si è aperta accedi se serve, poi premi lì il segnalibro ", h("b", null, "Ricerca TKT"), " e conferma il collegamento. Lascia aperta quella scheda e torna qui.");
+    }
+  }
+  function arDrop(why) {
+    const was = AR.state;
+    AR.state = "off"; AR.info = null;
+    clearInterval(AR.timer);
+    for (const p of AR.pending.values()) { clearTimeout(p.to); p.reject(new Error(why || "Area Riservata scollegata")); }
+    AR.pending.clear();
+    if (was === "on" && why) toast(why);
+  }
+  function arPost(msg) {
+    try { AR.win.postMessage(Object.assign({ ns: "rtkt", v: 1 }, msg), AR.origin); return true; } catch { return false; }
+  }
+  function arConnect() {
+    if (AR.state === "on") { arPost({ type: "bye" }); arDrop(); renderArState(); return; }
+    AR.origin = arOriginOf();
+    AR.nonce = randomId();
+    try { AR.win = window.open(arUrl(), "rtkt-ar"); } catch { AR.win = null; }
+    if (!AR.win) { toast("Il browser ha bloccato la nuova scheda: consenti le finestre popup per questo sito e riprova"); return; }
+    AR.state = "waiting";
+    renderArState();
+    clearInterval(AR.timer);
+    const t0 = Date.now();
+    AR.timer = setInterval(() => {
+      if (AR.state !== "waiting") { clearInterval(AR.timer); return; }
+      if (!AR.win || AR.win.closed || Date.now() - t0 > 20 * 60000) { arDrop(); renderArState(); return; }
+      arPost({ type: "hello", nonce: AR.nonce, from: `Ricerca TKT ${VERSION}` });
+    }, 1000);
+  }
+  window.addEventListener("message", (e) => {
+    if (!AR.win || e.source !== AR.win || e.origin !== AR.origin) return;
+    const d = e.data;
+    if (!d || typeof d !== "object" || d.ns !== "rtkt" || d.v !== 1) return;
+    if (d.type === "ready") {
+      if (d.nonce !== AR.nonce || AR.state === "on") return;
+      AR.state = "on";
+      AR.info = { version: str(d.version, 40), page: str(d.page, 200) };
+      clearInterval(AR.timer);
+      AR.timer = setInterval(() => { if (!AR.win || AR.win.closed) { arDrop("La scheda dell'Area Riservata è stata chiusa"); renderArState(); } }, 3000);
+      renderArState(); previewNow();
+      toast("Area Riservata collegata: le ricerche cercano anche lì");
+      arCall("info", {}, null, null, 15000).then((r) => { if (AR.info) { AR.info.updDate = !(r.fields && r.fields.open); AR.info.fields = r.fields && r.fields.how; } }).catch(() => {});
+      return;
+    }
+    if (d.type === "bye") { arDrop("Area Riservata scollegata"); renderArState(); previewNow(); return; }
+    const p = typeof d.id === "string" ? AR.pending.get(d.id) : null;
+    if (!p) return;
+    if (d.type === "progress") { if (p.progress) p.progress(str(d.text, 200)); return; }
+    AR.pending.delete(d.id);
+    clearTimeout(p.to);
+    if (d.ok === false) p.reject(new Error(str(d.error, 400) || "Errore dall'Area Riservata"));
+    else p.resolve(d);
+  });
+  function arCall(type, payload, signal, progress, ms) {
+    if (!arOn()) return Promise.reject(new Error("Area Riservata non collegata"));
+    const id = `${AR.nonce}-${++AR.seq}`;
+    return new Promise((resolve, reject) => {
+      const p = { resolve, reject, progress, to: setTimeout(() => { if (AR.pending.delete(id)) reject(new Error("L'Area Riservata non risponde: controlla la sua scheda (sessione scaduta?)")); }, ms || 120000) };
+      AR.pending.set(id, p);
+      if (signal) signal.addEventListener("abort", () => {
+        if (!AR.pending.delete(id)) return;
+        clearTimeout(p.to);
+        arPost({ type: "abort", id });
+        const e = new Error("Ricerca interrotta."); e.name = "AbortError"; reject(e);
+      }, { once: true });
+      if (!arPost(Object.assign({ type, id }, payload))) { AR.pending.delete(id); clearTimeout(p.to); reject(new Error("Area Riservata non raggiungibile")); }
+    });
+  }
+  // filtri che l'Area Riservata non conosce: con questi attivi si cerca solo nel portale Touch
+  function arBlockers(s) {
+    const out = [];
+    if (s.st && s.st !== "all") out.push("stato");
+    if (s.pr && s.pr.length) out.push("priorità");
+    if (Object.keys(s.people || {}).length) out.push("gruppi e persone");
+    if (Object.keys(s.pf || {}).length) out.push("altri filtri del portale");
+    if (s.ufrom || s.uto || s.classif || s.classcli) out.push("aggiornamento o classificazione");
+    return out;
+  }
+  const arWanted = (s) => arOn() && settings.arOn !== false && !arBlockers(s).length && !!(s.text || s.subject || s.dfrom || s.dto);
+  const arSpec = (s) => ({ text: s.text || "", subject: s.subject || "", allWords: !!s.allWords, dfrom: s.dfrom || "", dto: s.dto || "" });
+  function arSafeUrl(u) {
+    try { const x = new URL(String(u), arUrl()); return x.origin === AR.origin && /^https?:$/.test(x.protocol) ? x.href : null; } catch { return null; }
+  }
+  // risultato dell'Area Riservata → ticket del pannello (solo testo, lunghezze limitate)
+  function arTicket(x, i) {
+    if (!x || typeof x !== "object") return null;
+    const n = String(x.number ?? "").replace(/\D/g, "").slice(0, 12);
+    const date = isoDay(x.date);
+    const t = {
+      key: n ? `a:${n}` : `a:x${i}`, src: "ar", source: "Area Riservata", code: n ? `#${n}` : "", number: n, list: "AR", rank: i, recId: "",
+      date, time: "", subject: str(x.subject, 500), preview: str(x.snippet, 3000), service: str(x.product, 60), product: str(x.product, 60),
+      status: str(x.status, 60), url: x.url ? arSafeUrl(x.url) : null, arRef: str(x.ref, 300), cols: [],
+    };
+    return t;
+  }
+  async function arSearch(s, signal, progress) {
+    const r = await arCall("search", { spec: arSpec(s) }, signal, progress);
+    const list = Array.isArray(r.tickets) ? r.tickets.slice(0, 2000) : [];
+    return { tickets: list.map(arTicket).filter(Boolean), capped: !!r.capped, max: parseInt(r.max, 10) || null, count: parseInt(r.count, 10) || list.length, ms: parseInt(r.ms, 10) || 0 };
+  }
+  // tutti i ticket dell'Area Riservata del periodo: una ricerca per mese (ogni mese ha al massimo 210 righe)
+  async function arSearchMonths(s, signal, progress) {
+    const now = new Date();
+    const a = /^(\d{4})-(\d{2})/.exec(s.dfrom || "") || [null, String(now.getFullYear()), "01"];
+    const b = /^(\d{4})-(\d{2})/.exec(s.dto || "") || [null, String(now.getFullYear()), pad(now.getMonth() + 1)];
+    let y = +a[1], mo = +a[2];
+    const tickets = [], seen = new Set(), cappedMonths = [];
+    let max = null, n = 0;
+    while ((y < +b[1] || (y === +b[1] && mo <= +b[2])) && n < 36) {
+      n++;
+      if (progress) progress(`${MESI_L[mo - 1]} ${y}…`);
+      const from = `${y}-${pad(mo)}-01`, to = `${y}-${pad(mo)}-${pad(lastDay(y, mo))}`;
+      const r = await arSearch(Object.assign({}, s, { dfrom: s.dfrom && s.dfrom > from ? s.dfrom : from, dto: s.dto && s.dto < to ? s.dto : to }), signal, null);
+      max = r.max || max;
+      if (r.capped) cappedMonths.push(`${MESI[mo - 1]} ${y}`);
+      for (const t of r.tickets) if (!seen.has(t.key)) { seen.add(t.key); tickets.push(t); }
+      mo++; if (mo > 12) { mo = 1; y++; }
+    }
+    return { tickets, capped: cappedMonths.length > 0, cappedMonths, max, count: tickets.length, months: n, ms: 0 };
+  }
+  async function arCount(s, signal) {
+    const r = await arCall("search", { spec: arSpec(s), countOnly: true }, signal, null);
+    return { n: parseInt(r.count, 10) || 0, capped: !!r.capped };
+  }
+  async function arRead(t, signal) {
+    if (!arOn()) throw Object.assign(new Error("Per leggere un ticket dell'Area Riservata collegala (pulsante «Collega l'Area Riservata»)."), { url: t.url });
+    const r = await arCall("read", { ticket: { number: t.number, url: t.url, ref: t.arRef } }, signal, null, 60000);
+    const c = r.content && typeof r.content === "object" ? r.content : {};
+    const fl = (a, max) => (Array.isArray(a) ? a.slice(0, max) : []);
+    return {
+      title: str(c.title, 300),
+      fields: fl(c.fields, 80).map((x) => ({ label: str(x && x.label, 200), value: str(x && x.value, 4000) })).filter((x) => x.value),
+      texts: fl(c.texts, 40).map((x) => ({ label: str(x && x.label, 200), value: str(x && x.value, 40000) })).filter((x) => x.value),
+      tables: fl(c.tables, 10).map((tb) => ({ title: str(tb && tb.title, 200), head: fl(tb && tb.head, 20).map((x) => str(x, 200)), rows: fl(tb && tb.rows, 300).map((r2) => fl(r2, 20).map((x) => str(x, 8000))) })),
+      url: (r.url && arSafeUrl(r.url)) || t.url,
+    };
+  }
+  function arOpen(t) {
+    if (t.url) window.open(t.url, "_blank", "noopener");
+    else if (arOn()) arCall("open", { ticket: { number: t.number, ref: t.arRef } }, null, null, 15000).catch((e) => toast(e.message));
+    else toast("Collega l'Area Riservata per aprire questo ticket");
+  }
 
   // ===================================================================== ricerca
   function hay(t) {
@@ -1625,7 +2422,7 @@ dialog{border:1px solid var(--bd2);border-radius:12px;padding:20px;width:min(480
   }
   // people: gruppi e persone voluti (ricerca salvata, cronologia, anno): anche se la pagina non li ha presi,
   // così il filtro mancante viene segnalato e la cronologia li conserva
-  async function runSearch(people) {
+  async function runSearch(wanted) {
     if (S.searching) return;
     const ctrl = new AbortController();
     S.searching = true; S.abort = ctrl; $("#go").disabled = true; // occupato prima di qualsiasi attesa
@@ -1641,13 +2438,33 @@ dialog{border:1px solid var(--bd2);border-radius:12px;padding:20px;width:min(480
       }
     }
     const s = spec();
-    if (people && typeof people === "object") s.people = JSON.parse(JSON.stringify(people));
+    if (wanted && wanted.people && typeof wanted.people === "object") s.people = JSON.parse(JSON.stringify(wanted.people));
+    if (wanted && wanted.pf && typeof wanted.pf === "object") s.pf = JSON.parse(JSON.stringify(wanted.pf));
     S.last = s; S.words = wordsOf(s); S.module = m.key; S.years = S.keepYears || null; S.keepYears = null; renderYears();
     Object.assign(S, { results: [], keys: new Set(), page: 1, alerts: [], info: null, refine: "" });
     S.selected.clear(); S.facet = emptyFacets();
-    $("#refine").value = ""; $("#emptyst").hidden = true; $("#results").hidden = false; $("#prog").hidden = false; $("#progt").textContent = "Ricerca in corso nel portale…"; $("#go").disabled = true;
+    const withAr = arWanted(s);
+    $("#refine").value = ""; $("#emptyst").hidden = true; $("#results").hidden = false; $("#prog").hidden = false; $("#progt").textContent = withAr ? "Ricerca in corso nel portale Touch e nell'Area Riservata…" : "Ricerca in corso nel portale…"; $("#go").disabled = true;
     S.searching = true;
     renderAlerts(); render();
+    // Area Riservata in parallelo (se collegata): i suoi risultati si aggiungono a quelli del portale
+    const arProg = (txt) => { if (S.searching) $("#progt").textContent = `Area Riservata: ${txt}`; };
+    const arP = withAr ? (wanted && wanted.arMonths ? arSearchMonths(s, ctrl.signal, arProg) : arSearch(s, ctrl.signal, arProg)).then((v) => ({ ok: true, v }), (e) => ({ ok: false, e })) : null;
+    const addAr = async () => {
+      if (!arP) return 0;
+      if (S.searching) $("#progt").textContent = "Aspetto i risultati dell'Area Riservata…";
+      const a = await arP;
+      if (!a.ok) { if (!(a.e && a.e.name === "AbortError")) pushAlert("warn", `Area Riservata: ${(a.e && a.e.message) || "errore"}. I risultati sono solo quelli del portale Touch.`); return 0; }
+      const before = S.results.length;
+      const dropped = addResults(a.v.tickets, s);
+      S.info = Object.assign(S.info || { total: 0, loaded: 0, page: 1, pageSize: settings.cap, dropped: 0, ms: 0 }, {});
+      S.info.dropped += dropped;
+      S.info.ar = { loaded: a.v.tickets.length, added: S.results.length - before, capped: a.v.capped, max: a.v.max, ms: a.v.ms };
+      if (a.v.months) { if (a.v.capped) pushAlert("warn", `Area Riservata, cercata mese per mese: in ${a.v.cappedMonths.join(", ")} ci sono più di ${fmtN(a.v.max || 210)} ticket (il massimo per ricerca): restringi la ricerca per vederli tutti.`); }
+      else if (a.v.capped) pushAlert("warn", `L'Area Riservata restituisce al massimo ${fmtN(a.v.max || a.v.tickets.length)} ticket per ricerca: qui ci sono i primi ${fmtN(a.v.tickets.length)}, non tutti. Restringi il periodo o usa «Quanti per anno?» e cerca un anno alla volta.`);
+      mergeByDate();
+      return S.results.length - before;
+    };
     try {
       const r = await pageSearch(m, s, ctrl.signal);
       const dropped = addResults(r.tickets, s);
@@ -1659,17 +2476,28 @@ dialog{border:1px solid var(--bd2);border-radius:12px;padding:20px;width:min(480
       if (r.total > r.tickets.length) pushAlert("warn", `Il portale ha ${fmtN(r.total)} ticket per questa ricerca, su tutti gli anni: qui ci sono i ${fmtN(r.tickets.length)} più recenti. Con «Quanti per anno?» vedi come si distribuiscono e cerchi in un anno solo; oppure restringi la ricerca o carica i successivi.`);
       if (dropped) pushAlert("info", `${fmtN(dropped)} ticket scartati dai filtri sui risultati.`);
       if (!r.tickets.length && r.total) pushAlert("warn", "Il portale indica dei risultati ma l'elenco è vuoto: manda i dati tecnici da Impostazioni.");
+      await addAr();
       const hist = store.get("history", []);
-      hist.unshift({ spec: s, results: S.results.length, total: r.total, created: new Date().toISOString() });
+      hist.unshift({ spec: s, results: S.results.length, total: r.total + (S.info.ar ? S.info.ar.loaded : 0), created: new Date().toISOString() });
       store.set("history", hist.slice(0, 200));
       refreshHistList();
     } catch (e) {
       if (e && e.name === "AbortError") pushAlert("warn", "Ricerca interrotta: il portale potrebbe completare comunque il caricamento dell'elenco.");
-      else { pushAlert("err", e && e.message ? e.message : "Errore durante la ricerca"); conn.errors.push(String(e && e.stack ? e.stack.split("\n").slice(0, 3).join(" | ") : e)); }
+      else {
+        pushAlert("err", e && e.message ? e.message : "Errore durante la ricerca");
+        conn.errors.push(String(e && e.stack ? e.stack.split("\n").slice(0, 3).join(" | ") : e));
+        try { await addAr(); } catch { /* */ } // i risultati dell'Area Riservata si mostrano comunque
+      }
     } finally {
       S.abort = null; S.searching = false; $("#prog").hidden = true; $("#go").disabled = false;
       renderKept(currentModule()); preview(); render();
     }
+  }
+  // risultati di due fonti: in ordine di data (più recenti prima), a parità prima il portale Touch
+  function mergeByDate() {
+    if (!S.results.some((t) => t.src === "ar")) return;
+    S.results.sort((a, b) => (b.date || "").localeCompare(a.date || "") || (a.src === b.src ? a.rank - b.rank : a.src === "ar" ? 1 : -1));
+    S.results.forEach((t, i) => { t.rank = i; });
   }
   async function loadMore() {
     const m = currentModule();
@@ -1703,7 +2531,7 @@ dialog{border:1px solid var(--bd2);border-radius:12px;padding:20px;width:min(480
   }
 
   // ===================================================================== risultati
-  const FACETS = [["status", "Stato"], ["priority", "Priorità"], ["group", "Gruppo"], ["assigned", "Assegnato a"], ["owner", "Responsabile"], ["modifiers", "Modificato da"], ["service", "Servizio"], ["site", "Sede / cliente"]];
+  const FACETS = [["source", "Fonte"], ["status", "Stato"], ["priority", "Priorità"], ["group", "Gruppo"], ["assigned", "Assegnato a"], ["owner", "Responsabile"], ["modifiers", "Modificato da"], ["service", "Servizio"], ["site", "Sede / cliente"]];
   const MULTI_FACETS = new Set(["modifiers"]);
   const fvals = (t, k) => { const v = t[k] || ""; return MULTI_FACETS.has(k) ? v.split(/\s*[,;]\s*/).filter(Boolean) : [v || "—"]; };
   function filterItems(skip) {
@@ -1764,12 +2592,14 @@ dialog{border:1px solid var(--bd2);border-radius:12px;padding:20px;width:min(480
     if (S.searching) { el.appendChild(h("span", { class: "mu", text: $("#progt").textContent })); return; }
     const total = S.results.length;
     const parts = [h("b", null, fmtN(total)), total === 1 ? " ticket" : " ticket"];
-    if (S.info && S.info.total > total) parts.push(h("span", { class: "mu" }, `, i più recenti su ${fmtN(S.info.total)} nel portale`));
+    const ar = S.info && S.info.ar;
+    if (ar) parts.push(h("span", { class: "mu" }, `: ${fmtN(total - ar.added)} dal portale Touch${S.info.total > S.info.loaded ? ` (i più recenti su ${fmtN(S.info.total)})` : ""}, ${fmtN(ar.added)} dall'Area Riservata${ar.capped ? " (massimo raggiunto)" : ""}`));
+    else if (S.info && S.info.total > total) parts.push(h("span", { class: "mu" }, `, i più recenti su ${fmtN(S.info.total)} nel portale`));
     if (nv !== total) parts.push(" · ", h("b", null, fmtN(nv)), " dopo i filtri");
     if (S.info) parts.push(h("span", { class: "mu" }, ` · ${(S.info.ms / 1000).toLocaleString("it-IT", { maximumFractionDigits: 1 })} s`));
-    if (S.info && S.info.total > S.info.loaded) {
+    if (S.info && (S.info.total > S.info.loaded || (ar && ar.capped))) {
       parts.push(h("button", { type: "button", class: "btn s", id: "yearsbtn", onclick: yearCounts, title: "Conta i ticket di questa ricerca anno per anno (una richiesta al portale per anno)" }, "Quanti per anno?"));
-      parts.push(h("button", { type: "button", class: "btn s", id: "more", onclick: loadMore }, `Carica i successivi ${fmtN(Math.min(S.info.pageSize || settings.cap, S.info.total - S.info.loaded))}`));
+      if (S.info.total > S.info.loaded) parts.push(h("button", { type: "button", class: "btn s", id: "more", onclick: loadMore }, `Carica i successivi ${fmtN(Math.min(S.info.pageSize || settings.cap, S.info.total - S.info.loaded))}`));
     }
     if (S.selected.size) parts.push(" · ", h("b", null, fmtN(S.selected.size)), " selezionati ", h("button", { type: "button", class: "btn gh s", onclick: () => { S.selected.clear(); render(); } }, "deseleziona"));
     add(el, parts);
@@ -1785,7 +2615,8 @@ dialog{border:1px solid var(--bd2);border-radius:12px;padding:20px;width:min(480
     return h("article", { class: "res" + (sel ? " sel" : "") },
       h("div", { class: "rh" },
         noSel ? null : h("input", { type: "checkbox", "aria-label": `Seleziona ${label}`, checked: sel, onchange: (e) => { if (e.target.checked) S.selected.add(t.key); else S.selected.delete(t.key); render(); } }),
-        h("a", { class: "num", href: "#", title: "Apri il ticket nel portale", onclick: (e) => { e.preventDefault(); openTicket(t); } }, label),
+        h("a", { class: "num", href: "#", title: "Leggi il ticket completo", onclick: (e) => { e.preventDefault(); readTicket(t); } }, label),
+        t.src === "ar" ? h("span", { class: "badge src" }, "Area Riservata") : null,
         t.code ? h("button", { type: "button", class: "ib", title: "Copia ID", "aria-label": "Copia ID", onclick: () => copyText(t.code, `Copiato ${t.code}`) }, "⧉") : null,
         t.status ? h("span", { class: "badge" + (CLOSED_RE.test(t.status) ? " cl" : "") }, t.status) : null,
         t.priority ? h("span", { class: "badge pr" }, t.priority) : null,
@@ -1793,7 +2624,8 @@ dialog{border:1px solid var(--bd2);border-radius:12px;padding:20px;width:min(480
         h("span", { class: "sp" }),
         h("button", { type: "button", class: "ib" + (fav ? " on" : ""), "aria-pressed": String(!!fav), title: fav ? "Rimuovi dai preferiti" : "Aggiungi ai preferiti", onclick: () => toggleFav(t) }, fav ? "★" : "☆"),
         h("button", { type: "button", class: "ib", title: "Nota ed etichette", "aria-label": "Nota ed etichette", onclick: () => openNote(t) }, "✎"),
-        h("button", { type: "button", class: "btn s", onclick: () => openTicket(t) }, "Apri ↗")),
+        h("button", { type: "button", class: "btn s", onclick: () => readTicket(t) }, "Leggi"),
+        openLink(t)),
       h("div", { class: "subj" }, hl(t.subject || "(senza oggetto)", words)),
       t.preview ? h("div", { class: "snip" }, hl(t.preview, words)) : null,
       t.resolution ? h("div", { class: "snip rs" }, h("b", null, "Soluzione: "), hl(t.resolution, words)) : null,
@@ -1802,6 +2634,79 @@ dialog{border:1px solid var(--bd2);border-radius:12px;padding:20px;width:min(480
         t.updated ? metaItem("Aggiornato", `${fmtDate(t.updated)}${t.updTime ? " " + t.updTime : ""}`) : null, metaItem("SLA", t.sla), metaItem("Tag", t.tags)),
       extra.length ? h("div", { class: "meta" }, extra) : null,
       t.cols && t.cols.length ? h("details", { class: "cols" }, h("summary", null, "Tutte le colonne"), h("dl", null, t.cols.map((c) => [h("dt", null, c.h), h("dd", null, c.v)]))) : null);
+  }
+  // collegamento al ticket: indirizzo diretto se noto, altrimenti apertura con i comandi del portale
+  function openLink(t) {
+    const url = t.src === "ar" ? t.url : touchUrl(t);
+    const text = t.src === "ar" ? "Area Riservata ↗" : "Apri in Touch ↗";
+    if (url) return h("a", { class: "btn s gh", href: url, target: "_blank", rel: "noopener", title: "Apri in una nuova scheda" }, text);
+    return h("button", { type: "button", class: "btn s gh", title: "Apri con il pulsante Open del portale (nuova scheda)", onclick: () => openTicket(t) }, text);
+  }
+  // ---- lettura nel pannello
+  const READ = new Map(); // ticket già letti in questa sessione
+  let readCtrl = null, readT = null;
+  function setReadLink(t, url) {
+    const a = $("#rlink"), b = $("#ropen");
+    const ar = t.src === "ar";
+    url = url || (ar ? t.url : touchUrl(t));
+    a.textContent = b.textContent = ar ? "Apri nell'Area Riservata ↗" : "Apri in Touch ↗";
+    if (url) { a.href = url; a.hidden = false; b.hidden = true; } else { a.hidden = true; a.removeAttribute("href"); b.hidden = false; }
+  }
+  function readSummary(t) {
+    const items = [["Stato", t.status], ["Priorità", t.priority], ["Aperto", t.date ? `${fmtDate(t.date)}${t.time ? " " + t.time : ""}` : ""], ["Aggiornato", t.updated ? `${fmtDate(t.updated)}${t.updTime ? " " + t.updTime : ""}` : ""],
+      ["Sede", [t.site, t.siteCode].filter(Boolean).join(" · ")], ["Contatto", t.contact], ["Servizio", t.service || t.product], ["Classificazione", t.classification],
+      ["Assegnato a", t.assigned], ["Gruppo", t.group], ["Responsabile", t.owner], ["Modificato da", t.modifiers]].filter(([, v]) => v);
+    return items.length ? h("dl", { class: "rdf" }, items.map(([k, v]) => [h("dt", null, k), h("dd", null, v)])) : null;
+  }
+  function renderRead(box, c) {
+    const words = S.words;
+    if (c.fields && c.fields.length) box.appendChild(h("section", null, h("h4", null, "Dati del ticket"), h("dl", { class: "rdf" }, c.fields.map((x) => [h("dt", null, x.label || "—"), h("dd", null, hl(x.value, words))]))));
+    for (const x of c.texts || []) box.appendChild(h("section", null, x.label ? h("h4", null, x.label) : null, h("div", { class: "pre" }, hl(x.value, words))));
+    for (const tb of c.tables || []) {
+      box.appendChild(h("section", null, h("h4", null, `${tb.title || "Elenco"} (${tb.rows.length})`),
+        h("div", { class: "rdtw" }, h("table", { class: "rdtab" }, h("thead", null, h("tr", null, tb.head.map((x) => h("th", null, x)))), h("tbody", null, tb.rows.map((r) => h("tr", null, r.map((x) => h("td", null, hl(x, words))))))))));
+    }
+    if (!box.children.length) box.appendChild(h("div", { class: "note", text: "La pagina del ticket non contiene testo leggibile: aprila con il collegamento." }));
+  }
+  function readText(t, c) {
+    const out = [`${t.code || ""} ${t.subject || ""}`.trim()];
+    if (c) {
+      for (const x of c.fields || []) out.push(`${x.label}: ${x.value}`);
+      for (const x of c.texts || []) out.push("", x.label ? `${x.label}:` : "", x.value);
+      for (const tb of c.tables || []) { out.push("", `${tb.title || "Elenco"}:`, tb.head.join(" | ")); for (const r of tb.rows) out.push(r.join(" | ")); }
+    }
+    return out.filter((x, i) => x !== "" || i > 0).join("\n");
+  }
+  async function readTicket(t) {
+    readT = t;
+    const d = $("#dread");
+    $("#rsrc").textContent = t.src === "ar" ? "Area Riservata" : "Portale Touch";
+    $("#rtitle").textContent = `${t.code || "Ticket"}${t.subject ? " · " + t.subject : ""}`;
+    setReadLink(t);
+    const body = clear($("#rbody"));
+    const sum = readSummary(t);
+    if (sum) body.appendChild(sum);
+    const box = h("div", { class: "rdb0" });
+    body.appendChild(box);
+    if (!d.open) d.showModal();
+    if (readCtrl) readCtrl.abort();
+    const ctrl = readCtrl = new AbortController();
+    const cached = READ.get(t.key);
+    if (cached) { renderRead(box, cached); setReadLink(t, cached.url); return; }
+    box.appendChild(h("div", { class: "mu", text: t.src === "ar" ? "Leggo il ticket dall'Area Riservata…" : "Leggo il ticket dal portale…" }));
+    try {
+      const c = t.src === "ar" ? await arRead(t, ctrl.signal) : await loadTouchTicket(t, ctrl.signal);
+      if (ctrl !== readCtrl) return;
+      READ.set(t.key, c);
+      clear(box); renderRead(box, c); setReadLink(t, c.url);
+      if (t.src !== "ar") render(); // ora i risultati hanno il collegamento diretto
+    } catch (e) {
+      if (ctrl !== readCtrl || (e && e.name === "AbortError")) return;
+      clear(box);
+      box.appendChild(h("div", { class: "note" }, (e && e.message) || "Lettura non riuscita"));
+      if (t.preview || t.resolution) box.appendChild(h("section", null, h("h4", null, "Dall'elenco (testo abbreviato)"), h("div", { class: "pre" }, hl([t.preview, t.resolution && "Soluzione: " + t.resolution].filter(Boolean).join("\n\n"), S.words))));
+      setReadLink(t, e && e.url);
+    }
   }
   function renderPager(pages) {
     const nav = clear($("#pager"));
@@ -1943,7 +2848,7 @@ dialog{border:1px solid var(--bd2);border-radius:12px;padding:20px;width:min(480
     applySpec(s);
     return true;
   }
-  async function runSpec(s) { if (await openSpec(s)) runSearch(s && s.people && typeof s.people === "object" ? s.people : undefined); }
+  async function runSpec(s) { if (await openSpec(s)) runSearch({ people: s && s.people, pf: s && s.pf }); }
   function renderSaved() {
     const box = clear($("#saved"));
     const items = store.get("saved", []);
@@ -2064,11 +2969,14 @@ dialog{border:1px solid var(--bd2);border-radius:12px;padding:20px;width:min(480
       tabs: portalTabs().map((x) => ({ text: NAV_TAB_RE.test(x.text) || (x.card && /^body_/.test(x.card.id || "")) ? x.text : maskDeep(x.text, keepSet), card: x.card ? x.card.id : null, cardCls: x.card ? x.card.$className : null })),
       current: m ? moduleTech(m, keepSet) : null,
       lastSearch: conn.lastRun ? Object.assign({}, conn.lastRun, { spec: maskDeep(s, keepSet) }) : null,
-      requests: conn.ext.slice(-12).map(req), xhr: conn.xhr.slice(-12).map(req), errors: conn.errors.slice(-10), settings,
+      requests: conn.ext.slice(-12).map(req), xhr: conn.xhr.slice(-12).map(req), errors: conn.errors.slice(-10), settings: Object.assign({}, settings, { arUrl: settings.arUrl ? maskUrl(settings.arUrl, keepSet) : "" }),
+      reader: conn.reader, touchUrl: touchTemplate() ? { field: touchTemplate().field, path: maskUrl(touchTemplate().tpl.replace("{v}", "0"), keepSet) } : null,
+      ar: { state: AR.state, origin: AR.origin || null, fields: AR.info ? AR.info.fields || null : null, updDate: AR.info ? !!AR.info.updDate : null, lastSearch: S.info && S.info.ar ? S.info.ar : null },
     };
   }
   function renderSettings() {
     $("#s-cap").value = String(settings.cap);
+    $("#s-arurl").value = settings.arUrl || AR_DEFAULT;
     const m = currentModule();
     const lines = [];
     let ver = "?";
@@ -2090,6 +2998,9 @@ dialog{border:1px solid var(--bd2);border-radius:12px;padding:20px;width:min(480
       lines.push(`Ultima ricerca: ${fmtDT(r.at)} · avvio ${r.trigger || "—"} · ${r.loads} caricament${r.loads === 1 ? "o" : "i"} · ${(r.ms / 1000).toLocaleString("it-IT", { maximumFractionDigits: 1 })} s · filtri impostati: ${r.applied.join(", ") || "—"}${r.failed.length ? " · NON impostati: " + r.failed.join("; ") : ""} · testo nella richiesta: ${r.verified === null ? "non verificato" : r.verified ? "sì" : "NO"}`);
     }
     lines.push(`Richieste osservate: ${conn.ext.length} (ExtJS), ${conn.xhr.length} (XHR)`);
+    const tp = touchTemplate();
+    lines.push(`Pagina del ticket: ${tp ? `indirizzo imparato (dal dato «${tp.field}»)` : "indirizzo non ancora imparato (si impara al primo «Leggi» o «Apri in Touch»)"}${conn.reader ? ` · ultima lettura: ${conn.reader.via || conn.reader.how || "—"}, ${conn.reader.fields || 0} campi, ${conn.reader.texts || 0} testi` : ""}`);
+    lines.push(`Area Riservata: ${AR.state === "on" ? `collegata (${AR.origin}${AR.info && AR.info.updDate ? ", periodo per data di aggiornamento" : ""})` : AR.state === "waiting" ? "in attesa del segnalibro nella sua scheda" : "non collegata"}`);
     $("#conninfo").textContent = lines.join("\n");
   }
   $("#tread").addEventListener("click", () => {
@@ -2105,6 +3016,7 @@ dialog{border:1px solid var(--bd2);border-radius:12px;padding:20px;width:min(480
   });
   $("#ssave").addEventListener("click", () => {
     settings.cap = CAPS.includes(+$("#s-cap").value) ? +$("#s-cap").value : 200;
+    { const u = absUrl($("#s-arurl").value.trim()); if (u) settings.arUrl = u; else if (!$("#s-arurl").value.trim()) settings.arUrl = AR_DEFAULT; }
     store.set("settings", settings);
     $("#capq").value = String(settings.cap);
     $$(".capn").forEach((x) => { x.textContent = settings.cap; });
@@ -2115,11 +3027,15 @@ dialog{border:1px solid var(--bd2);border-radius:12px;padding:20px;width:min(480
   $("#tdl").addEventListener("click", () => download("ricerca-tkt-dati-tecnici.json", JSON.stringify(techData(), null, 2), "application/json"));
   $("#pexp").addEventListener("click", () => download("ricerca-tkt-dati-personali.json", JSON.stringify({ version: VERSION, favorites: [...S.favorites.values()], saved: store.get("saved", []), history: store.get("history", []), settings }, null, 2), "application/json"));
   const str = (v, max = 2000) => (v === null || v === undefined ? "" : String(v)).slice(0, max);
-  const TKEYS = ["code", "recId", "list", "date", "time", "updated", "updTime", "subject", "preview", "resolution", "site", "siteCode", "contact", "status", "priority", "service", "classification", "assigned", "group", "owner", "modifiers", "sender", "sla", "tags"];
+  const TKEYS = ["code", "recId", "list", "date", "time", "updated", "updTime", "subject", "preview", "resolution", "site", "siteCode", "contact", "status", "priority", "service", "classification", "assigned", "group", "owner", "modifiers", "sender", "sla", "tags", "source", "number", "product", "arRef"];
   function importTicket(t, key) {
     const o = { key: str(key, 300) };
     for (const k of TKEYS) if (t[k] !== undefined && t[k] !== null) o[k] = str(t[k], k === "preview" || k === "resolution" ? 6000 : 500);
     for (const k of ["date", "updated"]) if (o[k] && !/^\d{4}-\d{2}-\d{2}$/.test(o[k])) delete o[k];
+    if (t.src === "ar") { o.src = "ar"; o.source = "Area Riservata"; }
+    // collegamenti solo http(s); quelli dell'Area Riservata solo verso il suo sito
+    if (typeof t.url === "string") { try { const u = new URL(t.url); if (/^https?:$/.test(u.protocol) && (o.src !== "ar" || u.origin === arOriginOf())) o.url = u.href; } catch { /* */ } }
+    if (t.ref && typeof t.ref === "object") { const [k, v] = Object.entries(t.ref)[0] || []; if (k && /^\w{1,60}$/.test(k)) o.ref = { [k]: str(v, 100) }; }
     o.cols = Array.isArray(t.cols) ? t.cols.slice(0, 60).map((c) => ({ h: str(c && c.h, 100), v: str(c && c.v, 2000) })) : [];
     return o;
   }
@@ -2135,12 +3051,19 @@ dialog{border:1px solid var(--bd2);border-radius:12px;padding:20px;width:min(480
       const v = p && typeof p === "object" && (typeof p.v === "string" || typeof p.v === "number") ? str(p.v, 100) : "";
       if (v) people[k] = { v, t: textOf(str(p.t, 200)).replace(/[<>"`]/g, "") || v };
     }
+    const pf = {};
+    const srcPf = sp.pf && typeof sp.pf === "object" && !Array.isArray(sp.pf) ? sp.pf : {};
+    for (const [k, p] of Object.entries(srcPf).slice(0, 40)) {
+      if (!/^\w{1,60}$/.test(k) || (k in CONTROLLED) || PEOPLE_KEYS.has(k) || !p || typeof p !== "object") continue;
+      const v = Array.isArray(p.v) ? strList(p.v).slice(0, 50) : typeof p.v === "string" || typeof p.v === "number" ? str(p.v, 200) : "";
+      if (v && v.length) pf[k] = { v, t: textOf(str(p.t, 300)).replace(/[<>"`]/g, "") || (Array.isArray(v) ? v.join(", ") : v) };
+    }
     // stesso ordine delle chiavi di spec(): serve al confronto dei doppioni
     return {
       text: str(sp.text, 500), subject: str(sp.subject, 500), exclude: str(sp.exclude, 500), allWords: sp.allWords === true,
       dfrom: isoDay(sp.dfrom), dto: isoDay(sp.dto), ufrom: isoDay(sp.ufrom), uto: isoDay(sp.uto),
       st: ["all", "open", "closed", "custom", "page"].includes(sp.st) ? sp.st : "all", stCodes: strList(sp.stCodes), pr: strList(sp.pr),
-      classif: str(sp.classif, 500), classcli: str(sp.classcli, 500), people,
+      classif: str(sp.classif, 500), classcli: str(sp.classcli, 500), people, pf,
     };
   }
   const specKey = (sp) => { try { return JSON.stringify(importSpec(sp)); } catch { return ""; } };
@@ -2231,7 +3154,7 @@ dialog{border:1px solid var(--bd2);border-radius:12px;padding:20px;width:min(480
     S.stCodes = new Set((S.stOpts || []).filter(([, t]) => what === "all" || (what === "open" && !CLOSED_RE.test(t)) || (what === "closed" && CLOSED_RE.test(t))).map(([v]) => v));
     renderToggles(); onFormChange();
   }));
-  $("#qreset").addEventListener("click", () => { if (busy()) return; applySpec({ people: {} }); $("#q").focus(); });
+  $("#qreset").addEventListener("click", () => { if (busy()) return; applySpec({ people: {}, pf: {} }); $("#q").focus(); });
   $("#qsave").addEventListener("click", () => { const s = spec(); $("#sname").value = s.text || s.subject || ""; $("#dsave").showModal(); $("#sname").select(); });
   $("#stop").addEventListener("click", () => S.abort && S.abort.abort());
   $("#qrestore").addEventListener("click", async () => {
@@ -2246,6 +3169,12 @@ dialog{border:1px solid var(--bd2);border-radius:12px;padding:20px;width:min(480
     } catch (e) { toast(e && e.message ? e.message : "Ripristino non riuscito"); }
     finally { S.searching = false; $("#go").disabled = false; $("#qrestore").disabled = false; renderToggles(); preview(); render(); }
   });
+  $("#ar-connect").addEventListener("click", arConnect);
+  $("#src-ar").addEventListener("change", () => { settings.arOn = $("#src-ar").checked; store.set("settings", settings); previewNow(); });
+  $("#rclose").addEventListener("click", () => $("#dread").close());
+  $("#dread").addEventListener("close", () => { if (readCtrl) readCtrl.abort(); readCtrl = null; });
+  $("#ropen").addEventListener("click", () => { if (readT) openTicket(readT); });
+  $("#rcopy").addEventListener("click", () => { if (readT) copyText(readText(readT, READ.get(readT.key)), "Testo del ticket copiato"); });
   $("#refine").addEventListener("input", debounce(() => { S.refine = $("#refine").value; S.page = 1; render(); }, 150));
   $("#sort").addEventListener("change", () => { S.sort = $("#sort").value; S.page = 1; render(); });
   $("#group").addEventListener("change", () => { S.group = $("#group").value; S.page = 1; render(); });
@@ -2261,7 +3190,7 @@ dialog{border:1px solid var(--bd2);border-radius:12px;padding:20px;width:min(480
     if (pickCleanup) pickCleanup(); // tornando al pannello per qualsiasi strada la scelta nel portale finisce
     conn.on = true;
     host.style.display = ""; document.documentElement.style.overflow = "hidden"; if (document.body) document.body.inert = true;
-    renderToggles(); previewNow();
+    renderToggles(); renderArState(); previewNow();
     $("#capq").value = String(settings.cap);
     if (!$("#tab-settings").hidden) renderSettings();
     if (!currentModule() && allTab()) { ensureAllTickets().then(() => { renderToggles(); preview(); }); previewNow(); }

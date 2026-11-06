@@ -426,6 +426,8 @@ DEMO_FIELDS = {
     "TKCLASSIF": "classificazione", "TKARGOMENTO": "argomento", "TKCENTRO": "centro",
     # nomi dei campi dell'indice reale (visti nelle ricerche della pagina Zucchetti)
     "TESTI": "text", "OGGETTO": "subject", "IDCENSER": "censer", "IDMESEM": "mese", "IDANNOM": "anno",
+    # mese e anno della data di apertura: nomi inventati per il finto sito (quelli reali si chiedono alla pagina)
+    "IDMESEA": "mese", "IDANNOA": "anno",
     # nome inventato per il finto sito di prova (il nome reale si impara dalla pagina)
     "IDSTATO": "stato_code",
 }

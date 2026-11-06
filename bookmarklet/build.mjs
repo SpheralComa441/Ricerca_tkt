@@ -23,7 +23,9 @@ if (!esbuild) {
   console.error("esbuild non trovato: esegui `npm i --no-save esbuild@0.24.0` nella cartella bookmarklet/ oppure imposta NODE_PATH.");
   process.exit(1);
 }
-const src = readFileSync(join(here, "src", "ricerca-tkt.js"), "utf8");
+// «// @include file.js» inserisce un altro file di src/ (stesso ambito: dentro la funzione principale)
+const src = readFileSync(join(here, "src", "ricerca-tkt.js"), "utf8")
+  .replace(/^[ \t]*\/\/ @include ([\w.-]+\.js)[ \t]*$/gm, (_, name) => readFileSync(join(here, "src", name), "utf8"));
 const version = (src.match(/const VERSION = "([^"]+)"/) || [])[1] || "?";
 // Compatta gli spazi dei blocchi CSS e MARKUP (esbuild non tocca il contenuto delle stringhe).
 const compact = src.replace(/(const (?:CSS|MARKUP) = `)([\s\S]*?)(`;)/g,
