@@ -328,6 +328,10 @@
   }
   const sameList = (a, b) => a.slice().sort().join("\u0001") === b.slice().sort().join("\u0001");
   function setMulti(f, codes) {
+    const notify = () => {
+      try { if (typeof f.checkChange === "function") f.checkChange(); } catch { /* */ }
+      try { if (typeof f.fireEvent === "function") f.fireEvent("select", f); } catch { /* */ }
+    };
     if (sameList(asList(f.getValue()), codes)) return true;
     const attempts = codes.length
       ? [() => f.setValue(codes.slice()), () => f.setValue(codes.join(",")), () => {
@@ -335,13 +339,14 @@
         f.setValue(codes.map((c) => st.findRecord(f.valueField || "value", c, 0, false, true, true)).filter(Boolean));
       }]
       : [() => (typeof f.clearValue === "function" ? f.clearValue() : f.setValue(null)), () => f.setValue([]), () => f.setValue("")];
-    for (const a of attempts) { try { a(); if (sameList(asList(f.getValue()), codes)) return true; } catch { /* prova il successivo */ } }
+    for (const a of attempts) { try { a(); if (sameList(asList(f.getValue()), codes)) { notify(); return true; } } catch { /* prova il successivo */ } }
     return false;
   }
   function setText(f, v) {
     const cur = f.getValue();
     if (String(cur === null || cur === undefined ? "" : cur) === v) return true;
     f.setValue(v);
+    try { if (typeof f.checkChange === "function") f.checkChange(); } catch { /* */ }
     return String(f.getValue() ?? "") === v;
   }
   const toDate = (iso) => { const m = /^(\d{4})-(\d{2})-(\d{2})$/.exec(iso || ""); return m ? new Date(+m[1], +m[2] - 1, +m[3]) : null; };
@@ -350,6 +355,8 @@
     const cur = f.getValue();
     if ((!d && !cur) || (d && isDate(cur) && isoOf(cur) === iso)) return true;
     f.setValue(d);
+    try { if (typeof f.checkChange === "function") f.checkChange(); } catch { /* */ }
+    try { if (typeof f.fireEvent === "function") f.fireEvent("select", f, d); } catch { /* */ }
     const now = f.getValue();
     return d ? isDate(now) && isoOf(now) === iso : !now;
   }
@@ -423,20 +430,35 @@
     ["OwnerUserID", "Responsabile (Resource Owner)"],
   ];
   const PEOPLE_KEYS = new Set(PEOPLE.map(([k]) => k));
-  // Etichette chiare (italiano + nome Touch) e ordine logico per tutti gli altri filtri di Touch
+  // Etichette chiare (italiano + nome Touch) e ordine logico per tutti gli altri filtri di Touch (sia All tickets sia My Group Tickets)
   const PF_META = {
-    ServiceID: { label: "Servizio (Service)", group: "main", order: 1, hint: "Albero dei servizi / prodotti" },
-    RefAccountID: { label: "Sede / Cliente (Site)", group: "main", order: 2, hint: "Ragione sociale o codice sede" },
-    ReferenceID: { label: "Contatto (Contact)", group: "main", order: 3, hint: "Persona di riferimento del ticket" },
-    TicketSource: { label: "Origine ticket (Ticket Source)", group: "main", order: 4, hint: "es. Customer, Intern, Automatic" },
-    Channel: { label: "Canale (Channel)", group: "main", order: 5, hint: "es. Web, Phone, E-Mail" },
-    FlagSollecito: { label: "Sollecitato (Solicited)", group: "main", order: 6, hint: "Yes / No" },
-    CustomerTop: { label: "Top Client", group: "main", order: 7, hint: "Cliente prioritario" },
-    Tags: { label: "Tag (Tags)", group: "main", order: 8, hint: "Etichette del ticket nel portale" },
-    CatalogItemID: { label: "Voce di classificazione (Classification)", group: "class", order: 10, hint: "Scelta dall'albero di classificazione" },
-    ClassCli: { label: "Voce classif. cliente (Customer class.)", group: "class", order: 11, hint: "Scelta dall'albero cliente" },
-    Escalated: { label: "Escalated", group: "other", order: 20 },
-    WorkingStatus: { label: "Stato lavorazione (Working status)", group: "other", order: 21 },
+    ServiceFilter: { label: "Servizio (Service)", short: "Service", group: "client", order: 1, hint: "Albero dei servizi / prodotti" },
+    ServiceID: { label: "Servizio (Service)", short: "Service", group: "client", order: 1, hint: "Albero dei servizi / prodotti" },
+    ServiceCenter: { label: "Centro servizi (Service center)", short: "Service center", group: "client", order: 2, hint: "Scrivi almeno 2 lettere per cercare" },
+    AccountID: { label: "Sede / Cliente (Site)", short: "Site", group: "client", order: 3, hint: "Ragione sociale o codice sede" },
+    RefAccountID: { label: "Sede / Cliente (Site)", short: "Site", group: "client", order: 3, hint: "Ragione sociale o codice sede" },
+    DeliverySite: { label: "Sede operativa (Delivery site)", short: "Delivery site", group: "client", order: 4, hint: "Sede di consegna / operativa" },
+    ContactFilter: { label: "Contatto (Contact)", short: "Contact", group: "client", order: 5, hint: "Persona di riferimento del ticket" },
+    ReferenceID: { label: "Contatto (Contact)", short: "Contact", group: "client", order: 5, hint: "Persona di riferimento del ticket" },
+    OriginalClientID: { label: "Cliente finale (End customer)", short: "End customer", group: "client", order: 6, hint: "Cliente finale indiretto" },
+    OriginalContactID: { label: "Contatto cliente finale (End customer contact)", short: "End customer contact", group: "client", order: 7, hint: "Referente del cliente finale" },
+    SupplierID: { label: "Fornitore (Supplier)", short: "Supplier", group: "client", order: 8, hint: "Fornitore associato al ticket" },
+    CustomerTop: { label: "Top Client", short: "Top Client", group: "client", order: 9, hint: "Cliente prioritario" },
+    ObjectTypeFilter: { label: "Tipo oggetto (Object type)", short: "Object type", group: "class", order: 10, hint: "Incident, Request, ecc." },
+    TicketCategoryID: { label: "Categoria ticket (Ticket category)", short: "Ticket category", group: "class", order: 11, hint: "Albero categorie del ticket" },
+    CatalogFolder: { label: "Cartella di classificazione (Classification folder)", short: "Classification folder", group: "class", order: 12, hint: "Albero cartelle di classificazione" },
+    CatalogItem: { label: "Voce di classificazione (Classification)", short: "Classification", group: "class", order: 13, hint: "Scrivi almeno 2 lettere per cercare" },
+    CatalogItemID: { label: "Voce di classificazione (Classification)", short: "Classification", group: "class", order: 13, hint: "Scelta dall'albero di classificazione" },
+    ClassCli: { label: "Voce classif. cliente (Customer class.)", short: "Customer class.", group: "class", order: 14, hint: "Scelta dall'albero cliente" },
+    TagFilter: { label: "Tag / Etichette (Tags)", short: "Tags", group: "extra", order: 15, hint: "Etichette del ticket nel portale" },
+    Tags: { label: "Tag / Etichette (Tags)", short: "Tags", group: "extra", order: 15, hint: "Etichette del ticket nel portale" },
+    TicketSource: { label: "Origine ticket (Ticket Source)", short: "Ticket Source", group: "extra", order: 16, hint: "es. Customer, Intern, Automatic" },
+    Channel: { label: "Canale (Channel)", short: "Channel", group: "extra", order: 17, hint: "es. Web, Phone, E-Mail" },
+    FlagSollecito: { label: "Sollecitato (Solicited)", short: "Solicited", group: "extra", order: 18, hint: "Yes / No" },
+    Escalated: { label: "Escalated", short: "Escalated", group: "extra", order: 20 },
+    WorkingStatus: { label: "Stato lavorazione (Working status)", short: "Working status", group: "extra", order: 21 },
+    AssignedUserGroupID: { label: "Gruppo assegnatario (Assigned to group)", short: "Assigned to group", group: "other", order: 22 },
+    AssignedUserID: { label: "Utente assegnatario (Assigned to user)", short: "Assigned to user", group: "other", order: 23 },
   };
   function scalarValue(f, v) {
     const j = parseJsonValue(v);
@@ -474,6 +496,16 @@
     } catch { return null; }
   }
   const canLookup = (f) => !!(f && typeof f.doQuery === "function" && typeof f.getStore === "function" && !f.readOnly && f.editable !== false);
+  function syncHiddenJson(f, code, label) {
+    try {
+      const dom = f && f.el && f.el.dom;
+      if (!dom) return;
+      const jStr = code ? JSON.stringify([{ value: code, text: label || code, index: 0 }]) : '[{"value":"","text":"","index":0}]';
+      for (const inp of dom.querySelectorAll('input[type="hidden"]')) {
+        if (/^\s*\[\s*\{/.test(inp.value || "")) inp.value = jStr;
+      }
+    } catch { /* */ }
+  }
   // Imposta un gruppo o una persona ({v: codice, t: nome}) in un campo del portale.
   function setPerson(f, d) {
     const code = String(d.v);
@@ -490,19 +522,37 @@
     const asRecord = () => {
       try { if (!plain || typeof st.getModel !== "function") return false; const M = st.getModel(); f.setValue(new M({ [vf]: code, [df]: label })); return same(); } catch { return false; }
     };
-    // campi ad albero (tree-field): il valore è il codice del nodo, non il nodo
+    // campi ad albero (tree-field di Touch o Fake.TreeField): il valore è il codice del nodo
     const ts = (st && st.isTreeStore ? st : null) || treeStoreOf(f);
     if (ts) {
-      // un TreePicker non segnala il cambio da solo: checkChange avvisa il portale (che ricarica l'elenco)
-      const changed = () => { try { if (typeof f.checkChange === "function") f.checkChange(); } catch { /* */ } };
+      // un TreePicker / TreeField non segnala il cambio da solo: checkChange e select avvisano il portale
+      const changed = () => {
+        try { if (typeof f.checkChange === "function") f.checkChange(); } catch { /* */ }
+        try { if (typeof f.fireEvent === "function") f.fireEvent("select", f); } catch { /* */ }
+      };
+      try {
+        if (typeof f.setValueBase === "function") {
+          f.setValueBase(code, [label], false);
+          if (f.component && f.component.rendered && typeof f.updateTreeSelection === "function") {
+            try { f.updateTreeSelection(code); } catch { /* */ }
+          }
+          changed();
+          if (same()) return true;
+        }
+      } catch { /* */ }
+      try { f.setValue(code, label, false); changed(); if (same()) return true; } catch { /* */ }
       try { f.setValue(code); changed(); if (same()) return true; } catch { /* */ }
       try { const n = ts.getNodeById(code); if (n) { f.setValue(n); changed(); if (same() && typeof f.getValue() !== "object") return true; } } catch { /* */ }
       try { f.setValue(code); changed(); } catch { /* */ }
       return same();
     }
     // con l'elenco del campo non caricato setValue(codice) non segnala il cambio: checkChange lo fa (solo se è cambiato)
-    const signal = () => { try { if (typeof f.checkChange === "function") f.checkChange(); } catch { /* */ } };
-    try { const r = st && typeof st.findRecord === "function" ? st.findRecord(vf, code, 0, false, true, true) : null; if (r) { f.setValue(r); if (same()) { signal(); return true; } } } catch { /* */ }
+    const signal = (rec) => {
+      syncHiddenJson(f, code, label);
+      try { if (typeof f.checkChange === "function") f.checkChange(); } catch { /* */ }
+      try { if (typeof f.fireEvent === "function") f.fireEvent("select", f, rec); } catch { /* */ }
+    };
+    try { const r = st && typeof st.findRecord === "function" ? st.findRecord(vf, code, 0, false, true, true) : null; if (r) { f.setValue(r); if (same()) { signal(r); return true; } } } catch { /* */ }
     try {
       f.setValue(code);
       if (same()) {
@@ -512,12 +562,12 @@
         return same();
       }
     } catch { /* */ }
-    if (asRecord()) return true;
+    if (asRecord()) { signal(); return true; }
     try {
       if (plain && typeof st.add === "function") {
         const [r] = st.add({ [vf]: code, [df]: label });
         f.setValue(r);
-        if (same()) return true;
+        if (same()) { signal(r); return true; }
         try { st.remove(r); } catch { /* */ }
       }
     } catch { /* */ }
@@ -531,15 +581,18 @@
     return false;
   }
   function clearField(f) {
-    try { if (typeof f.clearValue === "function") f.clearValue(); else f.setValue(null); } catch { try { f.setValue(""); } catch { /* */ } }
     try {
-      const dom = f && f.el && f.el.dom;
-      if (dom) {
-        for (const inp of dom.querySelectorAll('input[type="hidden"]')) {
-          if (/^\s*\[\s*\{/.test(inp.value || "")) inp.value = '[{"value":"","text":""}]';
+      if (typeof f.clear === "function" && f.component) {
+        f.clear();
+        if (f.component.rendered && typeof f.component.clearChecked === "function") {
+          try { f.component.suspendEvents(); f.component.clearChecked(); f.component.resumeEvents(); } catch { /* */ }
         }
-      }
-    } catch { /* */ }
+      } else if (typeof f.clearValue === "function") f.clearValue();
+      else f.setValue(null);
+    } catch { try { f.setValue(""); } catch { /* */ } }
+    syncHiddenJson(f, "", "");
+    try { if (typeof f.checkChange === "function") f.checkChange(); } catch { /* */ }
+    try { if (typeof f.fireEvent === "function") f.fireEvent("select", f); } catch { /* */ }
   }
   // ===================================================================== tutti i filtri del portale nel pannello
   // Tipo di ogni campo filtro: albero (tree-field), ricerca sul server (objectlink), elenco (combo con le
@@ -550,6 +603,8 @@
       () => f.getStore && f.getStore(),
       () => f.store,
       () => f.treeStore,
+      () => f.component && f.component.getStore && f.component.getStore(),
+      () => f.component && f.component.store,
       () => f.picker && f.picker.getStore && f.picker.getStore(),
       () => f.getPicker && f.getPicker() && f.getPicker().getStore && f.getPicker().getStore(),
       () => f.tree && f.tree.getStore && f.tree.getStore(),
@@ -583,10 +638,10 @@
       const label = PEOPLE_KEYS.has(x.suffix)
         ? PEOPLE.find(([k]) => k === x.suffix)[1]
         : (meta && meta.label) || fieldLabel(x.f, x.suffix);
-      return Object.assign(x, { i, label, hint: (meta && meta.hint) || "", group: PEOPLE_KEYS.has(x.suffix) ? "people" : (meta && meta.group) || "other" });
+      return Object.assign(x, { i, label, short: (meta && meta.short) || fieldLabel(x.f, x.suffix) || label, hint: (meta && meta.hint) || "", group: PEOPLE_KEYS.has(x.suffix) ? "people" : (meta && meta.group) || "other" });
     }).sort((a, b) => rank(a) - rank(b) || a.i - b.i);
   }
-  const isMulti = (f) => !!(f && f.multiSelect);
+  const isMulti = (f) => !!(f && (f.multiSelect || /\b(multiComboField|multicombo-field|static-objectlink-multi-field|x-tagcombo)\b/i.test(clsOf(f))));
   const emptyJson = (v) => /^\[\{"value":""/.test(String(v || ""));
   // valore di un campo come {v, t}: v = codice (o elenco di codici, testo, data AAAA-MM-GG)
   function pfValue(f, kind) {
@@ -1484,12 +1539,16 @@
       return len > 20 && performance.now() - since > 350;
     }, maxMs, signal);
   }
-  // testo leggibile (anche da HTML), con gli a capo
+  // testo leggibile (anche da HTML o HTML doppiamente codificato &lt;p&gt;...&lt;/p&gt;), senza fogli di stile o script
   function plainText(v) {
     let s = String(v ?? "");
-    if (/<[a-z][\s\S]*>/i.test(s) || /&(#\d+|#x[0-9a-f]+|[a-z]+);/i.test(s)) {
-      const d = new DOMParser().parseFromString(`<body>${s.replace(/<br\s*\/?>/gi, "\n").replace(/<\/(p|div|li|tr|h\d)>/gi, "\n")}`, "text/html");
-      s = d.body.textContent || "";
+    for (let pass = 0; pass < 2; pass++) {
+      if (!(/<[a-z][\s\S]*>/i.test(s) || /&(#\d+|#x[0-9a-f]+|[a-z]+);/i.test(s))) break;
+      const d = new DOMParser().parseFromString(`<body>${s.replace(/<br\s*\/?>/gi, "\n").replace(/<\/(p|div|li|tr|h\d)>/gi, "\n")}</body>`, "text/html");
+      d.body.querySelectorAll("style,script,noscript,template").forEach((n) => n.remove());
+      const next = d.body.textContent || "";
+      if (next === s) break;
+      s = next;
     }
     return s.replace(/\r\n?/g, "\n").replace(/[ \t\u00a0]+/g, " ").replace(/ *\n */g, "\n").replace(/\n{3,}/g, "\n\n").trim();
   }
@@ -1538,30 +1597,57 @@
     } catch { /* */ }
     return "";
   }
+  // Traduce i tipi di messaggio in inglese di Touch in etichette chiare in italiano
+  const MSG_KIND_IT = {
+    "initial request": "Richiesta iniziale",
+    "initialrequest": "Richiesta iniziale",
+    "customerreply": "Risposta cliente",
+    "customer reply": "Risposta cliente",
+    "operatorreply": "Risposta operatore",
+    "operator reply": "Risposta operatore",
+    "internalnote": "Nota interna",
+    "internal note": "Nota interna",
+    "solution": "Soluzione",
+    "resolution": "Soluzione",
+  };
+  const fmtMsgDate = (raw) => {
+    const s = plainText(raw || "");
+    if (!s) return "";
+    const p = parseDateText(s);
+    return p && p.d ? `${fmtDate(p.d)}${p.t ? " " + p.t : ""}` : s;
+  };
   // Estrae i messaggi da una griglia conversazioni di Touch (entity-ticketconversationitem: Storico conversazioni,
   // Conversation / publicCommunications, Internal notes, Other departments conversations)
   function extractConversationGrid(g, domEl, sectionTitle) {
     const messages = [];
     const rows = [];
     const seenMsg = new Set();
-    const addMsg = (type, author, date, text, internal, files) => {
+    const addMsg = (type, author, date, text, internal, files, hasAttIcon) => {
       type = plainText(type || "");
-      author = plainText(author || "");
-      date = plainText(date || "");
+      author = plainText(author || "").replace(/^\s*[-–—:·]\s*/, "").trim();
+      date = fmtMsgDate(date);
       text = plainText(text || "");
       if (!text && !author && !type) return;
-      const sig = `${type}|${date}|${author}|${text.slice(0, 120)}`;
+      const isInt = !!internal || /internal|nota interna|nota sul cliente/i.test(type) || /internal|note interne|note sul cliente/i.test(sectionTitle || "");
+      const kind = MSG_KIND_IT[norm(type)] || type || (isInt ? "Nota interna" : "Messaggio");
+      const sig = `${norm(kind)}|${date}|${norm(author)}|${norm(text).slice(0, 120)}`;
       if (seenMsg.has(sig)) return;
       seenMsg.add(sig);
+      const body = files && files.length ? `${text}${text ? "\n" : ""}[Allegati: ${files.join(", ")}]` : text;
+      const hasAttachment = !!(hasAttIcon || (files && files.length));
       messages.push({
         section: sectionTitle || "Storico conversazioni",
-        type: type || (internal ? "Nota interna" : "Messaggio"),
+        kind,
+        type: kind,
+        who: author,
         author,
         date,
-        text: files && files.length ? `${text}${text ? "\n" : ""}[Allegati: ${files.join(", ")}]` : text,
-        internal: !!internal || /internal|nota interna/i.test(type) || /internal|note interne/i.test(sectionTitle || ""),
+        body,
+        text: body,
+        internal: isInt,
+        hasAttachment,
       });
-      rows.push([type || "—", [author, date].filter(Boolean).join(" · "), text]);
+      rows.push([kind || "—", [author, date].filter(Boolean).join(" · "), body]);
     };
     // 1. Record dello store ExtJS (contengono il testo completo non troncato a ~400 caratteri)
     const storeRecs = [];
@@ -1575,7 +1661,7 @@
     for (let i = 0; i < count; i++) {
       const r = storeRecs[i];
       const tr = domRows[i];
-      let type = "", author = "", date = "", text = "", internal = false;
+      let type = "", author = "", date = "", text = "", internal = false, hasAttIcon = false;
       const files = [];
       if (tr) {
         try {
@@ -1591,14 +1677,16 @@
             clone.querySelectorAll(".text-datetime-date").forEach((n) => n.remove());
             let rawAuthor = plainText(clone.textContent || "");
             if (rawAuthor && type && rawAuthor.toLowerCase() === type.toLowerCase()) rawAuthor = "";
-            else if (rawAuthor && type && rawAuthor.toLowerCase().startsWith(type.toLowerCase())) rawAuthor = plainText(rawAuthor.slice(type.length));
+            else if (rawAuthor && type && rawAuthor.toLowerCase().startsWith(type.toLowerCase())) rawAuthor = plainText(rawAuthor.slice(type.length)).replace(/^\s*[-–—:·]\s*/, "").trim();
             author = rawAuthor;
           }
           const bodyEl = tr.querySelector(".ticketconversationitem-text,[data-columnid$='_c12_3'],[data-columnid$='_c9_2']");
           if (bodyEl) text = plainText(bodyEl.innerHTML || bodyEl.textContent || "");
+          if (tr.querySelector("[data-columnid$='_c8_2'] .icon-attachment,[data-columnid$='_c13_2'] .icon-attachment")) hasAttIcon = true;
           for (const att of tr.querySelectorAll("[data-columnid$='_c8_2'] [title],[data-columnid$='_c8_2'] a,[data-columnid$='_c13_2'] [title],[data-columnid$='_c13_2'] a")) {
             const at = plainText(att.getAttribute("title") || att.textContent || "");
-            if (at) files.push(at);
+            if (at && !/^(allegato|attachment)$/i.test(at)) files.push(at);
+            else if (at) hasAttIcon = true;
           }
         } catch { /* */ }
       }
@@ -1628,10 +1716,114 @@
           if (/internal|note|intern/i.test(String(d.Type || d.ItemType || d.Kind || ""))) internal = true;
         } catch { /* */ }
       }
-      addMsg(type, author, date, text, internal, files);
+      addMsg(type, author, date, text, internal, files, hasAttIcon);
     }
     return { messages, rows };
   }
+  // Estrae le note da una griglia entity-note di Touch (Internal notes e Notes on customer)
+  function extractNoteGrid(g, domEl, sectionTitle) {
+    const messages = [];
+    const seen = new Set();
+    const isCust = /customer|cliente|accountnotes/i.test(sectionTitle || "") || !!(domEl && domEl.closest("[id$='_AccountNotes']"));
+    const defaultKind = isCust ? "Nota sul cliente" : "Nota interna";
+    const pushNote = (author, date, title, body) => {
+      author = plainText(author || "");
+      date = fmtMsgDate(date);
+      title = plainText(title || "");
+      body = plainText(body || "");
+      const full = title && body && !norm(body).startsWith(norm(title)) ? `${title}\n${body}` : (body || title);
+      if (!full) return;
+      const sig = `${defaultKind}|${date}|${norm(author)}|${norm(full).slice(0, 120)}`;
+      if (seen.has(sig)) return;
+      seen.add(sig);
+      messages.push({
+        section: sectionTitle || defaultKind,
+        kind: defaultKind,
+        type: defaultKind,
+        who: author,
+        author,
+        date,
+        body: full,
+        text: full,
+        internal: true,
+        hasAttachment: false,
+      });
+    };
+    const domRows = domEl ? [...domEl.querySelectorAll("tr.x-grid-row")] : [];
+    for (const tr of domRows) {
+      try {
+        const dtTd = tr.querySelector("[data-columnid$='_c0_0']") || tr.querySelectorAll("td.x-grid-cell")[0];
+        const usrTd = tr.querySelector("[data-columnid$='_c1_1']") || tr.querySelectorAll("td.x-grid-cell")[1];
+        const ttlTd = tr.querySelector("[data-columnid$='_c7_2']");
+        const txtTd = tr.querySelector("[data-columnid$='_c6_3']") || tr.querySelectorAll("td.x-grid-cell")[2];
+        const date = dtTd ? plainText(dtTd.textContent || "") : "";
+        const img = usrTd && usrTd.querySelector("img[title],img[alt],[title],[data-qtip]");
+        const author = (img && (img.getAttribute("title") || img.getAttribute("data-qtip") || img.getAttribute("alt"))) || (usrTd ? plainText(usrTd.textContent || "") : "");
+        const title = ttlTd ? plainText(ttlTd.textContent || "") : "";
+        const body = txtTd ? plainText(txtTd.innerHTML || txtTd.textContent || "") : "";
+        pushNote(author, date, title, body);
+      } catch { /* */ }
+    }
+    if (!messages.length && g && typeof g.getStore === "function") {
+      try {
+        const st = g.getStore();
+        for (const r of (st && st.getRange ? st.getRange() : [])) {
+          const d = (typeof r.getData === "function" ? r.getData() : r.data) || {};
+          pushNote(d.User || d.Author || d.CreatedBy || "", d.Date || d.CreatedDate || "", d.Title || d.Subject || "", d.Note || d.Text || d.Description || d.Body || "");
+        }
+      } catch { /* */ }
+    }
+    return messages;
+  }
+  // Estrae gli allegati da una griglia entity-attachment di Touch
+  function extractAttachmentGrid(g, domEl) {
+    const rows = [];
+    const seen = new Set();
+    const domRows = domEl ? [...domEl.querySelectorAll("tr.x-grid-row")] : [];
+    for (const tr of domRows) {
+      try {
+        const nameTd = tr.querySelector("[data-columnid$='_c2_1']") || tr.querySelectorAll("td.x-grid-cell")[1];
+        const dateTd = tr.querySelector("[data-columnid$='_c5_2']") || tr.querySelectorAll("td.x-grid-cell")[2];
+        const srcTd = tr.querySelector("[data-columnid$='_c3_3']") || tr.querySelectorAll("td.x-grid-cell")[3];
+        const qtipEl = nameTd && nameTd.querySelector("[data-qtip],[title]");
+        const name = plainText((qtipEl && (qtipEl.getAttribute("data-qtip") || qtipEl.getAttribute("title"))) || (nameTd && nameTd.textContent) || "");
+        const date = fmtMsgDate(dateTd ? dateTd.textContent : "");
+        const src = plainText(srcTd ? srcTd.textContent : "");
+        if (!name) continue;
+        const sig = `${norm(name)}|${date}`;
+        if (seen.has(sig)) continue;
+        seen.add(sig);
+        rows.push([name, date || "—", src || "—"]);
+      } catch { /* */ }
+    }
+    return rows;
+  }
+  // Etichette dei campi in italiano per evitare duplicati inglese/italiano nel riepilogo del ticket
+  const FIELD_LABEL_IT = {
+    "code": "Codice ticket",
+    "ticket code": "Codice ticket",
+    "subject": "Oggetto",
+    "service": "Servizio",
+    "ticket category": "Categoria ticket",
+    "status": "Stato",
+    "priority": "Priorità",
+    "classification": "Classificazione",
+    "customer classification": "Classificazione cliente",
+    "site": "Sede / Cliente",
+    "azienda / sede": "Sede / Cliente",
+    "contact": "Contatto",
+    "end customer": "Cliente finale",
+    "end customer contact": "Contatto cliente finale",
+    "assigned to": "Assegnato a",
+    "assigned": "Assegnato a",
+    "owner": "Responsabile",
+    "owner group": "Gruppo proprietario",
+    "modified by": "Modificato da",
+    "channel": "Canale",
+    "source": "Origine",
+    "work status": "Stato lavorazione",
+    "date": "Data apertura",
+  };
   // Contenuto leggibile di una pagina ExtJS o di un pannello di dettaglio Touch (root):
   // campi con etichetta, pannello destro (Overview/Contatto/SLA), ProblemHTML/SolutionHTML, storico conversazioni e tabelle
   function extractTicket(w, root) {
@@ -1648,11 +1840,14 @@
     };
     const seen = new Set();
     const seenField = new Map();
+    const seenTextByLabel = new Map();
+    const seenTextVal = new Set();
     const fmt = (v) => (isDate(v) ? `${fmtDate(isoOf(v))} ${pad(v.getHours())}:${pad(v.getMinutes())}` : v);
     const addField = (label, value, forceLong) => {
       label = plainText(label || "").replace(/:$/, "").trim();
+      if (label && !forceLong && FIELD_LABEL_IT[norm(label)]) label = FIELD_LABEL_IT[norm(label)];
       value = plainText(fmt(value));
-      if (!value || emptyJson(value) || value === "—" || value === "-") return;
+      if (!value || emptyJson(value) || value === "—" || value === "-" || /^loading\.{0,3}$/i.test(value)) return;
       const j = parseJsonValue(value);
       if (j) {
         if (!j.v && !j.t) return;
@@ -1670,9 +1865,24 @@
           return;
         }
       }
+      if (long) {
+        const nv = norm(value);
+        if (seenTextVal.has(nv)) return;
+        const lk = norm(label);
+        if (lk && seenTextByLabel.has(lk)) {
+          const prev = seenTextByLabel.get(lk);
+          if (value.length > prev.value.length) { prev.value = value.slice(0, 40000); seenTextVal.add(nv); }
+          return;
+        }
+        const item = { label, value: value.slice(0, 40000) };
+        out.texts.push(item);
+        seenTextVal.add(nv);
+        if (lk) seenTextByLabel.set(lk, item);
+        return;
+      }
       const item = { label, value: value.slice(0, 40000) };
-      if (long) out.texts.push(item);
-      else { out.fields.push(item); if (label) seenField.set(norm(label), item); }
+      out.fields.push(item);
+      if (label) seenField.set(norm(label), item);
     };
     // Titolo del dettaglio Touch (<TicketCode>: <Subject>)
     if (rootDom) {
@@ -1701,8 +1911,9 @@
         try {
           if (c.ownerCt && c.ownerCt.isXType && (c.ownerCt.isXType("checkboxgroup") || c.ownerCt.isXType("radiogroup"))) continue;
           if ((c.isXType && c.isXType("hiddenfield")) || c.inputType === "password" || (c.isHidden && c.isHidden())) continue;
-          // evita i campi filtro della barra di ricerca e il selettore Page size delle sotto-griglie
-          if (/filter_default_|defaultFilter_default_|ComboPageSize/i.test(c.id || "") || /ComboPageSize/i.test(c.name || "")) continue;
+          // evita i campi filtro della barra di ricerca, il selettore Page size e i campi HTML ricchi già estratti al punto 1
+          if (/filter_default_|defaultFilter_default_|ComboPageSize|_ProblemHTML$|_SolutionHTML$/i.test(c.id || "") || /ComboPageSize/i.test(c.name || "")) continue;
+          if (/\bhtml-field\b/i.test(clsOf(c)) || (c.el && c.el.dom && c.el.dom.closest(".html-field,[id$='_ProblemHTML'],[id$='_SolutionHTML']"))) continue;
           const label = plainText((typeof c.getFieldLabel === "function" ? c.getFieldLabel() : c.fieldLabel) || c.boxLabel || c.name || "").replace(/:$/, "");
           let v;
           if (c.isXType && (c.isXType("checkboxgroup") || c.isXType("radiogroup"))) v = (typeof c.getChecked === "function" ? c.getChecked() : []).map((b) => b.boxLabel || b.inputValue || "").filter(Boolean).join(", ");
@@ -1726,8 +1937,8 @@
     if (rootDom) {
       for (const fld of rootDom.querySelectorAll(".field,.x-field")) {
         try {
-          if (fld.classList.contains("html-field") || fld.classList.contains("filterField") || fld.classList.contains("page-size-field") || /filter_default_|defaultFilter_default_|ComboPageSize/i.test(fld.id || "")) continue;
-          if (fld.closest(".x-grid,.list-grid")) continue;
+          if (fld.classList.contains("html-field") || fld.classList.contains("filterField") || fld.classList.contains("page-size-field") || /filter_default_|defaultFilter_default_|ComboPageSize|_ProblemHTML$|_SolutionHTML$/i.test(fld.id || "")) continue;
+          if (fld.closest(".x-grid,.list-grid,.html-field,[id$='_ProblemHTML'],[id$='_SolutionHTML']")) continue;
           const lblEl = fld.querySelector(".field-label-inner,.x-form-item-label-inner,.x-form-item-label-text,label.field-label");
           const label = plainText((lblEl && lblEl.textContent) || "");
           if (!label) continue;
@@ -1747,7 +1958,7 @@
           if (val) addField(label, val, false);
         } catch { /* */ }
       }
-      // 4. Pannello destro di riepilogo Touch (RightCustomValues: ContactDetails0, TicketOverView2, ServiceLevels1, ClientNotesDetails)
+      // 4. Pannello destro di riepilogo Touch (RightCustomValues: ContactDetails0, TicketOverView2, ServiceLevels1)
       for (const box of rootDom.querySelectorAll("[id$='_TicketOverView2'],.ticket-overview")) {
         for (const n of box.querySelectorAll("[data-qtip]")) {
           const tip = plainText(n.getAttribute("data-qtip") || "");
@@ -1760,7 +1971,7 @@
         const company = plainText((box.querySelector(".contact-main-info-company") || {}).textContent || "");
         const block = plainText((box.querySelector(".HighlightBlock") || {}).textContent || "");
         if (name) addField("Contatto", name, false);
-        if (company) addField("Azienda / Sede", company, false);
+        if (company) addField("Sede / Cliente", company, false);
         if (block) addField("Stato amministrativo cliente", block, false);
         for (const item of box.querySelectorAll(".contact-other-info-item")) {
           const v = plainText(item.textContent || "");
@@ -1775,12 +1986,8 @@
         const parts = [...box.querySelectorAll(".sla-title,.sla-type,.sla-info-item")].map((n) => plainText(n.textContent)).filter(Boolean);
         if (parts.length) addField("SLA", parts.join(" · "), false);
       }
-      for (const box of rootDom.querySelectorAll("[id$='_ClientNotesDetails']")) {
-        const v = plainText(box.textContent || "");
-        if (v) addField("Note sul cliente", v, false);
-      }
     }
-    // 5. Griglie e tabelle (Storico conversazioni, Comunicazioni, Note interne, Allegati, Log...)
+    // 5. Griglie e tabelle (Storico conversazioni, Comunicazioni, Note interne, Note sul cliente, Allegati, Log...)
     const handledGrids = new Set();
     if (X && X.ComponentQuery) {
       for (const g of q("tablepanel")) {
@@ -1789,13 +1996,23 @@
           if (!root && S.modules && S.modules.some((m) => m.grid === g)) continue;
           const gDom = g.el && g.el.dom;
           if (gDom) handledGrids.add(gDom);
-          const cls = `${g.cls || ""} ${g.userCls || ""} ${(gDom && gDom.className) || ""}`;
+          const listCt = gDom && gDom.closest(".module.list,[id$='_UC_ListCt']");
+          const cls = `${g.cls || ""} ${g.userCls || ""} ${(gDom && gDom.className) || ""} ${(listCt && listCt.className) || ""}`;
           const rawTitle = plainText(g.title || (g.tab && g.tab.text) || (g.up && g.up("panel[title]") && g.up("panel[title]").title) || "");
-          if (/entity-ticketconversationitem/i.test(cls)) {
+          if (/entity-ticketconversationitem/i.test(cls) || (gDom && gDom.closest("[id$='_ConversationHistory']"))) {
             const secTitle = rawTitle || (gDom && gDom.closest("[id$='_ConversationHistory']") ? "Storico conversazioni" : "Conversazioni");
             const conv = extractConversationGrid(g, gDom, secTitle);
             for (const m of conv.messages) out.messages.push(m);
-            if (conv.rows.length) out.tables.push({ title: secTitle, head: ["Tipo", "Utente e data", "Messaggio"], rows: conv.rows });
+            continue;
+          }
+          if (/entity-note/i.test(cls) || (gDom && gDom.closest("[id$='_AccountNotes']"))) {
+            const secTitle = rawTitle || (gDom && gDom.closest("[id$='_AccountNotes']") ? "Note sul cliente" : "Note interne");
+            for (const m of extractNoteGrid(g, gDom, secTitle)) out.messages.push(m);
+            continue;
+          }
+          if (/entity-attachment/i.test(cls)) {
+            const attRows = extractAttachmentGrid(g, gDom);
+            if (attRows.length) out.tables.push({ title: "Allegati", head: ["File", "Data", "Origine"], rows: attRows });
             continue;
           }
           const st = g.getStore && g.getStore();
@@ -1822,14 +2039,26 @@
         } catch { /* */ }
       }
     }
-    // Griglie di conversazione o tabelle presenti nel DOM ma non lette via ExtJS
+    // Griglie di conversazione, note o allegati presenti nel DOM ma non lette via ExtJS
     if (rootDom) {
-      for (const gDom of rootDom.querySelectorAll(".entity-ticketconversationitem.x-grid")) {
+      for (const gDom of rootDom.querySelectorAll(".entity-ticketconversationitem .x-grid, .entity-ticketconversationitem.x-grid, [id$='_ConversationHistory'] .x-grid")) {
         if (handledGrids.has(gDom)) continue;
+        handledGrids.add(gDom);
         const secTitle = gDom.closest("[id$='_ConversationHistory']") ? "Storico conversazioni" : "Conversazioni";
         const conv = extractConversationGrid(X && gDom.id ? X.getCmp(gDom.id) : null, gDom, secTitle);
         for (const m of conv.messages) out.messages.push(m);
-        if (conv.rows.length) out.tables.push({ title: secTitle, head: ["Tipo", "Utente e data", "Messaggio"], rows: conv.rows });
+      }
+      for (const gDom of rootDom.querySelectorAll(".entity-note .x-grid, .entity-note.x-grid, [id$='_AccountNotes'] .x-grid")) {
+        if (handledGrids.has(gDom)) continue;
+        handledGrids.add(gDom);
+        const secTitle = gDom.closest("[id$='_AccountNotes']") ? "Note sul cliente" : "Note interne";
+        for (const m of extractNoteGrid(X && gDom.id ? X.getCmp(gDom.id) : null, gDom, secTitle)) out.messages.push(m);
+      }
+      for (const gDom of rootDom.querySelectorAll(".entity-attachment .x-grid, .entity-attachment.x-grid")) {
+        if (handledGrids.has(gDom)) continue;
+        handledGrids.add(gDom);
+        const attRows = extractAttachmentGrid(X && gDom.id ? X.getCmp(gDom.id) : null, gDom);
+        if (attRows.length) out.tables.push({ title: "Allegati", head: ["File", "Data", "Origine"], rows: attRows });
       }
     }
     if (X && X.ComponentQuery) {
@@ -1850,10 +2079,10 @@
           if (!(ic.html || ic.tpl || ic.contentEl || typeof c.html === "string") || (c.items && c.items.getCount && c.items.getCount())) continue;
           if (c.isXType && ["htmleditor", "tablepanel", "menu", "toolbar", "tabbar", "boundlist", "field"].some((x) => c.isXType(x))) continue;
           const el = c.rendered ? (c.body || (typeof c.getTargetEl === "function" ? c.getTargetEl() : null) || c.el) : null;
-          if (el && el.dom && el.dom.closest("[id$='_RightCustomValues']")) continue;
-          const raw = el && el.dom ? el.dom.innerText : typeof c.html === "string" ? c.html : "";
+          if (el && el.dom && el.dom.closest("[id$='_RightCustomValues'],[id$='_MajorIncidentDetails'],[id$='_ClientNotesDetails'],.analysis-ct,.x-mask")) continue;
+          const raw = el && el.dom ? el.dom.innerHTML || el.dom.innerText : typeof c.html === "string" ? c.html : "";
           const v = plainText(raw);
-          if (v.length > 30 && !seen.has(v)) { seen.add(v); out.texts.push({ label: plainText(c.title || ""), value: v.slice(0, 20000) }); }
+          if (v.length > 30 && !/^loading\.{0,3}$/i.test(v) && !seen.has(v)) { seen.add(v); addField(plainText(c.title || ""), v, true); }
         } catch { /* */ }
       }
     }
@@ -1868,19 +2097,31 @@
     if (!src) return target;
     if (!target.title && src.title) target.title = src.title;
     const fSeen = new Set(target.fields.map((x) => `${norm(x.label)}\u0001${norm(x.value)}`));
+    const fLabelSeen = new Set(target.fields.map((x) => norm(x.label)).filter(Boolean));
     for (const f of src.fields || []) {
       const k = `${norm(f.label)}\u0001${norm(f.value)}`;
-      if (!fSeen.has(k)) { fSeen.add(k); target.fields.push(f); }
+      const lk = norm(f.label);
+      if (!fSeen.has(k) && (!lk || !fLabelSeen.has(lk))) {
+        fSeen.add(k);
+        if (lk) fLabelSeen.add(lk);
+        target.fields.push(f);
+      }
     }
     const tSeen = new Set(target.texts.map((x) => `${norm(x.label)}\u0001${norm(x.value)}`));
+    const tValSeen = new Set(target.texts.map((x) => norm(x.value)));
     for (const x of src.texts || []) {
       const lbl = x.label || sectionLabel || "";
       const k = `${norm(lbl)}\u0001${norm(x.value)}`;
-      if (!tSeen.has(k)) { tSeen.add(k); target.texts.push({ label: lbl, value: x.value }); }
+      const nv = norm(x.value);
+      if (!tSeen.has(k) && !tValSeen.has(nv)) {
+        tSeen.add(k);
+        tValSeen.add(nv);
+        target.texts.push({ label: lbl, value: x.value });
+      }
     }
-    const mSeen = new Set((target.messages || []).map((m) => `${m.type}|${m.date}|${m.author}|${(m.text || "").slice(0, 120)}`));
+    const mSeen = new Set((target.messages || []).map((m) => `${norm(m.kind || m.type)}|${m.date}|${norm(m.who || m.author)}|${norm(m.body || m.text || "").slice(0, 120)}`));
     for (const m of src.messages || []) {
-      const k = `${m.type}|${m.date}|${m.author}|${(m.text || "").slice(0, 120)}`;
+      const k = `${norm(m.kind || m.type)}|${m.date}|${norm(m.who || m.author)}|${norm(m.body || m.text || "").slice(0, 120)}`;
       if (!mSeen.has(k)) { mSeen.add(k); target.messages.push(m); }
     }
     const tbSeen = new Set((target.tables || []).map((tb) => `${tb.title}|${tb.rows.length}|${(tb.rows[0] || []).join(",")}`));
@@ -1891,6 +2132,13 @@
     }
     return target;
   }
+  const cleanTreeLabel = (rawHtml) => {
+    const s = String(rawHtml || "");
+    if (!s) return "";
+    const d = new DOMParser().parseFromString(`<body>${s}</body>`, "text/html");
+    d.body.querySelectorAll(".badge").forEach((b) => b.remove());
+    return plainText(d.body.textContent || "").replace(/^\d+\s*/, "").replace(/\s+\d+$/, "").trim();
+  };
   // Naviga l'albero laterale del dettaglio Touch (<prefix>_UC_PagesTree: Ticket, Storico conversazioni,
   // Internal notes, Attachments, Log, History Email...) per caricare tutte le sezioni della storia del ticket
   async function loadDetailHistory(w, detail, t, signal) {
@@ -1909,9 +2157,9 @@
       const root = st && st.getRootNode && st.getRootNode();
       const walk = (n) => {
         for (const c of (n && n.childNodes) || []) {
-          const text = plainText(String(c.get("text") || "")).replace(/\s+\d+$/, "").trim();
           const rawHtml = String(c.get("text") || "");
-          const bm = /class=["']badge["'][^>]*>\s*(\d+)/i.exec(rawHtml);
+          const text = cleanTreeLabel(rawHtml);
+          const bm = /class=["'][^"']*badge[^"']*["'][^>]*>\s*(\d+)/i.exec(rawHtml);
           let badge = bm ? +bm[1] : 0;
           if (!badge && treeDom) {
             const item = treeDom.querySelector(`[data-recordid="${cssEsc(String(c.internalId ?? c.getId()))}"] .badge`);
@@ -1929,7 +2177,7 @@
         const badge = badgeEl ? parseInt(badgeEl.textContent, 10) || 0 : 0;
         const clone = item.cloneNode(true);
         clone.querySelectorAll(".badge").forEach((b) => b.remove());
-        const text = plainText(clone.textContent || "");
+        const text = plainText(clone.textContent || "").replace(/^\d+\s*/, "").trim();
         nodes.push({ rec: null, domItem: item, id: item.getAttribute("data-recordid") || text, text, badge });
       }
     }
@@ -1944,7 +2192,7 @@
     };
     const selModel = tree.getSelectionModel && tree.getSelectionModel();
     const initialRec = selModel && selModel.getSelection && selModel.getSelection()[0];
-    const initialText = initialRec ? plainText(String(initialRec.get("text") || "")).replace(/\s+\d+$/, "").trim() : "";
+    const initialText = initialRec ? cleanTreeLabel(initialRec.get("text") || "") : "";
     const selectNode = async (n) => {
       const was = !!(w.document.body && w.document.body.inert);
       if (w.document.body) w.document.body.inert = false;
@@ -1958,11 +2206,30 @@
           if (view && typeof view.fireEvent === "function") view.fireEvent("itemclick", view, n.rec, rowEl, 0);
         }
       } catch { /* */ } finally { if (w.document.body) w.document.body.inert = was; }
-      await sleep(120);
-      const activeCard = (cards && cards.getLayout && cards.getLayout().getActiveItem && cards.getLayout().getActiveItem()) || detail.cmp;
+      await sleep(160);
+      const getCard = () => (cards && cards.getLayout && cards.getLayout().getActiveItem && cards.getLayout().getActiveItem()) || detail.cmp;
+      const activeCard = getCard();
       const cardDom = (activeCard && activeCard.el && activeCard.el.dom) || dom;
       await waitDetailReady(w, cardDom, signal, 8000);
-      return activeCard || { el: { dom: cardDom } };
+      if (n.badge > 0) {
+        await waitUntil(() => {
+          const ac = getCard();
+          const cd = (ac && ac.el && ac.el.dom) || cardDom;
+          try {
+            if (ac && typeof ac.getLoader === "function" && ac.getLoader() && ac.getLoader().isLoading && ac.getLoader().isLoading()) return false;
+            if (ac && typeof ac.query === "function") {
+              for (const g of ac.query("tablepanel")) {
+                const st = g.getStore && g.getStore();
+                if (st && loading(st)) return false;
+                if (st && typeof st.getCount === "function" && st.getCount() > 0) return true;
+              }
+            }
+          } catch { /* */ }
+          return !!(cd && cd.querySelectorAll("tr.x-grid-row").length > 0);
+        }, 5000, signal);
+      }
+      const finalCard = getCard();
+      return finalCard || { el: { dom: cardDom } };
     };
     for (const n of nodes) {
       if (!wantNode(n)) continue;
@@ -1971,6 +2238,8 @@
       const activeCard = await selectNode(n);
       mergeExtracted(out, extractTicket(w, activeCard), n.text);
     }
+    // Estrae anche eventuali griglie/schede caricate dentro l'intero contenitore del dettaglio
+    mergeExtracted(out, extractTicket(w, detail.cmp || { el: { dom } }));
     // Ripristina il nodo iniziale (es. Ticket)
     if (initialRec) {
       const initNode = nodes.find((n) => n.rec === initialRec);
@@ -2382,8 +2651,24 @@ dialog{border:1px solid var(--bd2);border-radius:12px;padding:20px;width:min(480
   function renderToggles() {
     const m = currentModule();
     renderPeople(m);
+    const loadComboOnce = (suffix) => {
+      if (!m) return;
+      const f = m.field(suffix);
+      const key = `${m.key}:${suffix}`;
+      if (!f || listLoaded.has(key)) return;
+      try {
+        const st = typeof f.getStore === "function" ? f.getStore() : f.store;
+        const px = st && typeof st.getProxy === "function" ? st.getProxy() : null;
+        if (px && !px.isMemoryProxy && !loading(st)) {
+          listLoaded.add(key);
+          st.load({ callback: () => renderToggles() });
+        }
+      } catch { /* */ }
+    };
     const stOpts = m ? comboOptions(m.field("StatusFilter")) : [];
     const prOpts = m ? comboOptions(m.field("PriorityFilter")) : [];
+    if (m && !stOpts.length) loadComboOnce("StatusFilter");
+    if (m && !prOpts.length) loadComboOnce("PriorityFilter");
     S.stOpts = stOpts;
     const stl = clear($("#st-list"));
     for (const [v, t] of stOpts) stl.appendChild(h("button", { type: "button", "aria-pressed": String(S.stCodes.has(v)), "data-v": v, onclick: (e) => { if (S.stCodes.has(v)) S.stCodes.delete(v); else S.stCodes.add(v); e.currentTarget.setAttribute("aria-pressed", String(S.stCodes.has(v))); onFormChange(); } }, t));
@@ -2410,8 +2695,9 @@ dialog{border:1px solid var(--bd2);border-radius:12px;padding:20px;width:min(480
   }
   function afterPf() { renderFilters(currentModule()); previewNow(); advCount(); }
   const PF_GROUP_LABELS = {
-    client: "Servizio, sede, cliente e catalogo",
-    extra: "Canale, origine, sollecito e stato lavorazione",
+    client: "Servizio, centro servizi, sede e cliente",
+    class: "Categoria, classificazione e tipo oggetto",
+    extra: "Tag, canale, origine, sollecito e lavorazione",
     other: "Altri filtri del portale",
   };
   function renderFilters(m) {
@@ -2678,25 +2964,36 @@ dialog{border:1px solid var(--bd2);border-radius:12px;padding:20px;width:min(480
     return wrap;
   }
   async function queryField(f, q) {
-    const st = f.getStore();
+    const st = typeof f.getStore === "function" ? f.getStore() : f.store;
+    if (!st) return [];
     const vf = f.valueField || "value", df = f.displayField || "text";
-    const map = (r) => ({ r, v: String(r.get(vf) ?? ""), t: textOf(String(r.get(df) ?? r.get(vf) ?? "")) });
+    const map = (r) => {
+      const d = (r && (typeof r.getData === "function" ? r.getData() : r.data)) || {};
+      const vRaw = (r && typeof r.get === "function" ? r.get(vf) : undefined) ?? d[vf] ?? d.value ?? d.Value ?? d.ID ?? d.Id ?? d.id ?? d.Code ?? "";
+      const tRaw = (r && typeof r.get === "function" ? r.get(df) : undefined) ?? d[df] ?? d.text ?? d.Text ?? d.Description ?? d.Name ?? d.ObjectDescription ?? vRaw;
+      return { r, v: String(vRaw ?? ""), t: textOf(String(tRaw ?? "")) };
+    };
     if (f.queryMode === "local") { const n = norm(q); return st.getRange().map(map).filter((x) => x.v && norm(x.t).includes(n)); }
     // richiesta a parte con il proxy del campo: non apre il menu e non ricarica l'elenco del campo (che con
-    // forceSelection cancellerebbe il valore già scelto)
+    // forceSelection cancellerebbe il valore già scelto). Se però il proxy non restituisce voci (es. PageProxy di
+    // Ext.Net che richiede l'evento beforequery del campo), passiamo sotto a f.doQuery.
     try {
-      const px = st.getProxy();
+      const px = typeof st.getProxy === "function" ? st.getProxy() : null;
       if (px && typeof px.createOperation === "function") {
         const recs = await new Promise((res, rej) => {
-          const to = setTimeout(() => rej(new Error("timeout")), 10000);
+          const to = setTimeout(() => rej(new Error("timeout")), 8000);
           const op = px.createOperation("read", { params: Object.assign({}, st.lastOptions && st.lastOptions.params, { [f.queryParam || "query"]: q }), page: 1, start: 0, limit: 50,
             callback: (records, o, ok) => { clearTimeout(to); if (ok === false) rej(new Error("errore")); else res(records || []); } });
           op.execute();
         });
-        activity(true);
-        return recs.map(map).filter((x) => x.v);
+        const mapped = recs.map(map).filter((x) => x.v);
+        if (mapped.length) {
+          activity(true);
+          return mapped;
+        }
       }
     } catch { /* sotto: con il campo stesso */ }
+    const prev = personValue(f);
     let loaded = false;
     const on = () => { loaded = true; };
     st.on("load", on);
@@ -2704,19 +3001,28 @@ dialog{border:1px solid var(--bd2);border-radius:12px;padding:20px;width:min(480
     try {
       if (document.body) document.body.inert = false;
       f.lastQuery = null;
-      f.doQuery(q, true, true);
+      if (f.inputEl && f.inputEl.dom) f.inputEl.dom.value = q;
+      f.doQuery(q, false, true);
     } catch { try { st.load({ params: { [f.queryParam || "query"]: q } }); } catch { /* */ } } finally { if (document.body) document.body.inert = was; }
     await waitUntil(() => loaded && !loading(st), 8000);
     st.un("load", on);
+    const out = st.getRange().map(map).filter((x) => x.v);
     try { if (typeof f.collapse === "function") f.collapse(); } catch { /* */ }
+    if (prev && !personValue(f)) { try { setPerson(f, prev); } catch { /* */ } }
     activity(true);
-    return st.getRange().map(map).filter((x) => x.v);
+    return out;
   }
   function pickRecord(f, r) {
     try {
+      const vf = f.valueField || "value", df = f.displayField || "text";
+      const code = String((r && typeof r.get === "function" ? r.get(vf) : (r && r.data && r.data[vf])) ?? "");
+      const label = textOf(String((r && typeof r.get === "function" ? r.get(df) : (r && r.data && r.data[df])) ?? code));
       f.setValue(r);
-      try { f.fireEvent("select", f, r); } catch { /* */ }
-      return scalarValue(f, f.getValue()) === String(r.get(f.valueField || "value"));
+      syncHiddenJson(f, code, label);
+      try { if (typeof f.checkChange === "function") f.checkChange(); } catch { /* */ }
+      try { if (typeof f.fireEvent === "function") f.fireEvent("select", f, r); } catch { /* */ }
+      if (scalarValue(f, f.getValue()) === code) return true;
+      return setPerson(f, { v: code, t: label });
     } catch { return false; }
   }
   // Scelta con il menu del portale: il pannello si nasconde e si riapre dopo la scelta.
@@ -2999,8 +3305,8 @@ dialog{border:1px solid var(--bd2);border-radius:12px;padding:20px;width:min(480
     if (s.classcli) p.push(`Classif. cliente ~ "${s.classcli}"`);
     for (const [suffix, label] of PEOPLE) { const v = s.people && s.people[suffix]; if (v) p.push(`${label.replace(/ \(.*$/, "")} = ${v.t || v.v}`); }
     if (s.pf && typeof s.pf === "object") {
-      const labels = m ? new Map(pfFields(m).map((x) => [x.suffix, x.label])) : new Map();
-      for (const [suffix, v] of Object.entries(s.pf)) if (v && v.v !== undefined) p.push(`${labels.get(suffix) || suffix} = ${v.t || (Array.isArray(v.v) ? v.v.join(", ") : v.v)}`);
+      const labels = m ? new Map(pfFields(m).map((x) => [x.suffix, x.short || x.label])) : new Map();
+      for (const [suffix, v] of Object.entries(s.pf)) if (v && v.v !== undefined) p.push(`${labels.get(suffix) || (PF_META[suffix] && (PF_META[suffix].short || PF_META[suffix].label)) || suffix} = ${v.t || (Array.isArray(v.v) ? v.v.join(", ") : v.v)}`);
     }
     if (s.exclude) p.push(`poi senza: ${s.exclude}`);
     return p.join(" · ");
@@ -3304,6 +3610,27 @@ dialog{border:1px solid var(--bd2);border-radius:12px;padding:20px;width:min(480
         preview(); return;
       }
     }
+    if (!wanted && m) {
+      // Se l'utente ha scritto del testo in un filtro con ricerca sul server (es. Servizio o Sede) senza premere
+      // Invio né cliccare un suggerimento prima di premere «Cerca», selezioniamo automaticamente la prima voce trovata
+      for (const inp of $$("input[data-pfq]")) {
+        const q = (inp.value || "").trim();
+        const suffix = inp.getAttribute("data-pfq");
+        if (q.length < 2 || !suffix) continue;
+        const f = m.field(suffix);
+        if (!f || personValue(f)) continue;
+        try {
+          const list = await queryField(f, q);
+          if (list && list.length) {
+            const it = list[0];
+            ensureSnapshot(m);
+            if (it.r) pickRecord(f, it.r); else setPerson(f, { v: it.v, t: it.t });
+            inp.value = "";
+          }
+        } catch { /* */ }
+      }
+      renderFilters(m);
+    }
     const s = spec();
     if (wanted && wanted.people && typeof wanted.people === "object") s.people = JSON.parse(JSON.stringify(wanted.people));
     if (wanted && wanted.pf && typeof wanted.pf === "object") s.pf = JSON.parse(JSON.stringify(wanted.pf));
@@ -3536,21 +3863,30 @@ dialog{border:1px solid var(--bd2);border-radius:12px;padding:20px;width:min(480
       ["Assegnato a", t.assigned], ["Gruppo", t.group], ["Responsabile", t.owner], ["Modificato da", t.modifiers]].filter(([, v]) => v);
     return items.length ? h("dl", { class: "rdf" }, items.map(([k, v]) => [h("dt", null, k), h("dd", null, v)])) : null;
   }
-  const isInternalMsg = (m) => /nota interna|internal note/i.test(String((m && m.kind) || ""));
+  const isInternalMsg = (m) => !!(m && (m.internal || /nota interna|internal note|nota sul cliente|notes on customer/i.test(String(m.kind || m.type || ""))));
   function renderRead(box, c, t) {
     const words = S.words;
     const texts = Array.isArray(c.texts) ? c.texts : [];
     const msgs = Array.isArray(c.messages) ? c.messages : [];
     const usedIdx = new Set();
-    const reqIdx = texts.findIndex((x) => /^(richiesta|issue|request|problem|descrizione)/i.test(x.label || ""));
-    const solIdx = texts.findIndex((x) => /^(soluzione|resolution|solution|risoluzione)/i.test(x.label || ""));
+    const isReqLabel = (lbl) => /^(richiesta|issue|request|problem|descrizione)/i.test(lbl || "");
+    const isSolLabel = (lbl) => /^(soluzione|resolution|solution|risoluzione)/i.test(lbl || "");
+    const reqIdx = texts.findIndex((x) => isReqLabel(x.label));
+    const solIdx = texts.findIndex((x) => isSolLabel(x.label));
     if (reqIdx >= 0) usedIdx.add(reqIdx);
     if (solIdx >= 0) usedIdx.add(solIdx);
-    const earliestReqMsg = !reqIdx && reqIdx < 0 && msgs.length ? [...msgs].reverse().find((m) => !isInternalMsg(m) && m.body) : null;
-    const reqVal = (reqIdx >= 0 ? texts[reqIdx].value : "") || (t && t.preview) || (earliestReqMsg ? earliestReqMsg.body : "");
+    const earliestReqMsg = reqIdx < 0 && msgs.length ? [...msgs].reverse().find((m) => !isInternalMsg(m) && (m.body || m.text)) : null;
+    const reqVal = (reqIdx >= 0 ? texts[reqIdx].value : "") || (t && t.preview) || (earliestReqMsg ? (earliestReqMsg.body || earliestReqMsg.text) : "");
     const reqLbl = (reqIdx >= 0 && texts[reqIdx].label) || "Richiesta (Issue/Request)";
     const solVal = (solIdx >= 0 ? texts[solIdx].value : "") || (t && t.resolution) || "";
     const solLbl = (solIdx >= 0 && texts[solIdx].label) || "Soluzione (Resolution)";
+    const normReq = norm(reqVal);
+    const normSol = norm(solVal);
+    texts.forEach((x, i) => {
+      if (isReqLabel(x.label) || isSolLabel(x.label)) usedIdx.add(i);
+      const nv = norm(x.value);
+      if (nv && (nv === normReq || nv === normSol)) usedIdx.add(i);
+    });
     if (reqVal || solVal) {
       const grid = h("div", { class: "rd-grid" });
       if (reqVal) grid.appendChild(h("section", { class: "rd-box req" }, h("h4", null, reqLbl), h("div", { class: "pre" }, hl(reqVal, words))));
@@ -3573,13 +3909,16 @@ dialog{border:1px solid var(--bd2);border-radius:12px;padding:20px;width:min(480
         const shown = msgs.filter((m) => mode === "all" || (mode === "int" ? isInternalMsg(m) : !isInternalMsg(m)));
         for (const m of shown) {
           const isInt = isInternalMsg(m);
+          const kind = m.kind || m.type || (isInt ? "Nota interna" : "Messaggio");
+          const who = m.who || m.author || "";
+          const body = m.body || m.text || "";
           listEl.appendChild(h("article", { class: "tl-item" + (isInt ? " note-int" : "") },
             h("div", { class: "tl-hd" },
-              h("span", { class: "badge" + (isInt ? " src" : "") }, m.kind || "Messaggio"),
-              m.who ? h("b", null, hl(m.who, words)) : null,
+              h("span", { class: "badge" + (isInt ? " src" : "") }, kind),
+              who ? h("b", null, hl(who, words)) : null,
               m.date ? h("span", { class: "mu" }, m.date) : null,
               m.hasAttachment ? h("span", { class: "pill" }, "📎 Allegato") : null),
-            h("div", { class: "tl-bd" }, hl(m.body || "", words))));
+            h("div", { class: "tl-bd" }, hl(body, words))));
         }
       };
       drawMsgs();
@@ -3605,7 +3944,7 @@ dialog{border:1px solid var(--bd2);border-radius:12px;padding:20px;width:min(480
       for (const x of c.texts || []) out.push("", x.label ? `${x.label}:` : "", x.value);
       if (c.messages && c.messages.length) {
         out.push("", "Storico conversazioni:");
-        for (const m of c.messages) out.push(`[${[m.date, m.kind, m.who].filter(Boolean).join(" · ")}]`, m.body || "");
+        for (const m of c.messages) out.push(`[${[m.date, m.kind || m.type, m.who || m.author].filter(Boolean).join(" · ")}]`, m.body || m.text || "");
       }
       for (const tb of c.tables || []) { out.push("", `${tb.title || "Elenco"}:`, tb.head.join(" | ")); for (const r of tb.rows) out.push(r.join(" | ")); }
     }
