@@ -31,8 +31,12 @@ async function clickBookmarklet(page) {
   await page.evaluate(() => { const a = document.getElementById("__bm"); if (a) a.remove(); });
   await page.locator("#q").waitFor({ state: "visible", timeout: 5000 }).catch(() => {});
 }
-const log = async (page) => (await (await page.request.get(BASE + "/__log")).json());
-const resetLog = (page) => page.request.post(BASE + "/__reset");
+// registro delle richieste di questa prova soltanto (più prove possono usare lo stesso finto portale)
+const RUN = `${process.pid}-${Date.now()}`;
+const log = async (page) => (await (await page.request.get(`${BASE}/__log?run=${RUN}`)).json());
+const resetLog = (page) => page.request.post(`${BASE}/__reset?run=${RUN}`);
+const sh = (page, fn, arg) => page.evaluate(fn, arg);
+const P0 = "id0a9c7e5b3d1f2468_UC_";
 const lastList = (l) => [...l].reverse().find((x) => x.params) || {};
 const fval = (entry, name) => ((entry.filters || []).find((f) => f.name === name) || {}).value;
 async function waitDone(page) {
@@ -52,7 +56,8 @@ const isOpen = async (page) => host(page).evaluate((e) => e.style.display !== "n
 
 (async () => {
   const browser = await chromium.launch();
-  const ctx = await browser.newContext({ viewport: { width: 1400, height: 950 }, acceptDownloads: true });
+  const ctxOpts = { viewport: { width: 1400, height: 950 }, acceptDownloads: true, extraHTTPHeaders: { "x-e2e-run": RUN } };
+  const ctx = await browser.newContext(ctxOpts);
   await ctx.grantPermissions(["clipboard-read", "clipboard-write"], { origin: BASE });
   const page = await ctx.newPage();
   const errors = [];
@@ -266,6 +271,14 @@ const isOpen = async (page) => host(page).evaluate((e) => e.style.display !== "n
   await waitDone(page);
   const ydates = await page.locator("#list .res time").allInnerTexts();
   check(ydates.length > 0 && ydates.every((d) => d.slice(6, 10) === year2) && (await page.locator("#years").isVisible()), `ricerca nel ${year2} con un clic, il riepilogo per anno resta`);
+  // un altro anno dallo stesso riepilogo: il periodo è quello del nuovo anno (non incrociato con il precedente)
+  const year4 = await page.locator("#years .yr").nth(4).locator("b").innerText();
+  await resetLog(page);
+  await page.locator("#years .yr").nth(4).locator("button").click();
+  await waitDone(page);
+  const y4dates = await page.locator("#list .res time").allInnerTexts();
+  const y4req = (lastList(await log(page)).filters || []).filter((f) => f.name === "Date").map((f) => `${f.op}:${f.value}`).sort().join(" ");
+  check(y4dates.length > 0 && y4dates.every((d) => d.slice(6, 10) === year4) && y4req === `ge:${year4}-01-01 le:${year4}-12-31` && (await page.inputValue("#q")) === "cedolino", `secondo anno dallo stesso riepilogo (${year4}: ${y4req})`);
   await page.click("#qreset");
 
   // gruppi e persone: ricerca del nome nel portale (Modified by) e scelta dal menu del portale (Assigned to)
@@ -327,8 +340,25 @@ const isOpen = async (page) => host(page).evaluate((e) => e.style.display !== "n
   const finds = (await log(page)).filter((x) => x.find).map((x) => x.find);
   check(finds.includes(favCode) && await page.evaluate((c) => window.__opened.includes(c) && !Ext.Msg.isVisible(), favCode), `preferito aperto con Find by ID, compilato e confermato (${finds})`);
 
-  // dati tecnici: struttura dell'elenco, richieste, niente token né dati dei clienti
+  // Find by ID con un'altra finestra del portale aperta (Change status...): non scrive e non conferma in quella
+  await sh(page, () => {
+    window.__opened = []; window.__changed = null;
+    Ext.create("Ext.window.Window", { id: "chgwin", title: "Change status", modal: true, width: 420, items: [{ xtype: "textareafield", itemId: "note", fieldLabel: "Note" }],
+      buttons: [{ text: "OK", handler: function () { window.__changed = this.up("window").down("#note").getValue(); this.up("window").close(); } }] }).show();
+  });
   await clickBookmarklet(page);
+  await page.click('#nav button[data-tab="favorites"]');
+  await page.locator("#favs .res button", { hasText: "Apri" }).click();
+  await page.waitForTimeout(1500);
+  const cw = await sh(page, (c) => ({ changed: window.__changed, opened: window.__opened.includes(c), open: !!Ext.getCmp("chgwin") && Ext.getCmp("chgwin").isVisible() }), favCode);
+  check(cw.changed === null && cw.opened && cw.open, `Find by ID non tocca un'altra finestra aperta (${JSON.stringify(cw)})`);
+  await sh(page, () => { Ext.getCmp("chgwin").destroy(); });
+
+  // dati tecnici: struttura dell'elenco, richieste, niente token né dati dei clienti
+  await sh(page, () => { Ext.Ajax.request({ url: "/HDAPortal/Account/Save", params: { Note: "ZZ_998877" }, failure() {} }); }); // a pannello chiuso
+  await clickBookmarklet(page);
+  await sh(page, () => { Ext.Ajax.request({ url: "/HDAPortal/Account/Save", params: { Login: "utente.prova", Phone: "3471234567", VatNumber: "01234567890", Password: "Estate.2025" }, failure() {} }); });
+  await page.waitForTimeout(400);
   await page.click('#nav button[data-tab="settings"]');
   const info = await txt(page, "#conninfo");
   check(info.includes("ExtJS 6.2") && info.includes("Subject→subject") && info.includes("avvio automatico"), "stato del collegamento");
@@ -343,6 +373,8 @@ const isOpen = async (page) => host(page).evaluate((e) => e.style.display !== "n
   const sample = await (await page.request.get(BASE + "/__data?limit=3&q=detassazione")).json();
   const leaks = sample.data.flatMap((r) => [r.AccountName, r.ContactName, r.AssignedTo]).filter((x) => techRaw.includes(x));
   check(!techRaw.includes("tok-prova") && !techRaw.includes("SessionId") && leaks.length === 0, `dati tecnici senza token, cookie e nomi ${leaks.length ? JSON.stringify(leaks) : ""}`);
+  const secrets = ["ZZ_998877", "utente.prova", "3471234567", "01234567890", "Estate.2025"].filter((x) => techRaw.includes(x));
+  check(secrets.length === 0 && techRaw.includes("Account/Save"), `dati tecnici: credenziali e contatti mascherati, niente richieste a pannello chiuso ${secrets.length ? JSON.stringify(secrets) : ""}`);
   const titles = (tech.lists || []).map((x) => x.title).sort().join("|");
   check(titles === "All tickets|My Group Tickets|My tickets|Tickets from my groups" && tech.lists.filter((x) => x.all).length === 1, `elenchi riconosciuti dalle schede (${titles})`);
   check(tech.current.filters.some((f) => f.suffix === "ModifiedBy" && f.people && f.lookup && f.store) && tech.current.filters.some((f) => f.suffix === "AssignedUserOrGroupFilter" && f.people && !f.lookup), "dati tecnici: campi di gruppi e persone");
@@ -414,6 +446,18 @@ const isOpen = async (page) => host(page).evaluate((e) => e.style.display !== "n
   await clickBookmarklet(page);
   check((await txt(page, "#fav-count")) === "2", "preferiti conservati dopo il ricaricamento");
 
+  // ricerca salvata con una persona in una pagina nuova (elenco del campo mai caricato): si vede il nome, non il codice
+  await page.click('#nav button[data-tab="saved"]');
+  await resetLog(page);
+  await page.locator("#saved .li", { hasText: "Persona e gruppo" }).locator("button", { hasText: "Esegui" }).click();
+  await waitDone(page);
+  e = lastList(await log(page));
+  const hist0 = await sh(page, () => JSON.parse(localStorage.getItem("rtkt2:history"))[0]);
+  const rawWho = await sh(page, (P) => Ext.getCmp(P + "filter_default_ModifiedBy").getRawValue(), P0);
+  check(fval(e, "ModifiedBy") === whoCode && fval(e, "AssignedUserOrGroupID") === "G3" && (await txt(page, "#qprev")).includes(`Modificato da = ${who}`) && hist0.spec.people.ModifiedBy.t === who && rawWho === who,
+    `ricerca salvata con persona in una pagina nuova: nome mostrato e conservato (${rawWho}, ${hist0.spec.people.ModifiedBy.t})`);
+  await page.click("#qreset");
+
   // sessione scaduta
   await ctx.clearCookies();
   await search(page, "ferie");
@@ -441,6 +485,268 @@ const isOpen = async (page) => host(page).evaluate((e) => e.style.display !== "n
     check(le.list === "INC_ALLGRP_EXTENDED" && fval(le, "FullText") === "detassazione" && (await p.locator("#list .res").count()) === 50, "la scheda All tickets viene aperta dal segnalibro e la ricerca funziona");
     check(perr.length === 0, `nessun errore con la scheda creata dopo ${perr.length ? JSON.stringify(perr) : ""}`);
     await p.close();
+  }
+
+  const fresh = async (q, setup) => {
+    const p = await ctx.newPage();
+    p.__err = [];
+    p.on("pageerror", (x) => p.__err.push(x.message));
+    if (setup) await setup(p);
+    await portal(p, q);
+    await p.evaluate(() => localStorage.removeItem("rtkt2:settings"));
+    return p;
+  };
+  const advOpen = (p) => p.evaluate(() => { document.getElementById("ricerca-tkt-host").shadowRoot.querySelector("#adv").open = true; });
+  const restoreDone = async (p) => {
+    await p.waitForFunction(() => !document.getElementById("ricerca-tkt-host").shadowRoot.querySelector("#go").disabled);
+    await p.waitForTimeout(400);
+  };
+  const storeTotal = (p) => p.evaluate((P) => Ext.getCmp(P + "grd").getStore().getTotalCount(), P0);
+  const fixReq = (fn) => async (route) => {
+    const q = new URLSearchParams(route.request().postData() || "");
+    const r = await fn(q, route.request());
+    await route.continue(r === false ? undefined : { postData: q.toString() });
+  };
+
+  // ---- «Carica i successivi» dopo Ripristina, dopo aver sfogliato l'elenco nel portale e dopo il conteggio per anno
+  {
+    const p = await fresh("?apply=auto&tab=all");
+    await clickBookmarklet(p);
+    await search(p, "cedolino");
+    await p.click("#qrestore");
+    await restoreDone(p);
+    await resetLog(p);
+    await p.click("#more");
+    await waitDone(p);
+    let ll = await log(p);
+    let le = lastList(ll);
+    check(fval(le, "FullText") === "cedolino" && le.params.page === "2" && le.params.start === "200" && (await txt(p, "#sum")).startsWith("400"),
+      `dopo Ripristina «Carica i successivi» rimette la ricerca (${ll.map((x) => `${x.params.page}/${x.params.start}/${fval(x, "FullText")}`).join(" ")})`);
+    await p.waitForTimeout(300);
+    check(await p.locator("#qrestore").isVisible(), "e «Ripristina il portale» torna disponibile");
+    await p.keyboard.press("Escape");
+    await p.evaluate((P) => { Ext.getCmp(P + "grd").getStore().nextPage(); }, P0); // pagina 3 sfogliata nel portale
+    await p.waitForTimeout(1200);
+    await clickBookmarklet(p);
+    await resetLog(p);
+    await p.click("#more");
+    await waitDone(p);
+    le = lastList(await log(p));
+    check(le.params.page === "3" && le.params.start === "400" && (await txt(p, "#sum")).startsWith("600"), `pagina giusta anche dopo aver sfogliato l'elenco nel portale (${le.params.page}/${le.params.start})`);
+    await p.click("#yearsbtn");
+    await waitDone(p);
+    await resetLog(p);
+    await p.click("#more");
+    await waitDone(p);
+    le = lastList(await log(p));
+    check(le.params.page === "4" && le.params.start === "600" && fval(le, "FullText") === "cedolino" && (await txt(p, "#sum")).startsWith("800"), `dopo «Quanti per anno?» si continua dalla pagina giusta (${le.params.page}/${le.params.start})`);
+    // persona cambiata nel pannello dopo la ricerca: niente pagine di un'altra ricerca
+    await advOpen(p);
+    await p.fill('[data-ppl="ModifiedBy"]', "ro");
+    await p.locator("#ppl .sug button").first().waitFor({ timeout: 10000 });
+    await p.locator("#ppl .sug button").first().click();
+    await p.waitForTimeout(1500); // il portale (apply=auto) ricarica da solo
+    await resetLog(p);
+    const n0 = (await txt(p, "#sum")).split(" ")[0];
+    await p.click("#more");
+    await waitDone(p);
+    const nreq = (await log(p)).length;
+    check(nreq === 0 && (await txt(p, "#alert")).includes("premi «Cerca»") && (await txt(p, "#sum")).split(" ")[0] === n0, `persona cambiata dopo la ricerca: «Carica i successivi» non aggiunge un'altra ricerca (${nreq} richieste)`);
+    await p.click("#yearsbtn");
+    await waitDone(p);
+    check((await log(p)).length === 0, "e «Quanti per anno?» non conta un'altra ricerca");
+    check(p.__err.length === 0, `nessun errore ${p.__err.length ? JSON.stringify(p.__err) : ""}`);
+    await p.close();
+  }
+
+  // ---- gruppo e persona già impostati nel portale: «Ripristina il portale» li rimette (anche dopo Azzera e un'altra persona)
+  {
+    const p = await fresh("?apply=auto&tab=all");
+    const orig = await p.evaluate(async (P) => {
+      Ext.getCmp(P + "filter_default_AssignedUserOrGroupFilter").setValue("G3");
+      const f = Ext.getCmp(P + "filter_default_ModifiedBy"), st = f.getStore();
+      await new Promise((res) => { st.on("load", res, null, { single: true }); f.doQuery("ro", true, true); });
+      f.setValue(st.getAt(0)); f.collapse();
+      return { v: f.getValue(), t: f.getRawValue() };
+    }, P0);
+    await p.waitForTimeout(1200);
+    await clickBookmarklet(p);
+    await p.click("#qreset"); // toglie gruppo e persona dalla pagina prima della prima ricerca
+    await search(p, "cedolino");
+    await advOpen(p);
+    await p.fill('[data-ppl="ModifiedBy"]', "fontana");
+    await p.locator("#ppl .sug button").first().waitFor({ timeout: 10000 });
+    await p.locator("#ppl .sug button").first().click();
+    await search(p, "cedolino");
+    await resetLog(p);
+    await p.click("#qrestore");
+    await restoreDone(p);
+    const now = await p.evaluate((P) => { const f = Ext.getCmp(P + "filter_default_ModifiedBy"); return { v: f.getValue(), t: f.getRawValue(), a: Ext.getCmp(P + "filter_default_AssignedUserOrGroupFilter").getValue() }; }, P0);
+    const re = lastList(await log(p));
+    check(now.v === orig.v && now.t === orig.t && now.a === "G3" && fval(re, "ModifiedBy") === orig.v && fval(re, "AssignedUserOrGroupID") === "G3",
+      `Ripristina rimette gruppo e persona della pagina (${JSON.stringify(orig)} → ${JSON.stringify(now)})`);
+    await p.close();
+  }
+
+  // ---- «Scegli nel portale» con un'altra scheda attiva: si apre All tickets (elenco annidato come nel portale vero);
+  //      scelta lasciata a metà e ritorno dal segnalibro: niente promemoria sopra il pannello, Esc lo chiude davvero
+  {
+    const p = await fresh("?apply=auto&tab=all");
+    await p.evaluate(() => { Ext.getCmp("navbar").setActiveTab("body_MYTKT"); });
+    await p.waitForTimeout(300);
+    await clickBookmarklet(p);
+    await advOpen(p);
+    await p.locator("#ppl .pr", { hasText: "Gruppo proprietario" }).locator("button", { hasText: "Scegli nel portale" }).click();
+    await p.waitForTimeout(500);
+    const st = await p.evaluate((P) => { const f = Ext.getCmp(P + "filter_default_OwnerUserGroupID"); return { tab: Ext.getCmp("navbar").getActiveTab().id, vis: f.isVisible(true), exp: !!f.isExpanded }; }, P0);
+    check(st.tab === "body_INC_ALLGRP_EXTENDED" && st.vis && st.exp, `scelta nel portale da un'altra scheda: si apre All tickets (${JSON.stringify(st)})`);
+    await p.evaluate((P) => { Ext.getCmp(P + "filter_default_OwnerUserGroupID").collapse(); }, P0);
+    await clickBookmarklet(p); // ritorno dal segnalibro, non dal promemoria
+    const pillVis = await p.locator("#ricerca-tkt-pill button").isVisible();
+    await p.keyboard.press("Escape");
+    await p.waitForTimeout(700);
+    const reopened = await isOpen(p);
+    check(!pillVis && !reopened, `ritorno dal segnalibro durante una scelta nel portale (promemoria ${pillVis ? "visibile" : "nascosto"}, pannello ${reopened ? "riaperto" : "chiuso"})`);
+    await p.close();
+  }
+
+  // ---- Open abilitato dal portale poco dopo la selezione (binding) e doppio clic ascoltato dalla view
+  {
+    const p = await fresh("?apply=auto&tab=all&openbind=1");
+    await clickBookmarklet(p);
+    await search(p, "detassazione");
+    const c0 = await p.locator("#list .res .num").first().innerText();
+    await p.locator("#list .res").first().locator("button", { hasText: "Apri" }).click();
+    await p.waitForTimeout(1500);
+    check(await p.evaluate((c) => window.__opened.includes(c), c0), `ticket aperto con Open abilitato in ritardo dal portale (${c0})`);
+    check(p.__err.length === 0, `nessun errore con Open legato alla selezione ${p.__err.length ? JSON.stringify(p.__err) : ""}`);
+    await p.close();
+  }
+
+  // ---- risposte tardive: caricamento iniziale lento della scheda e ricerca interrotta
+  {
+    let slowFirst = true;
+    const p = await fresh("?apply=auto&lazy=1", (pg) => pg.route("**/HDAPortal/List/GetData**", fixReq(async (q, rq) => {
+      const ft = ((JSON.parse(q.get("filters") || "[]").find((f) => f.name === "FullText") || {}).value) || "";
+      let delay = 0;
+      if (rq.url().includes("INC_ALLGRP_EXTENDED") && slowFirst && !ft) { slowFirst = false; delay = 1800; }
+      if (ft === "cedolino") delay = 3000;
+      if (delay) await new Promise((r) => setTimeout(r, delay));
+      return false;
+    })));
+    await clickBookmarklet(p);
+    await search(p, "detassazione"); // subito: la scheda All tickets si sta ancora caricando (lentamente)
+    await p.waitForTimeout(2500);
+    let tot = await storeTotal(p);
+    check((await txt(p, "#sum")).startsWith("197") && tot === 197, `con il caricamento iniziale lento: risultati della ricerca (${(await txt(p, "#sum")).split("·")[0].trim()}, elenco ${tot})`);
+    await p.fill("#q", "cedolino");
+    await p.click("#go");
+    await p.waitForTimeout(1300); // la richiesta (lenta) è partita
+    await p.click("#stop");
+    await waitDone(p);
+    await search(p, "detassazione");
+    await p.waitForTimeout(3500);
+    tot = await storeTotal(p);
+    check((await txt(p, "#sum")).startsWith("197") && tot === 197, `dopo una ricerca interrotta: risultati della nuova (${(await txt(p, "#sum")).split("·")[0].trim()}, elenco ${tot})`);
+    check(p.__err.length === 0, `nessun errore con le risposte tardive ${p.__err.length ? JSON.stringify(p.__err) : ""}`);
+    await p.close();
+  }
+
+  // ---- il portale manda meno righe di quelle chieste: «Carica i successivi» non salta ticket
+  {
+    const p = await fresh("?apply=auto&tab=all", (pg) => pg.route("**/HDAPortal/List/GetData**", fixReq((q) => { if (+q.get("limit") > 100) q.set("limit", "100"); })));
+    await clickBookmarklet(p);
+    await search(p, "cedolino");
+    await resetLog(p);
+    await p.click("#more");
+    await waitDone(p);
+    const le = lastList(await log(p));
+    check((await txt(p, "#sum")).startsWith("200") && le.params.start === "100" && (await txt(p, "#alert")).includes("al massimo 100"), `con al massimo 100 righe per richiesta i successivi partono da 100 (start ${le.params.start})`);
+    await p.close();
+  }
+
+  // ---- ticket tutti di anni lontani: il conteggio per anno arriva fino a loro
+  {
+    const p = await fresh("?apply=auto&tab=all", (pg) => pg.route("**/HDAPortal/List/GetData**", fixReq((q) => {
+      const f = JSON.parse(q.get("filters") || "[]");
+      f.push({ name: "Date", op: "le", value: "2020-12-31" });
+      q.set("filters", JSON.stringify(f));
+    })));
+    await clickBookmarklet(p);
+    await search(p, "cedolino");
+    await p.click("#yearsbtn");
+    await waitDone(p);
+    const yt = await txt(p, "#years");
+    const ym = yt.match(/([\d.]+) su ([\d.]+) contati/);
+    check(!!ym && ym[1] === ym[2] && (await p.locator("#years button", { hasText: "Cerca nel 2020" }).count()) === 1, `conteggio per anno fino agli anni dei ticket (${ym ? ym[0] : yt.slice(0, 60)})`);
+    await p.close();
+  }
+
+  // ---- scheda All tickets lenta ad aprirsi: doppio invio = una ricerca; ricerca salvata eseguita prima che l'elenco esista
+  {
+    const p = await fresh("?apply=auto&lazy=2500");
+    const h0 = await p.evaluate(() => JSON.parse(localStorage.getItem("rtkt2:history") || "[]").length);
+    await clickBookmarklet(p);
+    await p.fill("#q", "stampa");
+    await p.press("#q", "Enter");
+    await p.press("#q", "Enter");
+    await waitDone(p);
+    await p.waitForTimeout(500);
+    const h1 = await p.evaluate(() => JSON.parse(localStorage.getItem("rtkt2:history") || "[]").length);
+    check(h1 - h0 === 1, `doppio invio durante l'apertura della scheda: una sola ricerca (${h1 - h0})`);
+    await p.close();
+  }
+  {
+    const p = await fresh("?apply=auto&lazy=2500");
+    await p.evaluate(() => {
+      const all = JSON.parse(localStorage.getItem("rtkt2:saved") || "[]");
+      all.push({ name: "Gruppo G3 aperti", spec: { text: "", st: "open", people: { OwnerUserGroupID: { v: "G3", t: "HR Fiscale" } } }, created: "2026-01-01T00:00:00Z" });
+      localStorage.setItem("rtkt2:saved", JSON.stringify(all));
+    });
+    await clickBookmarklet(p);
+    await resetLog(p);
+    await p.click('#nav button[data-tab="saved"]');
+    await p.locator("#saved .li", { hasText: "Gruppo G3 aperti" }).locator("button", { hasText: "Esegui" }).click();
+    const note = await txt(p, "#qwarn");
+    await p.waitForFunction(() => document.getElementById("ricerca-tkt-host").shadowRoot.querySelector("#go").disabled, null, { timeout: 10000 }).catch(() => {});
+    await waitDone(p);
+    check(note.includes("Apro la scheda"), `in attesa della scheda All tickets lo dice (${note})`);
+    const le = lastList(await log(p));
+    const nst = (fval(le, "TicketStatusID") || []).length;
+    check(fval(le, "OwnerUserGroupID") === "G3" && nst === 11, `ricerca salvata eseguita prima che l'elenco esista: gruppo e stati aperti (${fval(le, "OwnerUserGroupID")}, ${nst} stati)`);
+    await p.evaluate(() => { const all = JSON.parse(localStorage.getItem("rtkt2:saved") || "[]").filter((x) => x.name !== "Gruppo G3 aperti"); localStorage.setItem("rtkt2:saved", JSON.stringify(all)); });
+    await p.close();
+  }
+
+  // ---- file importato con ricerche malformate o con codice nel nome di un gruppo (contesto a parte)
+  {
+    const c2 = await browser.newContext(ctxOpts);
+    const p = await c2.newPage();
+    const perr = [];
+    p.on("pageerror", (x) => perr.push(x.message));
+    await portal(p, "?apply=auto&tab=all");
+    await clickBookmarklet(p);
+    const bad = {
+      saved: [{ name: "Malformata", spec: { text: "x", pr: "P2", dfrom: 5, stCodes: "x", st: "custom" } }, { name: "Buona", spec: { text: "ok" } },
+        { name: "Trappola", spec: { text: "", people: { AssignedUserOrGroupFilter: { v: "G-X", t: "<img src=x onerror=window.__pwned3=1>" } } } }],
+      history: [{ spec: { text: "y", pr: "P1" }, created: "2026-01-01T00:00:00Z" }],
+    };
+    await p.click('#nav button[data-tab="settings"]');
+    await p.setInputFiles("#pimp", { name: "bad.json", mimeType: "application/json", buffer: Buffer.from(JSON.stringify(bad)) });
+    await p.waitForTimeout(300);
+    await p.click('#nav button[data-tab="saved"]');
+    const ns = await p.locator("#saved .li").count();
+    await p.click('#nav button[data-tab="history"]');
+    const nh = await p.locator("#hist .li").count();
+    check(ns === 3 && nh === 1 && perr.length === 0, `ricerche importate malformate: elenchi leggibili (${ns} salvate, ${nh} in cronologia) ${perr.join(" ")}`);
+    await p.evaluate((P) => { Ext.getCmp(P + "filter_default_AssignedUserOrGroupFilter").forceSelection = true; }, P0);
+    await p.click('#nav button[data-tab="saved"]');
+    await p.locator("#saved .li", { hasText: "Trappola" }).locator("button", { hasText: "Apri" }).click();
+    await p.waitForTimeout(300);
+    await p.evaluate((P) => { Ext.getCmp(P + "filter_default_AssignedUserOrGroupFilter").expand(); }, P0);
+    await p.waitForTimeout(300);
+    check(await p.evaluate(() => window.__pwned3 === undefined) && perr.length === 0, "nessun codice dal nome di un gruppo importato");
+    await c2.close();
   }
 
   // ---- altri modi di applicare i filtri: solo con Invio, o mai (il segnalibro ricarica l'elenco)

@@ -64,9 +64,17 @@
     return [];
   };
   const isGrid = (c) => !!(c && typeof c.getStore === "function" && typeof c.getView === "function" && (c.isXType ? c.isXType("tablepanel") || c.isXType("gridpanel") : true));
+  // Pannello della scheda che contiene il modulo: il figlio diretto del tabpanel (body_INC_ALLGRP_EXTENDED).
+  // Nel portale vero tra la scheda e l'elenco ci sono altri contenitori body_ctlNN: non vanno presi.
+  const isTabPanel = (p) => !!(p && typeof p.isXType === "function" && p.isXType("tabpanel"));
   function ownerBody(c) {
-    for (let p = c, i = 0; p && i < 40; p = p.ownerCt || (typeof p.up === "function" ? p.up() : null), i++) if (/^body_/.test(p.id || "")) return p;
-    return null;
+    let first = null;
+    for (let p = c, i = 0; p && i < 40; p = p.ownerCt || (typeof p.up === "function" ? p.up() : null), i++) {
+      if (!/^body_/.test(p.id || "")) continue;
+      if (isTabPanel(p.ownerCt)) return p;
+      if (!first && !/^body_ctl\d/.test(p.id)) first = p;
+    }
+    return first;
   }
   // Schede del portale (My tickets, My Group Tickets, Tickets from my groups, All tickets...): il titolo
   // di un elenco è il testo della scheda che lo contiene.
@@ -104,7 +112,7 @@
       let store = null;
       try { store = isGrid(grid) ? grid.getStore() : null; } catch { store = null; }
       const el = document.getElementById(id);
-      const domBody = el ? el.closest('[id^="body_"]') : null;
+      const domBody = el ? el.closest('.x-tabpanel-child[id^="body_"]') : null;
       const cmpBody = cmp ? ownerBody(cmp) : null;
       const key = bodyKey(domBody && domBody.id) || bodyKey(cmpBody && cmpBody.id) || prefix;
       const tab = tabs.find((x) => isInside(x.card, cmp, el)) || null;
@@ -183,7 +191,8 @@
   // ===================================================================== richieste osservate
   // Solo per verificare che i filtri arrivino al portale e per i dati tecnici: niente cookie e
   // valori mascherati (vedi maskDeep).
-  const conn = { ext: [], xhr: [], seq: 0, errors: [], lastRun: null };
+  // on: si registra solo mentre il pannello è aperto (non il lavoro normale nel portale)
+  const conn = { ext: [], xhr: [], seq: 0, errors: [], lastRun: null, on: true };
   const keep = (list, r) => { r.seq = ++conn.seq; list.push(r); if (list.length > 25) list.shift(); return r; };
   function bodyText(b) {
     if (b === null || b === undefined) return "";
@@ -205,6 +214,7 @@
     const pend = new Map();
     Ext.Ajax.on("beforerequest", (c, o) => {
       try {
+        if (!conn.on) return;
         const r = keep(conn.ext, { at: new Date().toISOString(), url: String(o.url || ""), method: o.method || (o.params || o.jsonData ? "POST" : "GET"), params: o.params || null, json: o.jsonData || null, headers: Object.keys(Object.assign({}, (c && c.getDefaultHeaders && c.getDefaultHeaders()) || {}, o.headers || {})) });
         pend.set(o, r);
       } catch { /* */ }
@@ -230,7 +240,7 @@
       XP.send = function (b) {
         try {
           const r = this.__rtkt;
-          if (r && !/\.(js|css|png|gif|jpe?g|svg|woff2?)(\?|$)/i.test(r.url) && !/signalr/i.test(r.url)) {
+          if (r && conn.on && !/\.(js|css|png|gif|jpe?g|svg|woff2?)(\?|$)/i.test(r.url) && !/signalr/i.test(r.url)) {
             r.at = new Date().toISOString(); r.body = bodyText(b).slice(0, 20000);
             keep(conn.xhr, r);
             this.addEventListener("loadend", () => { try { r.status = this.status; r.response = summarize(typeof this.responseText === "string" ? this.responseText : ""); } catch { /* */ } });
@@ -246,28 +256,33 @@
   // Valori mascherati nei dati tecnici: restano la struttura, i nomi dei campi, codici, date e i
   // valori cercati con Ricerca TKT; il resto (nomi, testi) diventa «N car.».
   const KEEP_WORDS = new Set(["eq", "ne", "like", "in", "notin", "ge", "gt", "le", "lt", "and", "or", "not", "asc", "desc", "true", "false", "null", "property", "value", "operator", "field", "name", "type", "direction"]);
-  function maskDeep(v, keepSet, depth = 0) {
+  // valori sempre mascherati in base al nome del campo (credenziali, contatti, nomi)
+  const SECRET_KEY = /pass|pwd|secret|token|rvt|auth|cookie|session|login|^user(name)?$|mail|phone|tel(efono)?$|mobile|cell|fax|vat|piva|fiscal|iban|name$|nome$/i;
+  function maskDeep(v, keepSet, depth = 0, key = "") {
     if (depth > 7) return "…";
-    if (v === null || v === undefined || typeof v === "number" || typeof v === "boolean") return v;
+    if (key && SECRET_KEY.test(key) && v !== null && v !== undefined && v !== "" && typeof v !== "object") return `\u00ab${String(v).length} car.\u00bb`;
+    if (v === null || v === undefined || typeof v === "boolean") return v;
+    if (typeof v === "number") return Math.abs(v) >= 1e9 ? `\u00ab${String(v).length} cifre\u00bb` : v;
     if (typeof v === "string") {
       const s = v;
       if (keepSet.has(norm(s).trim())) return s;
       if (/^\s*[[{]/.test(s)) { try { return { json: maskDeep(JSON.parse(s), keepSet, depth + 1) }; } catch { /* non JSON */ } }
       if (!s.trim() || KEEP_WORDS.has(s.toLowerCase())) return s;
-      if (/^(?=.*[0-9_])[A-Z0-9_\-.,/]{1,14}$/.test(s.trim()) || /^[A-Z]{1,4}$/.test(s.trim())) return s;
+      // codici: al massimo 8 cifre (ID dei ticket come 11936627Z sì, telefoni e partite IVA no)
+      if ((/^(?=.*[0-9_])[A-Z0-9_\-.,/]{1,14}$/.test(s.trim()) && (s.match(/\d/g) || []).length <= 8) || /^[A-Z]{1,4}$/.test(s.trim())) return s;
       if (/^\d{4}-\d{2}-\d{2}([T ][\d:.]+Z?)?$/.test(s) || /^\d{1,2}\/\d{1,2}\/\d{4}$/.test(s) || /^\/Date\(-?\d+\)\/$/.test(s)) return s;
       if (s.length <= 60 && /^[A-Za-z_][A-Za-z0-9_.]*$/.test(s) && (/[a-z][A-Z]/.test(s) || /[._]/.test(s) || /^[A-Z]{2,}[a-z]/.test(s))) return s;
       return `\u00ab${s.length} car.\u00bb`;
     }
-    if (Array.isArray(v)) return v.slice(0, 40).map((x) => maskDeep(x, keepSet, depth + 1));
-    if (typeof v === "object") { const o = {}; for (const k of Object.keys(v).slice(0, 80)) o[k] = maskDeep(v[k], keepSet, depth + 1); return o; }
+    if (Array.isArray(v)) return v.slice(0, 40).map((x) => maskDeep(x, keepSet, depth + 1, key));
+    if (typeof v === "object") { const o = {}; for (const k of Object.keys(v).slice(0, 80)) o[k] = maskDeep(v[k], keepSet, depth + 1, k); return o; }
     return typeof v;
   }
   function maskUrl(u, keepSet) {
     try {
       const x = new URL(u, location.href);
       const q = [];
-      for (const [k, v] of x.searchParams) q.push(`${k}=${JSON.stringify(maskDeep(v, keepSet))}`);
+      for (const [k, v] of x.searchParams) q.push(`${k}=${JSON.stringify(maskDeep(v, keepSet, 0, k))}`);
       return x.pathname + (q.length ? " ? " + q.join(" & ") : "");
     } catch { return "(url)"; }
   }
@@ -277,7 +292,7 @@
     if (/^\s*[[{]/.test(s)) return maskDeep(s, keepSet);
     if (/=/.test(s) && !/\s/.test(s.slice(0, 200))) {
       const o = {};
-      for (const part of s.split("&")) { const i = part.indexOf("="); const k = decodeURIComponentSafe(i < 0 ? part : part.slice(0, i)); o[k] = maskDeep(decodeURIComponentSafe(i < 0 ? "" : part.slice(i + 1)), keepSet); }
+      for (const part of s.split("&")) { const i = part.indexOf("="); const k = decodeURIComponentSafe(i < 0 ? part : part.slice(0, i)); o[k] = maskDeep(decodeURIComponentSafe(i < 0 ? "" : part.slice(i + 1)), keepSet, 0, k); }
       return o;
     }
     return maskDeep(s, keepSet);
@@ -384,14 +399,39 @@
     } catch { return null; }
   }
   const canLookup = (f) => !!(f && typeof f.doQuery === "function" && typeof f.getStore === "function" && !f.readOnly && f.editable !== false);
+  // Imposta un gruppo o una persona ({v: codice, t: nome}) in un campo del portale.
   function setPerson(f, d) {
-    const same = () => scalarValue(f, f.getValue()) === String(d.v);
+    const code = String(d.v);
+    const same = () => scalarValue(f, f.getValue()) === code;
     const vf = f.valueField || "value", df = f.displayField || "text";
+    // il nome può arrivare da un file importato e finire nel menu del portale (BoundList: {text} senza codifica HTML)
+    const label = String(d.t || "").replace(/[<>"`]/g, "").slice(0, 200).trim() || code;
     let st = null;
     try { st = typeof f.getStore === "function" ? f.getStore() : null; } catch { /* */ }
-    try { const r = st && typeof st.findRecord === "function" ? st.findRecord(vf, d.v, 0, false, true, true) : null; if (r) { f.setValue(r); if (same()) return true; } } catch { /* */ }
-    try { f.setValue(d.v); if (same()) return true; } catch { /* */ }
-    try { if (st && typeof st.add === "function" && !st.isTreeStore) { const [r] = st.add({ [vf]: d.v, [df]: d.t }); f.setValue(r); if (same()) return true; } } catch { /* */ }
+    const plain = !!(st && !st.isTreeStore);
+    const raw = () => { try { return typeof f.getRawValue === "function" ? String(f.getRawValue() || "").trim() : "x"; } catch { return "x"; } };
+    // record con codice e nome, senza aggiungerlo all'elenco del campo: Ext lo accetta anche con l'elenco non caricato
+    const asRecord = () => {
+      try { if (!plain || typeof st.getModel !== "function") return false; const M = st.getModel(); f.setValue(new M({ [vf]: code, [df]: label })); return same(); } catch { return false; }
+    };
+    try { const r = st && typeof st.findRecord === "function" ? st.findRecord(vf, code, 0, false, true, true) : null; if (r) { f.setValue(r); if (same()) return true; } } catch { /* */ }
+    try {
+      f.setValue(code);
+      if (same()) {
+        // elenco del campo mai caricato (pagina nuova): Ext tiene il codice ma il campo resta vuoto; con il nome noto si mostra quello
+        if (!raw() && label !== code && !asRecord()) { try { f.setValue(code); } catch { /* */ } }
+        return same();
+      }
+    } catch { /* */ }
+    if (asRecord()) return true;
+    try {
+      if (plain && typeof st.add === "function") {
+        const [r] = st.add({ [vf]: code, [df]: label });
+        f.setValue(r);
+        if (same()) return true;
+        try { st.remove(r); } catch { /* */ }
+      }
+    } catch { /* */ }
     return false;
   }
   function clearField(f) {
@@ -462,12 +502,18 @@
     } catch { return ""; } finally { if (document.body) document.body.inert = was; }
   }
   const loading = (st) => { try { return typeof st.isLoading === "function" ? st.isLoading() : !!st.loading; } catch { return false; } };
+  // Caricamenti dell'elenco osservati durante una ricerca. Conta solo la risposta all'ultima richiesta partita:
+  // la risposta tardiva di una richiesta precedente (ricerca interrotta, caricamento iniziale del portale)
+  // non chiude la ricerca. done = l'operazione i cui dati sono ora nell'elenco.
   function watchStore(st) {
-    const w = { started: 0, loaded: 0, lastAt: 0, ok: null, error: "" };
-    const before = () => { w.started++; w.lastAt = performance.now(); };
+    const w = { started: 0, loaded: 0, lastAt: 0, ok: null, error: "", last: null, done: null, retries: 0 };
+    const before = (s, op) => { w.started++; w.last = op || null; w.lastAt = performance.now(); };
     const load = (s, recs, ok, op) => {
+      w.done = op || null;
       if (!w.started) return; // caricamento partito prima della ricerca
-      w.loaded++; w.lastAt = performance.now(); w.ok = ok !== false;
+      w.lastAt = performance.now();
+      if (op && w.last && op !== w.last) return; // risposta a una richiesta precedente
+      w.loaded++; w.ok = ok !== false;
       if (ok === false) {
         try {
           const e = op && typeof op.getError === "function" ? op.getError() : null;
@@ -481,8 +527,15 @@
     return w;
   }
   async function waitLoads(st, w, signal) {
-    const ok = await waitUntil(() => w.loaded > 0 && !loading(st) && performance.now() - w.lastAt > 700, 120000, signal);
-    if (!ok) throw new Error("Il portale non ha finito di caricare l'elenco dopo 2 minuti.");
+    const end = performance.now() + 120000;
+    for (;;) {
+      const ok = await waitUntil(() => w.loaded > 0 && !loading(st) && performance.now() - w.lastAt > 700, end - performance.now(), signal);
+      if (!ok) throw new Error("Il portale non ha finito di caricare l'elenco dopo 2 minuti.");
+      // una risposta più vecchia è arrivata dopo la nostra e ha sostituito l'elenco: si ricarica (stessi filtri dell'ultima richiesta)
+      if (!w.done || !w.last || w.done === w.last || w.retries >= 2) break;
+      w.retries++; w.loaded = 0;
+      try { st.reload(); } catch { break; }
+    }
     if (w.ok === false) {
       const auth = /^(401|403)\b/.test(w.error);
       const big = settings.cap > 50 ? ` Se l'errore si ripete prova a ridurre il massimo di ticket per ricerca (Impostazioni, ora ${settings.cap}).` : "";
@@ -513,6 +566,13 @@
   }
   async function reload(m, apply, run, signal) {
     const st = m.store;
+    // un caricamento già in corso (quello iniziale della scheda, o la richiesta di una ricerca interrotta) finisce
+    // prima: la sua risposta non deve sostituire l'elenco durante o dopo questa ricerca
+    if (loading(st)) {
+      const pt = $("#progt"), was = pt.textContent;
+      pt.textContent = "Aspetto che il portale finisca il caricamento precedente…";
+      try { await waitUntil(() => !loading(st), 60000, signal); } finally { if (pt.textContent !== was) pt.textContent = was; }
+    }
     const w = watchStore(st);
     const known = triggers[m.key] || "";
     try {
@@ -533,7 +593,12 @@
       }
       await waitLoads(st, w, signal);
       run.loads = w.loaded;
-      if (changed) triggers[m.key] = run.trigger.startsWith("invio") ? "invio" : run.trigger;
+      if (changed) {
+        // «loadPage» si ricorda solo se è stato l'unico caricamento: se il portale ha caricato anche da solo, in
+        // ritardo, la ricerca successiva rifà tutta la sequenza (attesa, Invio, loadPage)
+        if (run.trigger === "loadPage" && w.started - w.retries > 1) delete triggers[m.key];
+        else triggers[m.key] = run.trigger.startsWith("invio") ? "invio" : run.trigger;
+      }
     } finally { w.stop(); }
   }
   // valori dei filtri della pagina prima della prima ricerca, per poterli ripristinare
@@ -543,27 +608,41 @@
       const f = CONTROLLED[suffix] || PEOPLE_KEYS.has(suffix) ? m.field(suffix) : null;
       if (f) { try { const v = f.getValue(); values[suffix] = Array.isArray(v) ? v.slice() : v; } catch { /* */ } }
     }
+    const people = {};
+    for (const suffix of PEOPLE_KEYS) { const f = m.field(suffix); if (f) people[suffix] = personValue(f); } // {v,t} o null
     let quick, pageSize = null;
     try { quick = m.quick ? m.quick.getValue() : undefined; } catch { /* */ }
     try { pageSize = m.store.getPageSize(); } catch { /* */ }
-    return { values, quick, pageSize };
+    return { values, people, quick, pageSize };
+  }
+  // da chiamare prima di ogni scrittura nei campi filtro della pagina, per poterli ripristinare
+  function ensureSnapshot(m) { if (m && !S.snaps[m.key]) S.snaps[m.key] = snapshot(m); }
+  // se il portale manda meno righe di quelle chieste (limite lato server) la pagina successiva partirebbe da
+  // pageSize e salterebbe dei ticket: si allinea pageSize alle righe ricevute
+  function fitPageSize(st) {
+    try {
+      const got = st.getCount(), size = st.getPageSize();
+      if ((st.currentPage || 1) === 1 && got > 0 && got < size && st.getTotalCount() > got) st.setPageSize(got);
+    } catch { /* */ }
   }
   async function pageSearch(m, s, signal) {
     const run = { at: new Date().toISOString(), list: m.key, trigger: "", applied: [], failed: [], loads: 0, ms: 0, verified: null, pageSize: null };
     conn.lastRun = run;
     const seq0 = conn.seq;
     const t0 = performance.now();
-    if (!S.snaps[m.key]) S.snaps[m.key] = snapshot(m);
+    ensureSnapshot(m);
     try {
       await reload(m, () => { run.pageSize = setPageSize(m.store); applyValues(m, s, run); }, run, signal);
       const reqs = [...conn.ext, ...conn.xhr].filter((r) => r.seq > seq0);
       const probe = norm(s.text || s.subject || "").split(/\s+/).filter((x) => x.length >= 3)[0];
       if (probe && reqs.length) run.verified = reqs.some((r) => reqBlob(r).includes(probe));
+      fitPageSize(m.store);
       return readStore(m);
     } finally { run.ms = Math.round(performance.now() - t0); }
   }
+  // rimette i filtri della pagina com'erano; restituisce i gruppi e le persone che il portale non ha ripreso
   async function restoreSnapshot(m, sn, signal) {
-    const run = { trigger: "", loads: 0 };
+    const run = { trigger: "", loads: 0 }, missed = [];
     await reload(m, () => {
       for (const [suffix, v] of Object.entries(sn.values)) {
         const f = m.field(suffix);
@@ -571,20 +650,59 @@
         try {
           if (Array.isArray(v) || f.multiSelect) setMulti(f, asList(v));
           else if (v === null || v === undefined || v === "") { if (typeof f.clearValue === "function") f.clearValue(); else f.setValue(null); }
+          // con il nome: se una ricerca per nome ha ricaricato l'elenco del campo il codice da solo non basta
+          else if (sn.people && sn.people[suffix]) setPerson(f, sn.people[suffix]);
           else f.setValue(v);
         } catch { /* */ }
+      }
+      for (const [suffix, want] of Object.entries(sn.people || {})) {
+        const f = m.field(suffix), now = f && personValue(f);
+        if (f && (want ? !now || now.v !== want.v : now)) missed.push(PEOPLE.find(([k]) => k === suffix)[1].replace(/ \(.*$/, ""));
       }
       if (m.quick && sn.quick !== undefined) { try { m.quick.setValue(sn.quick); } catch { /* */ } }
       try { if (sn.pageSize && typeof m.store.setPageSize === "function") m.store.setPageSize(sn.pageSize); } catch { /* */ }
     }, run, signal);
+    return missed;
   }
-  async function loadNextPage(m, signal) {
+  // Stato dell'elenco del portale dopo una ricerca: serve a «Carica i successivi» e «Quanti per anno?» per
+  // sapere se l'elenco contiene ancora la stessa ricerca (Ripristina, Azzera, filtri o ordinamento cambiati nel portale).
+  function sortSig(st) {
+    try { const ss = st.getSorters(); return (ss ? ss.getRange() : []).map((x) => `${x.getProperty()}:${x.getDirection()}`).join(","); } catch { return ""; }
+  }
+  function listState(m) {
+    let size = null;
+    try { size = m.store.getPageSize(); } catch { /* */ }
+    return {
+      sig: fieldSig(m), size, sort: sortSig(m.store),
+      people: PEOPLE.map(([k]) => { const f = m.field(k); const p = f && personValue(f); return p ? p.v : ""; }).join("\u0001"),
+      kept: keptFilters(m).map((k) => `${k.suffix}=${k.value}`).join("\u0001"),
+    };
+  }
+  const DRIFT_MSG = "Dopo la ricerca sono cambiati nel portale i gruppi e persone, i filtri della pagina o l'ordinamento dell'elenco: premi «Cerca» per rifare la ricerca.";
+  // Rimette nell'elenco del portale la ricerca dei risultati se sono cambiati solo i filtri gestiti da Ricerca TKT
+  // o il numero di righe; false se sono cambiati gruppi e persone, i filtri lasciati dalla pagina o l'ordinamento
+  // (sono scelte dell'utente nel portale: non si tolgono senza dirlo).
+  async function ensureLastInPortal(m, signal) {
+    const was = S.info && S.info.state;
+    if (!was || !S.last) return false;
+    const now = listState(m);
+    if (now.people !== was.people || now.kept !== was.kept || now.sort !== was.sort) return false;
+    if (now.sig === was.sig && now.size === was.size) return true;
+    ensureSnapshot(m);
+    const run = { applied: [], failed: [], trigger: "", loads: 0 };
+    await reload(m, () => { setPageSize(m.store, S.info.pageSize); applyValues(m, Object.assign({}, S.last, { people: undefined }), run); }, run, signal);
+    S.info.state = listState(m);
+    return true;
+  }
+  // pagina indicata (non st.currentPage: l'utente può aver sfogliato l'elenco nel portale) con la dimensione della ricerca
+  async function loadNextPage(m, page, size, signal) {
     const st = m.store;
+    if (loading(st)) await waitUntil(() => !loading(st), 60000, signal);
     const w = watchStore(st);
     try {
       activity(true);
-      const cur = st.currentPage || 1;
-      st.loadPage(cur + 1);
+      setPageSize(st, size);
+      st.loadPage(page);
       await waitLoads(st, w, signal);
       return readStore(m);
     } finally { w.stop(); }
@@ -686,12 +804,15 @@
     return { date: `${y}-${pad(mo)}-${pad(d)}`, time };
   }
   // Riepilogo nel "title" della colonna Oggetto: "Subject:\n…\n\nIssue/Request:\n…\n\nResolution:\n…"
+  const SEC_LABEL_RE = /^(subject|oggetto|issue\/request|issue|request|richiesta|problema|description|descrizione|resolution|soluzione|risoluzione|risposta)$/i;
   function sections(title) {
     const out = [];
     const re = /(?:^|\n\s*\n)([A-Za-z\u00c0-\u00ff][^\n:]{0,40}):[ \t]*\n/g;
-    const marks = [];
+    let marks = [];
     let x;
     while ((x = re.exec(title))) marks.push({ label: x[1].trim(), start: x.index, body: re.lastIndex });
+    // con le etichette note (Subject, Issue/Request, Resolution) una frase del testo che finisce con ":" non è una sezione
+    if (marks.some((k) => SEC_LABEL_RE.test(k.label))) marks = marks.filter((k) => SEC_LABEL_RE.test(k.label));
     for (let i = 0; i < marks.length; i++) out.push([marks[i].label, title.slice(marks[i].body, i + 1 < marks.length ? marks[i + 1].start : undefined).trim()]);
     return out;
   }
@@ -764,12 +885,27 @@
     } catch (e) { conn.errors.push(`pulsante: ${e && e.message}`); }
     return false;
   }
+  // Porta in primo piano la scheda dell'elenco: per ogni tabpanel tra il modulo e la pagina attiva il figlio
+  // diretto che lo contiene (setActiveTab accetta solo i figli diretti). Senza tabpanel: clic sulla scheda.
   function showModuleTab(m) {
+    let found = false;
     try {
-      const body = Ext.getCmp("body_" + m.key);
-      const tp = body && typeof body.up === "function" ? body.up("tabpanel") : null;
-      if (tp && tp.getActiveTab() !== body) tp.setActiveTab(body);
+      for (let p = m && m.cmp, i = 0; p && p.ownerCt && i < 60; p = p.ownerCt, i++) {
+        if (!isTabPanel(p.ownerCt)) continue;
+        found = true;
+        if (p.ownerCt.getActiveTab() !== p) p.ownerCt.setActiveTab(p);
+      }
     } catch { /* */ }
+    if (!found && m && isAllList(m)) {
+      try {
+        const t = allTab();
+        if (t && !t.t.active && t.t.el && t.t.el.dom) {
+          const was = !!(document.body && document.body.inert);
+          if (document.body) document.body.inert = false;
+          try { t.t.el.dom.click(); } finally { if (document.body) document.body.inert = was; }
+        }
+      } catch { /* */ }
+    }
   }
   function recordFor(m, t) {
     if (!m || !m.store || t.list !== m.key) return null;
@@ -795,10 +931,21 @@
       await sleep(50);
       try { m.grid.getSelectionModel().select([rec]); } catch { /* */ }
       const b = findButton(m, /^(open|apri)$/i);
-      if (b && !(typeof b.isDisabled === "function" && b.isDisabled()) && clickBtn(b)) return;
+      const usable = () => !!b && !b.destroyed && !(typeof b.isDisabled === "function" && b.isDisabled());
+      // il portale riabilita i comandi dopo il cambio di selezione (binding con timer o disable/enable della barra)
+      if (b) await waitUntil(usable, 1500);
+      if (usable() && clickBtn(b)) return;
       try {
         const view = m.grid.getView();
-        m.grid.fireEvent("itemdblclick", view, rec, view.getNode(rec), m.store.indexOf(rec), new Ext.event.Event(new MouseEvent("dblclick", { bubbles: true })));
+        const node = view.getNode(rec);
+        const cell = node && [...node.querySelectorAll("td.x-grid-cell")].find((td) => { const c = Ext.getCmp(td.getAttribute("data-columnid")); return c && c.dataIndex; });
+        const was = !!(document.body && document.body.inert);
+        if (document.body) document.body.inert = false;
+        try {
+          // doppio clic vero: Ext genera itemdblclick/rowdblclick/celldblclick sulla view e li ripete sulla griglia
+          if (cell) cell.dispatchEvent(new MouseEvent("dblclick", { bubbles: true, cancelable: true, view: window }));
+          else view.fireEvent("itemdblclick", view, rec, node, m.store.indexOf(rec), new Ext.event.Event(new MouseEvent("dblclick", { bubbles: true })));
+        } finally { if (document.body) document.body.inert = was; }
         return;
       } catch { /* sotto: Find by ID */ }
     }
@@ -810,18 +957,22 @@
     if (!b) { show(); toast(code ? `Ticket ${code} non presente nell'elenco: numero copiato, aprilo dal portale` : "Ticket non presente nell'elenco"); return; }
     showModuleTab(m);
     await sleep(50);
-    clickBtn(b);
+    // solo una finestra comparsa DOPO il clic è quella di Find by ID: mai scrivere o confermare in una finestra
+    // già aperta dall'utente (Change status..., Reply...)
+    const visWins = () => Ext.ComponentQuery.query("window").filter((w) => !w.destroyed && w.isVisible && w.isVisible());
+    const before = new Set(visWins());
+    if ((typeof b.isDisabled === "function" && b.isDisabled()) || !clickBtn(b)) { show(); toast(code ? `Numero ${code} copiato: aprilo dal portale` : "Apri il ticket dal portale"); return; }
     if (!code) return;
     let field = null;
     await waitUntil(() => {
-      const wins = Ext.ComponentQuery.query("window").filter((w) => w.isVisible && w.isVisible());
-      for (const w of wins.reverse()) {
-        const f = w.query("textfield").find((x) => x.isVisible && x.isVisible() && !(x.isXType && x.isXType("hiddenfield")));
-        if (f) { field = f; return true; }
-      }
+      const fresh = visWins().filter((w) => !before.has(w));
+      const act = Ext.WindowManager && typeof Ext.WindowManager.getActive === "function" ? Ext.WindowManager.getActive() : null;
+      const w = fresh.includes(act) ? act : fresh[fresh.length - 1];
+      const f = w && w.query("textfield").find((x) => x.isVisible && x.isVisible() && !(x.isXType && x.isXType("hiddenfield")));
+      if (f) { field = f; return true; }
       return false;
     }, 2500);
-    if (!field) return;
+    if (!field) return; // il numero è già negli appunti
     try { field.setValue(code); field.focus(true, 30); } catch { /* */ }
     // conferma con il pulsante della finestra (OK / Find / Cerca...), se riconoscibile
     try {
@@ -1118,6 +1269,8 @@ dialog{border:1px solid var(--bd2);border-radius:12px;padding:20px;width:min(480
     $("#st-box").hidden = $("#st").value !== "custom";
     renderKept(m);
   }
+  // durante una ricerca, un conteggio o un caricamento i filtri della pagina non si toccano
+  const busy = () => { if (!S.searching) return false; toast("Attendi la fine della ricerca o premi Interrompi"); return true; };
   // ---- gruppi e persone
   function renderPeople(m) {
     const box = clear($("#ppl"));
@@ -1148,6 +1301,8 @@ dialog{border:1px solid var(--bd2);border-radius:12px;padding:20px;width:min(480
           clear(sug);
           if (!list.length) sug.appendChild(h("li", { class: "mu sm", text: "Nessun risultato" }));
           for (const it of list.slice(0, 30)) sug.appendChild(h("li", null, h("button", { type: "button", onclick: () => {
+            if (busy()) return;
+            ensureSnapshot(m);
             const ok = it.r ? pickRecord(f, it.r) : setPerson(f, { v: it.v, t: it.t });
             if (!ok) toast("Il portale non ha accettato il valore: usa «Scegli nel portale»");
             renderPeople(currentModule()); previewNow(); advCount();
@@ -1156,8 +1311,8 @@ dialog{border:1px solid var(--bd2);border-radius:12px;padding:20px;width:min(480
       }
       box.appendChild(h("div", { class: "pr" },
         h("span", { class: "lb" }, label),
-        h("div", { class: "cv" }, cur ? h("span", { class: "chip" }, cur.t, h("button", { type: "button", "aria-label": `Togli ${label}`, title: "Togli il filtro", onclick: () => { clearField(f); renderPeople(currentModule()); previewNow(); advCount(); } }, "×")) : h("span", { class: "mu sm", style: "padding-top:6px" }, "qualsiasi"), inp, sug),
-        h("div", { class: "act" }, h("button", { type: "button", class: "btn s", onclick: () => pickInPortal(m, f, label) }, "Scegli nel portale…"))));
+        h("div", { class: "cv" }, cur ? h("span", { class: "chip" }, cur.t, h("button", { type: "button", "aria-label": `Togli ${label}`, title: "Togli il filtro", onclick: () => { if (busy()) return; ensureSnapshot(m); clearField(f); renderPeople(currentModule()); previewNow(); advCount(); } }, "×")) : h("span", { class: "mu sm", style: "padding-top:6px" }, "qualsiasi"), inp, sug),
+        h("div", { class: "act" }, h("button", { type: "button", class: "btn s", onclick: () => { if (!busy()) pickInPortal(m, f, label); } }, "Scegli nel portale…"))));
     }
   }
   async function queryField(f, q) {
@@ -1209,28 +1364,37 @@ dialog{border:1px solid var(--bd2);border-radius:12px;padding:20px;width:min(480
   function expandFilters(m, f) {
     try { const fp = Ext.getCmp(m.P + "mainFiltersPanel"); if (fp && fp.collapsed && typeof fp.expand === "function") fp.expand(false); } catch { /* */ }
     try {
-      if (f && typeof f.isVisible === "function" && !f.isVisible(true) && m.cmp && m.cmp.el) {
+      if (f && typeof f.isVisible === "function" && !f.isVisible(true) && m.cmp && m.cmp.el && m.cmp.isVisible(true)) {
         const tg = m.cmp.el.dom.querySelector(".filter-toggle");
         if (tg) tg.click();
       }
     } catch { /* */ }
   }
+  let pickCleanup = null; // scelta nel portale in corso: si chiude tornando al pannello per qualsiasi strada
   async function pickInPortal(m, f, label) {
+    if (pickCleanup) pickCleanup();
+    ensureSnapshot(m);
     hide();
     showModuleTab(m);
     await sleep(60);
     expandFilters(m, f);
     await sleep(150);
-    let done = false;
-    const back = () => {
-      if (done) return;
-      done = true;
+    if (host.style.display !== "none") return; // pannello riaperto nel frattempo
+    const cleanup = () => {
+      if (pickCleanup !== cleanup) return;
+      pickCleanup = null;
       try { f.un("change", onChange); } catch { /* */ }
       document.removeEventListener("keydown", onKey, true);
-      setTimeout(() => { hidePill(); show(); $("#adv").open = true; }, 300);
+      hidePill();
+    };
+    const back = () => {
+      if (pickCleanup !== cleanup) return;
+      cleanup();
+      setTimeout(() => { if (host.style.display === "none") show(); $("#adv").open = true; }, 300);
     };
     const onChange = () => { if (personValue(f)) back(); };
-    const onKey = (e) => { if (e.key === "Escape" && !(f.isExpanded)) back(); };
+    const onKey = (e) => { if (e.key === "Escape" && !(f.isExpanded) && host.style.display === "none") back(); };
+    pickCleanup = cleanup;
     f.on("change", onChange);
     document.addEventListener("keydown", onKey, true);
     showPill(`Scegli «${label}» nel portale · poi Ricerca TKT si riapre (clic qui per tornare subito)`, back);
@@ -1254,27 +1418,37 @@ dialog{border:1px solid var(--bd2);border-radius:12px;padding:20px;width:min(480
         n ? h("button", { type: "button", class: "btn gh s", disabled: y.running, onclick: () => searchYear(yy) }, `Cerca nel ${yy}`) : h("span")));
     }
   }
+  // ricerca dell'anno scelto: la stessa ricerca che il riepilogo ha contato (anche dopo altri clic sugli anni)
   function searchYear(y) {
-    const s = S.last || spec();
+    if (S.searching) return;
+    const base = (S.years && S.years.base) || S.last || spec();
     const from = `${y}-01-01`, to = `${y}-12-31`;
-    $("#dfrom").value = s.dfrom && s.dfrom > from ? s.dfrom : from;
-    $("#dto").value = s.dto && s.dto < to ? s.dto : to;
-    $("#preset").value = "custom";
+    applySpec(Object.assign({}, base, { dfrom: base.dfrom && base.dfrom > from ? base.dfrom : from, dto: base.dto && base.dto < to ? base.dto : to }));
     onFormChange();
     if (S.years) { S.years.active = y; S.keepYears = S.years; }
-    runSearch();
+    runSearch(base.people);
   }
   async function yearCounts() {
     const m = currentModule();
-    if (!m || S.searching || !S.last || !S.info) return;
+    if (!m || S.searching || !S.last || !S.info || m.key !== S.module) return;
     const s = S.last;
     const nowY = new Date().getFullYear();
     const toY = s.dto ? Math.min(nowY, +s.dto.slice(0, 4)) : nowY;
     const fromY = s.dfrom ? +s.dfrom.slice(0, 4) : 1990;
     const ctrl = new AbortController();
     S.abort = ctrl; S.searching = true; $("#prog").hidden = false; $("#progt").textContent = "Conto i ticket anno per anno…"; $("#go").disabled = true;
-    S.years = { rows: [], sum: 0, total: S.info.total, running: true, stopped: false };
+    try {
+      if (!(await ensureLastInPortal(m, ctrl.signal))) { pushAlert("warn", DRIFT_MSG); S.abort = null; S.searching = false; $("#prog").hidden = true; $("#go").disabled = false; render(); return; }
+    } catch (e) {
+      S.abort = null; S.searching = false; $("#prog").hidden = true; $("#go").disabled = false;
+      if (!(e && e.name === "AbortError")) pushAlert("err", e && e.message ? e.message : "Errore nel conteggio per anno");
+      render(); return;
+    }
+    S.years = { base: s, rows: [], sum: 0, total: S.info.total, running: true, stopped: false };
     render(); renderYears();
+    // anni dei ticket già caricati: la serie di anni vuoti conta solo sotto il più vecchio
+    const ys = S.results.map((t) => +String(t.date || "").slice(0, 4)).filter((v) => v > 0);
+    const floorY = Math.min(nowY - 2, ys.length ? Math.min(...ys) : toY);
     let zeros = 0;
     try {
       for (let y = toY; y >= fromY; y--) {
@@ -1287,7 +1461,7 @@ dialog{border:1px solid var(--bd2);border-radius:12px;padding:20px;width:min(480
         renderYears();
         if (S.years.sum >= S.years.total) break;
         zeros = n ? 0 : zeros + 1;
-        if (zeros >= 3 && y < nowY - 2) break;
+        if (zeros >= 3 && y < floorY) break;
       }
     } catch (e) {
       S.years.stopped = true;
@@ -1297,8 +1471,8 @@ dialog{border:1px solid var(--bd2);border-radius:12px;padding:20px;width:min(480
       // l'elenco del portale torna sulla ricerca principale (serve per «Apri» e «Carica i successivi»)
       try {
         const run = { applied: [], failed: [], trigger: "", loads: 0 };
-        await reload(m, () => { setPageSize(m.store); applyValues(m, Object.assign({}, s, { people: undefined }), run); }, run);
-        S.info.page = 1;
+        await reload(m, () => { setPageSize(m.store, S.info.pageSize); applyValues(m, Object.assign({}, s, { people: undefined }), run); }, run);
+        S.info.state = listState(m);
       } catch { /* */ }
       S.abort = null; S.searching = false; $("#prog").hidden = true; $("#go").disabled = false;
       renderYears(); render();
@@ -1310,6 +1484,8 @@ dialog{border:1px solid var(--bd2);border-radius:12px;padding:20px;width:min(480
     if (!items.length) { box.appendChild(h("span", { class: "mu sm", text: "Nessuno." })); return; }
     for (const k of items) {
       box.appendChild(h("span", { class: "chip" }, `${k.label}: ${k.value}`, h("button", { type: "button", title: "Togli il filtro dalla pagina", "aria-label": `Togli ${k.label}`, onclick: () => {
+        if (busy()) return;
+        ensureSnapshot(m);
         try { if (typeof k.f.clearValue === "function") k.f.clearValue(); else k.f.setValue(null); } catch { /* */ }
         renderKept(currentModule()); preview();
       } }, "×")));
@@ -1354,18 +1530,26 @@ dialog{border:1px solid var(--bd2);border-radius:12px;padding:20px;width:min(480
     $("#dfrom").value = s.dfrom || ""; $("#dto").value = s.dto || ""; $("#ufrom").value = s.ufrom || ""; $("#uto").value = s.uto || "";
     $("#preset").value = s.dfrom || s.dto ? "custom" : "";
     $("#st").value = ["all", "open", "closed", "custom", "page"].includes(s.st) ? s.st : "all";
-    S.stCodes = new Set(s.stCodes || []); S.prCodes = new Set(s.pr || []);
+    S.stCodes = new Set(Array.isArray(s.stCodes) ? s.stCodes : []); S.prCodes = new Set(Array.isArray(s.pr) ? s.pr : []);
     $("#classif").value = s.classif || ""; $("#classcli").value = s.classcli || "";
     const m = currentModule();
+    const bad = [];
     if (m && s.people && typeof s.people === "object") {
-      for (const [suffix] of PEOPLE) {
+      for (const [suffix, label] of PEOPLE) {
         const f = m.field(suffix);
-        if (!f) continue;
-        const want = s.people[suffix], cur = personValue(f);
-        try { if (want && want.v) { if (!cur || cur.v !== String(want.v)) setPerson(f, want); } else if (cur) clearField(f); } catch { /* */ }
+        const want = s.people[suffix];
+        const short = label.replace(/ \(.*$/, "");
+        if (!f) { if (want && want.v) bad.push(short); continue; }
+        const cur = personValue(f);
+        try {
+          if (want && want.v) { if (!cur || cur.v !== String(want.v)) { ensureSnapshot(m); if (!setPerson(f, want)) bad.push(short); } }
+          else if (cur) { ensureSnapshot(m); clearField(f); }
+        } catch { if (want && want.v) bad.push(short); }
       }
     }
     renderToggles(); advCount(); preview();
+    if (bad.length) toast(`Il portale non ha accettato: ${bad.join(", ")}. Usa «Scegli nel portale».`);
+    return bad;
   }
   function advCount() {
     const s = spec();
@@ -1381,10 +1565,11 @@ dialog{border:1px solid var(--bd2);border-radius:12px;padding:20px;width:min(480
     if (s.ufrom || s.uto) p.push(`Aggiornamento ${s.ufrom ? "dal " + fmtDate(s.ufrom) : ""}${s.ufrom && s.uto ? " " : ""}${s.uto ? "al " + fmtDate(s.uto) : ""}`);
     const stl = { all: "tutti gli stati", open: "stati aperti", closed: "stati chiusi e risolti", page: "stato come nella pagina" };
     if (s.st === "custom") {
-      const names = (S.stOpts || []).filter(([v]) => (s.stCodes || []).includes(v)).map(([, t]) => t);
-      p.push(`Stato: ${names.length ? names.join(", ") : (s.stCodes || []).join(", ") || "nessuno"}`);
+      const codes = Array.isArray(s.stCodes) ? s.stCodes : [];
+      const names = (S.stOpts || []).filter(([v]) => codes.includes(v)).map(([, t]) => t);
+      p.push(`Stato: ${names.length ? names.join(", ") : codes.join(", ") || "nessuno"}`);
     } else p.push(stl[s.st] || "tutti gli stati");
-    if (s.pr && s.pr.length) p.push(`Priorità: ${s.pr.join(", ")}`);
+    if (Array.isArray(s.pr) && s.pr.length) p.push(`Priorità: ${s.pr.join(", ")}`);
     if (s.classif) p.push(`Classificazione ~ "${s.classif}"`);
     if (s.classcli) p.push(`Classif. cliente ~ "${s.classcli}"`);
     for (const [suffix, label] of PEOPLE) { const v = s.people && s.people[suffix]; if (v) p.push(`${label.replace(/ \(.*$/, "")} = ${v.t || v.v}`); }
@@ -1402,6 +1587,7 @@ dialog{border:1px solid var(--bd2);border-radius:12px;padding:20px;width:min(480
     if (s.st === "custom" && !s.stCodes.length) box.appendChild(h("div", { class: "note", text: "Nessuno stato scelto: verrà tolto il filtro sullo stato." }));
   }
   const preview = debounce(previewNow, 120);
+  function safeDescribe(s) { try { return describe(s && typeof s === "object" ? s : {}); } catch { return "(ricerca non leggibile)"; } }
   function refreshHistList() {
     const dl = clear($("#hist-list"));
     const seen = new Set();
@@ -1437,13 +1623,26 @@ dialog{border:1px solid var(--bd2);border-radius:12px;padding:20px;width:min(480
     }
     return dropped;
   }
-  async function runSearch() {
-    const s = spec();
+  // people: gruppi e persone voluti (ricerca salvata, cronologia, anno): anche se la pagina non li ha presi,
+  // così il filtro mancante viene segnalato e la cronologia li conserva
+  async function runSearch(people) {
     if (S.searching) return;
-    const m = currentModule() || (await ensureAllTickets());
-    if (!m) { toast("Non trovo l'elenco «All tickets» del portale: aprilo una volta dalla barra delle schede"); preview(); return; }
     const ctrl = new AbortController();
-    S.abort = ctrl; S.last = s; S.words = wordsOf(s); S.module = m.key; S.years = S.keepYears || null; S.keepYears = null; renderYears();
+    S.searching = true; S.abort = ctrl; $("#go").disabled = true; // occupato prima di qualsiasi attesa
+    let m = currentModule();
+    if (!m) {
+      const p = ensureAllTickets();
+      previewNow(); // «Apro la scheda All tickets del portale…»
+      m = await p.catch(() => null);
+      if (!m || ctrl.signal.aborted) {
+        S.abort = null; S.searching = false; S.keepYears = null; $("#go").disabled = false;
+        if (!m) toast("Non trovo l'elenco «All tickets» del portale: aprilo una volta dalla barra delle schede");
+        preview(); return;
+      }
+    }
+    const s = spec();
+    if (people && typeof people === "object") s.people = JSON.parse(JSON.stringify(people));
+    S.last = s; S.words = wordsOf(s); S.module = m.key; S.years = S.keepYears || null; S.keepYears = null; renderYears();
     Object.assign(S, { results: [], keys: new Set(), page: 1, alerts: [], info: null, refine: "" });
     S.selected.clear(); S.facet = emptyFacets();
     $("#refine").value = ""; $("#emptyst").hidden = true; $("#results").hidden = false; $("#prog").hidden = false; $("#progt").textContent = "Ricerca in corso nel portale…"; $("#go").disabled = true;
@@ -1453,9 +1652,10 @@ dialog{border:1px solid var(--bd2);border-radius:12px;padding:20px;width:min(480
       const r = await pageSearch(m, s, ctrl.signal);
       const dropped = addResults(r.tickets, s);
       const run = conn.lastRun;
-      S.info = { total: r.total, loaded: r.tickets.length, page: r.page, pageSize: r.pageSize, dropped, ms: run.ms };
+      S.info = { total: r.total, loaded: r.tickets.length, page: r.page, pageSize: r.pageSize, dropped, ms: run.ms, state: listState(m) };
       if (run.failed.length) pushAlert("warn", `Alcuni filtri non sono stati impostati nella pagina: ${run.failed.join("; ")}. I risultati potrebbero non rispettarli.`);
       if (run.verified === false) pushAlert("warn", "Il portale ha ricaricato l'elenco, ma la richiesta non sembra contenere il testo cercato: i risultati potrebbero non essere filtrati. Se succede, manda i dati tecnici (Impostazioni).");
+      if (r.pageSize < settings.cap && r.total > r.tickets.length) pushAlert("warn", `Il portale restituisce al massimo ${fmtN(r.pageSize)} ticket per richiesta.`);
       if (r.total > r.tickets.length) pushAlert("warn", `Il portale ha ${fmtN(r.total)} ticket per questa ricerca, su tutti gli anni: qui ci sono i ${fmtN(r.tickets.length)} più recenti. Con «Quanti per anno?» vedi come si distribuiscono e cerchi in un anno solo; oppure restringi la ricerca o carica i successivi.`);
       if (dropped) pushAlert("info", `${fmtN(dropped)} ticket scartati dai filtri sui risultati.`);
       if (!r.tickets.length && r.total) pushAlert("warn", "Il portale indica dei risultati ma l'elenco è vuoto: manda i dati tecnici da Impostazioni.");
@@ -1474,18 +1674,20 @@ dialog{border:1px solid var(--bd2);border-radius:12px;padding:20px;width:min(480
   async function loadMore() {
     const m = currentModule();
     if (!m || S.searching || !S.info || m.key !== S.module) return;
-    S.years = null; renderYears();
     const ctrl = new AbortController();
     S.abort = ctrl; S.searching = true; $("#prog").hidden = false; $("#progt").textContent = "Carico i ticket successivi…"; $("#go").disabled = true;
     render();
     try {
-      const r = await loadNextPage(m, ctrl.signal);
+      if (!(await ensureLastInPortal(m, ctrl.signal))) { pushAlert("warn", DRIFT_MSG); return; }
+      S.years = null; renderYears();
+      const r = await loadNextPage(m, S.info.page + 1, S.info.pageSize, ctrl.signal);
       const before = S.results.length;
       S.info.dropped += addResults(r.tickets, S.last);
       S.info.loaded += r.tickets.length; S.info.page = r.page; S.info.total = r.total;
+      S.info.state = listState(m);
       toast(`Aggiunti ${fmtN(S.results.length - before)} ticket`);
-    } catch (e) { pushAlert("err", e && e.message ? e.message : "Errore"); } finally {
-      S.abort = null; S.searching = false; $("#prog").hidden = true; $("#go").disabled = false; render();
+    } catch (e) { if (!(e && e.name === "AbortError")) pushAlert("err", e && e.message ? e.message : "Errore"); } finally {
+      S.abort = null; S.searching = false; $("#prog").hidden = true; $("#go").disabled = false; render(); preview();
     }
   }
   function pushAlert(kind, message) {
@@ -1733,16 +1935,24 @@ dialog{border:1px solid var(--bd2);border-radius:12px;padding:20px;width:min(480
     if (!items.length) { box.appendChild(h("div", { class: "empty", text: S.favorites.size ? "Nessun preferito corrisponde al filtro." : "Nessun preferito: usa ☆ sui risultati per salvarli qui, con note ed etichette." })); return; }
     for (const f of items) box.appendChild(ticketEl(f.ticket, true));
   }
-  function runSpec(s) { tab("search"); applySpec(s); runSearch(); }
+  // ricerca salvata o della cronologia: si aspetta l'elenco All tickets prima di impostarla (gruppi, persone e stati)
+  async function openSpec(s) {
+    if (busy()) return false;
+    tab("search");
+    if (!currentModule()) { const p = ensureAllTickets(); previewNow(); await p; } // «Apro la scheda All tickets del portale…»
+    applySpec(s);
+    return true;
+  }
+  async function runSpec(s) { if (await openSpec(s)) runSearch(s && s.people && typeof s.people === "object" ? s.people : undefined); }
   function renderSaved() {
     const box = clear($("#saved"));
     const items = store.get("saved", []);
     if (!items.length) { box.appendChild(h("div", { class: "empty", text: 'Nessuna ricerca salvata: usa "Salva ricerca" sotto la barra di ricerca.' })); return; }
     items.forEach((it, i) => box.appendChild(h("div", { class: "li" },
-      h("div", { class: "m" }, h("div", { class: "t", text: it.name }), h("div", { class: "s", text: describe(it.spec) })),
+      h("div", { class: "m" }, h("div", { class: "t", text: it.name }), h("div", { class: "s", text: safeDescribe(it.spec) })),
       h("span", { class: "mu sm", text: fmtDT(it.created) }),
       h("button", { type: "button", class: "btn s", onclick: () => runSpec(it.spec) }, "Esegui"),
-      h("button", { type: "button", class: "btn gh s", onclick: () => { tab("search"); applySpec(it.spec); } }, "Apri"),
+      h("button", { type: "button", class: "btn gh s", onclick: () => openSpec(it.spec) }, "Apri"),
       h("button", { type: "button", class: "btn gh s dg", onclick: () => { if (!confirm(`Eliminare la ricerca "${it.name}"?`)) return; const all = store.get("saved", []); all.splice(i, 1); store.set("saved", all); renderSaved(); } }, "Elimina"))));
   }
   function renderHistory() {
@@ -1750,9 +1960,9 @@ dialog{border:1px solid var(--bd2);border-radius:12px;padding:20px;width:min(480
     const items = store.get("history", []);
     if (!items.length) { box.appendChild(h("div", { class: "empty", text: "La cronologia è vuota." })); return; }
     for (const it of items) box.appendChild(h("div", { class: "li" },
-      h("div", { class: "m" }, h("div", { class: "t", text: describe(it.spec) }), h("div", { class: "s", text: `${fmtDT(it.created)} · ${fmtN(it.results)} risultati${it.total > it.results ? ` su ${fmtN(it.total)}` : ""}` })),
+      h("div", { class: "m" }, h("div", { class: "t", text: safeDescribe(it.spec) }), h("div", { class: "s", text: `${fmtDT(it.created)} · ${fmtN(it.results)} risultati${it.total > it.results ? ` su ${fmtN(it.total)}` : ""}` })),
       h("button", { type: "button", class: "btn s", onclick: () => runSpec(it.spec) }, "Ripeti"),
-      h("button", { type: "button", class: "btn gh s", onclick: () => { tab("search"); applySpec(it.spec); } }, "Apri")));
+      h("button", { type: "button", class: "btn gh s", onclick: () => openSpec(it.spec) }, "Apri")));
   }
   $("#dsave form").addEventListener("submit", (e) => {
     if (!e.submitter || e.submitter.value !== "ok") return;
@@ -1811,7 +2021,7 @@ dialog{border:1px solid var(--bd2);border-radius:12px;padding:20px;width:min(480
       const first = m.store.getAt(0);
       if (first) {
         const cols = gridColumns(m.grid);
-        t.firstRowShape = cols.map((c) => { const p = cellParts(m, first, c, 0); return `${c.header}: ${p.parts.length} parti${p.title ? ", title " + p.title.length + " car. " + JSON.stringify(sections(p.title).map(([l]) => l)) : ""}`; });
+        t.firstRowShape = cols.map((c) => { const p = cellParts(m, first, c, 0); return `${c.header}: ${p.parts.length} parti${p.title ? ", title " + p.title.length + " car. " + JSON.stringify(sections(p.title).map(([l]) => (SEC_LABEL_RE.test(l) ? l : maskDeep(l, keepSet)))) : ""}`; });
       }
     } catch (e) { t.columnsError = String(e && e.message); }
     t.filters = filterFields(m).map(({ suffix, f }) => {
@@ -1819,7 +2029,7 @@ dialog{border:1px solid var(--bd2);border-radius:12px;padding:20px;width:min(480
       const controlled = suffix in CONTROLLED;
       let value = "";
       try { value = controlled ? maskDeep(f.getValue(), keepSet) : (fieldDisplay(f) ? "(impostato)" : ""); } catch { /* */ }
-      const o = { suffix, cls: f.$className, xtype: f.xtype, name: f.getName ? f.getName() : f.name, label: fieldLabel(f, suffix), controlled, value, options: opts.length, sample: opts.slice(0, 20).map(([v, x]) => (controlled ? `${v}=${x}` : v)), valueField: f.valueField, displayField: f.displayField, multi: !!f.multiSelect, listeners: names(f.hasListeners) };
+      const o = { suffix, cls: f.$className, xtype: f.xtype, name: f.getName ? f.getName() : f.name, label: fieldLabel(f, suffix), controlled, value, options: opts.length, sample: opts.slice(0, 20).map(([v, x]) => (controlled ? `${v}=${x}` : maskDeep(v, keepSet))), valueField: f.valueField, displayField: f.displayField, multi: !!f.multiSelect, listeners: names(f.hasListeners) };
       if (PEOPLE_KEYS.has(suffix)) {
         try {
           let st = null;
@@ -1839,6 +2049,7 @@ dialog{border:1px solid var(--bd2);border-radius:12px;padding:20px;width:min(480
     try { t.buttons = (m.cmp && m.cmp.query ? m.cmp.query("button") : []).map((b) => textOf(String((b.getText ? b.getText() : b.text) || b.tooltip || b.itemId || ""))).filter(Boolean).slice(0, 60); } catch { /* */ }
     return t;
   }
+  const NAV_TAB_RE = /^(home|my tickets|my group tickets|tickets from my groups|all tickets?|tutti i ticket|tutti i tickets|registry|contacts)$/i;
   function techData() {
     const s = S.last || spec();
     const keepSet = new Set([s.text, s.subject, s.classif, s.classcli, ...wordsOf(s), ...(s.stCodes || []), ...(s.pr || [])].filter(Boolean).map((x) => norm(x).trim()));
@@ -1850,7 +2061,7 @@ dialog{border:1px solid var(--bd2);border-radius:12px;padding:20px;width:min(480
       tool: `Ricerca TKT ${VERSION} (segnalibro)`, page: location.origin + location.pathname, at: new Date().toISOString(), ext,
       portal: { Portal: !!window.Portal, PageManager: !!(window.Portal && window.Portal.PageManager), ActivityMonitor: !!(Ext.ux && Ext.ux.ActivityMonitor), dateFormat: (Ext.Date && Ext.Date.defaultFormat) || null },
       lists: S.modules.map((x) => ({ key: x.key, prefix: x.prefix, title: x.title, tab: x.tabText, body: x.bodyId, all: isAllList(x), grid: !!x.grid, store: !!x.store, rendered: x.rendered })),
-      tabs: portalTabs().map((x) => ({ text: x.text, card: x.card ? x.card.id : null, cardCls: x.card ? x.card.$className : null })),
+      tabs: portalTabs().map((x) => ({ text: NAV_TAB_RE.test(x.text) || (x.card && /^body_/.test(x.card.id || "")) ? x.text : maskDeep(x.text, keepSet), card: x.card ? x.card.id : null, cardCls: x.card ? x.card.$className : null })),
       current: m ? moduleTech(m, keepSet) : null,
       lastSearch: conn.lastRun ? Object.assign({}, conn.lastRun, { spec: maskDeep(s, keepSet) }) : null,
       requests: conn.ext.slice(-12).map(req), xhr: conn.xhr.slice(-12).map(req), errors: conn.errors.slice(-10), settings,
@@ -1912,7 +2123,27 @@ dialog{border:1px solid var(--bd2);border-radius:12px;padding:20px;width:min(480
     o.cols = Array.isArray(t.cols) ? t.cols.slice(0, 60).map((c) => ({ h: str(c && c.h, 100), v: str(c && c.v, 2000) })) : [];
     return o;
   }
-  const importSpec = (sp) => (sp && typeof sp === "object" ? JSON.parse(JSON.stringify(sp)) : null);
+  // ricerche importate: solo i campi noti, con i tipi giusti (un file modificato a mano non deve rompere gli elenchi)
+  const strList = (a) => (Array.isArray(a) ? a.slice(0, 100).map((x) => str(x, 100)).filter(Boolean) : []);
+  const isoDay = (v) => (typeof v === "string" && /^\d{4}-\d{2}-\d{2}$/.test(v) ? v : "");
+  function importSpec(sp) {
+    if (!sp || typeof sp !== "object" || Array.isArray(sp)) return null;
+    const people = {};
+    const src = sp.people && typeof sp.people === "object" ? sp.people : {};
+    for (const [k] of PEOPLE) {
+      const p = src[k];
+      const v = p && typeof p === "object" && (typeof p.v === "string" || typeof p.v === "number") ? str(p.v, 100) : "";
+      if (v) people[k] = { v, t: textOf(str(p.t, 200)).replace(/[<>"`]/g, "") || v };
+    }
+    // stesso ordine delle chiavi di spec(): serve al confronto dei doppioni
+    return {
+      text: str(sp.text, 500), subject: str(sp.subject, 500), exclude: str(sp.exclude, 500), allWords: sp.allWords === true,
+      dfrom: isoDay(sp.dfrom), dto: isoDay(sp.dto), ufrom: isoDay(sp.ufrom), uto: isoDay(sp.uto),
+      st: ["all", "open", "closed", "custom", "page"].includes(sp.st) ? sp.st : "all", stCodes: strList(sp.stCodes), pr: strList(sp.pr),
+      classif: str(sp.classif, 500), classcli: str(sp.classcli, 500), people,
+    };
+  }
+  const specKey = (sp) => { try { return JSON.stringify(importSpec(sp)); } catch { return ""; } };
   $("#pimp").addEventListener("change", async () => {
     const inp = $("#pimp");
     const file = inp.files[0];
@@ -1931,10 +2162,10 @@ dialog{border:1px solid var(--bd2);border-radius:12px;padding:20px;width:min(480
       }
       if (Array.isArray(d.saved)) {
         const cur = store.get("saved", []);
-        const k = (x) => `${x.name}\u0001${JSON.stringify(x.spec)}`;
+        const k = (x) => `${x.name}\u0001${specKey(x.spec)}`;
         const seen = new Set(cur.map(k));
         for (const x of d.saved) {
-          const spc = x && x.name && importSpec(x.spec);
+          const spc = x && typeof x === "object" && x.name && importSpec(x.spec);
           if (!spc) continue;
           const item = { name: str(x.name, 200), spec: spc, created: str(x.created, 40) };
           if (!seen.has(k(item))) { seen.add(k(item)); cur.push(item); ns++; }
@@ -1944,10 +2175,10 @@ dialog{border:1px solid var(--bd2);border-radius:12px;padding:20px;width:min(480
       }
       if (Array.isArray(d.history)) {
         const cur = store.get("history", []);
-        const k = (x) => `${x.created}\u0001${JSON.stringify(x.spec)}`;
+        const k = (x) => `${x.created}\u0001${specKey(x.spec)}`;
         const seen = new Set(cur.map(k));
         for (const x of d.history) {
-          const spc = x && importSpec(x.spec);
+          const spc = x && typeof x === "object" && importSpec(x.spec);
           if (!spc) continue;
           const item = { spec: spc, results: parseInt(x.results, 10) || 0, total: parseInt(x.total, 10) || 0, created: str(x.created, 40) };
           if (!seen.has(k(item))) { seen.add(k(item)); cur.push(item); nh++; }
@@ -2000,7 +2231,7 @@ dialog{border:1px solid var(--bd2);border-radius:12px;padding:20px;width:min(480
     S.stCodes = new Set((S.stOpts || []).filter(([, t]) => what === "all" || (what === "open" && !CLOSED_RE.test(t)) || (what === "closed" && CLOSED_RE.test(t))).map(([v]) => v));
     renderToggles(); onFormChange();
   }));
-  $("#qreset").addEventListener("click", () => { applySpec({ people: {} }); $("#q").focus(); });
+  $("#qreset").addEventListener("click", () => { if (busy()) return; applySpec({ people: {} }); $("#q").focus(); });
   $("#qsave").addEventListener("click", () => { const s = spec(); $("#sname").value = s.text || s.subject || ""; $("#dsave").showModal(); $("#sname").select(); });
   $("#stop").addEventListener("click", () => S.abort && S.abort.abort());
   $("#qrestore").addEventListener("click", async () => {
@@ -2008,9 +2239,12 @@ dialog{border:1px solid var(--bd2);border-radius:12px;padding:20px;width:min(480
     const sn = m && S.snaps[m.key];
     if (!sn || S.searching) return;
     S.searching = true; $("#go").disabled = true; $("#qrestore").disabled = true;
-    try { await restoreSnapshot(m, sn); delete S.snaps[m.key]; toast("Filtri dell'elenco del portale ripristinati"); }
-    catch (e) { toast(e && e.message ? e.message : "Ripristino non riuscito"); }
-    finally { S.searching = false; $("#go").disabled = false; $("#qrestore").disabled = false; renderKept(currentModule()); preview(); }
+    try {
+      const missed = await restoreSnapshot(m, sn);
+      delete S.snaps[m.key];
+      toast(missed.length ? `Filtri ripristinati tranne: ${missed.join(", ")} (rimettili nel portale)` : "Filtri dell'elenco del portale ripristinati");
+    } catch (e) { toast(e && e.message ? e.message : "Ripristino non riuscito"); }
+    finally { S.searching = false; $("#go").disabled = false; $("#qrestore").disabled = false; renderToggles(); preview(); render(); }
   });
   $("#refine").addEventListener("input", debounce(() => { S.refine = $("#refine").value; S.page = 1; render(); }, 150));
   $("#sort").addEventListener("change", () => { S.sort = $("#sort").value; S.page = 1; render(); });
@@ -2024,6 +2258,8 @@ dialog{border:1px solid var(--bd2);border-radius:12px;padding:20px;width:min(480
   $("#ffilter").addEventListener("input", debounce(renderFavs, 150));
 
   function show() {
+    if (pickCleanup) pickCleanup(); // tornando al pannello per qualsiasi strada la scelta nel portale finisce
+    conn.on = true;
     host.style.display = ""; document.documentElement.style.overflow = "hidden"; if (document.body) document.body.inert = true;
     renderToggles(); previewNow();
     $("#capq").value = String(settings.cap);
@@ -2036,6 +2272,7 @@ dialog{border:1px solid var(--bd2);border-radius:12px;padding:20px;width:min(480
     if (S.abort) S.abort.abort();
     root.querySelectorAll("dialog[open]").forEach((d) => d.close());
     host.style.display = "none";
+    conn.on = false;
     document.documentElement.style.overflow = prevOverflow;
     if (document.body) document.body.inert = prevInert;
   }

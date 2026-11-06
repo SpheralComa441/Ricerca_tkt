@@ -91,9 +91,14 @@ cd bookmarklet && npm i --no-save esbuild@0.24.0 && node build.mjs
 
 La prova completa usa un finto portale con ExtJS vero (versione GPL, non inclusa nel
 repository) e dati inventati: stesse schede del portale (My tickets, My Group Tickets, Tickets
-from my groups, All tickets, anche creata solo alla prima apertura con `?lazy=1`), token
-anti-falsificazione obbligatorio, filtri applicati in tre modi diversi (`?apply=auto|enter|none`),
-filtri di gruppi e persone (menu e ricerca sul server), pulsanti *Open* e *Find by ID…*.
+from my groups, All tickets, anche creata solo alla prima apertura con `?lazy=1` o dopo N
+millisecondi con `?lazy=N`), elenchi annidati in contenitori `body_ctlNN` come nel portale vero,
+token anti-falsificazione obbligatorio, filtri applicati in tre modi diversi
+(`?apply=auto|enter|none`), filtri di gruppi e persone (menu e ricerca sul server), pulsanti
+*Open* (con `?openbind=1` abilitato da un binding dopo la selezione) e *Find by ID…*. La prova
+registra le proprie richieste a parte (intestazione `x-e2e-run`), quindi più prove possono usare
+lo stesso finto portale; risposte lente, limiti di righe e filtri aggiunti dal server sono
+simulati intercettando le richieste dal browser.
 Scarica ExtJS una volta:
 
 ```bash

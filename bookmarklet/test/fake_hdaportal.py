@@ -185,7 +185,7 @@ __BM__
 <script>
 window.__opened = []; window.__activity = 0;
 window.Portal = { Const: { LoggedUser: { Name: "Utente di prova" } }, PageManager: {}, MessageBus: {} };
-var CFG = { apply: "__APPLY__", tab: "__TAB__", lazy: __LAZY__, statuses: __STATUSES__, open: __OPEN__, priorities: __PRIORITIES__, services: __SERVICES__, users: __USERS__, groups: __GROUPS__ };
+var CFG = { apply: "__APPLY__", tab: "__TAB__", lazy: __LAZY__, openbind: __OPENBIND__, statuses: __STATUSES__, open: __OPEN__, priorities: __PRIORITIES__, services: __SERVICES__, users: __USERS__, groups: __GROUPS__ };
 Ext.onReady(function () {
   Ext.ns("Ext.ux");
   Ext.ux.ActivityMonitor = { lastActive: new Date(), captureActivity: function () { this.lastActive = new Date(); window.__activity++; } };
@@ -261,8 +261,13 @@ Ext.onReady(function () {
       if (CFG.apply === "enter" && f.isXType("textfield") && !f.isXType("combobox") && !f.isXType("datefield"))
         f.on("specialkey", function (fd, e) { if (e.getKey() === e.ENTER) applyFilters(); });
     });
+    var vm = CFG.openbind ? Ext.create("Ext.app.ViewModel", { data: { sel: null } }) : null;
+    var dbl = function (v, r) { openTicket(r.get("TicketCode"), r.get("Subject")); };
     var grid = Ext.create("Ext.grid.Panel", { id: P + "grd", store: store, flex: 1, cls: "list-view list-grid listViewGrid",
-      selModel: { selType: "checkboxmodel", mode: "MULTI" }, viewConfig: { id: P + "GridView1" },
+      selModel: { selType: "checkboxmodel", mode: "MULTI" },
+      // openbind: come in un portale MVVM, il doppio clic è ascoltato dalla view e Open si abilita con un binding
+      viewConfig: CFG.openbind ? { id: P + "GridView1", listeners: { itemdblclick: dbl } } : { id: P + "GridView1" },
+      viewModel: vm || undefined,
       columns: [
         { xtype: "templatecolumn", tpl: '<div class="gridCtxMenu"></div>', width: 40, menuDisabled: true, sortable: false },
         { id: P + "c23_0", text: "ID", dataIndex: "TicketCode", width: 120, renderer: function (v) { return '<div class="list-cell list-cell-primary"><div class="ticket-id">' + enc(v) + "</div></div>"; } },
@@ -285,7 +290,7 @@ Ext.onReady(function () {
         { id: P + "c33_22", text: "Modified by", dataIndex: "ModifiedByText", hidden: true, sortable: false },
         { id: P + "c23_29", text: "Tags", dataIndex: "Tags", width: 100, sortable: false }
       ],
-      listeners: { itemdblclick: function (v, r) { openTicket(r.get("TicketCode"), r.get("Subject")); } },
+      listeners: CFG.openbind ? { selectionchange: function (sm, sel) { vm.set("sel", sel.length ? sel[0] : null); } } : { itemdblclick: dbl },
       tbar: { id: P + "listToolbar", items: [
         { xtype: "textfield", id: P + "defaultFilter_default_FullText", name: "FullText", emptyText: "Search", width: 220,
           listeners: { specialkey: function (f, e) { if (e.getKey() === e.ENTER) { fFull.setValue(f.getValue()); applyFilters(); } } } },
@@ -296,7 +301,9 @@ Ext.onReady(function () {
                 var o = Ext.decode(resp.responseText); if (o.found) openTicket(o.code, o.subject); else Ext.Msg.alert("Find by ID", "Ticket not found"); } });
             });
           } },
-        { text: "Open", handler: function () { var s = grid.getSelection()[0]; if (s) openTicket(s.get("TicketCode"), s.get("Subject")); } },
+        Ext.apply({ text: "Open", handler: function () { var s = grid.getSelection()[0]; if (s) openTicket(s.get("TicketCode"), s.get("Subject")); } },
+          CFG.openbind ? { disabled: true, bind: { disabled: "{!sel}" } } : {}),
+        { text: "Discard ticket", handler: function () { window.__discarded = (window.__discarded || 0) + 1; } },
         { text: "Change status...", handler: function () {} }
       ] },
       bbar: { xtype: "pagingtoolbar", id: P + "PagingToolbar", store: store, displayInfo: true,
@@ -306,16 +313,20 @@ Ext.onReady(function () {
     return Ext.create("Ext.panel.Panel", { id: P + "ListCt", cls: "module list entity-incident", layout: { type: "vbox", align: "stretch" },
       items: [{ xtype: "panel", id: P + "mainFiltersPanel", items: [{ xtype: "panel", id: P + "filterArea_default", cls: "filter-area", layout: "column", items: fields }] }, grid] });
   }
+  // come nel portale vero: tra la scheda (body_X) e il modulo ci sono altri contenitori body_ctlNN
+  function wrap(module, a, b) {
+    return { xtype: "container", id: "body_ctl" + a, layout: "fit", items: [{ xtype: "panel", id: "body_ctl" + b, cls: "action-link module-container", layout: "fit", items: [module] }] };
+  }
   var mine = makeModule("id5e1f0c2a9b7d3e48", "MYTKT", CFG.open);
   var grp = makeModule("id7c3b1a9e5d2f4061", "DEFGRP", CFG.open);
   var from = makeModule("id2f6e8d0c4b1a3957", "INC_MYGRP", CFG.open);
-  var allBody = { title: "All tickets", id: "body_INC_ALLGRP_EXTENDED", layout: "fit", items: CFG.lazy ? [] : [makeModule("id0a9c7e5b3d1f2468", "INC_ALLGRP_EXTENDED", CFG.open)] };
-  if (CFG.lazy) allBody.listeners = { activate: function (b) { if (!b.items.getCount()) setTimeout(function () { b.add(makeModule("id0a9c7e5b3d1f2468", "INC_ALLGRP_EXTENDED", CFG.open)); }, 400); } };
+  var allBody = { title: "All tickets", id: "body_INC_ALLGRP_EXTENDED", layout: "fit", items: CFG.lazy ? [] : [wrap(makeModule("id0a9c7e5b3d1f2468", "INC_ALLGRP_EXTENDED", CFG.open), 85, 92)] };
+  if (CFG.lazy) allBody.listeners = { activate: function (b) { if (!b.items.getCount()) setTimeout(function () { b.add(wrap(makeModule("id0a9c7e5b3d1f2468", "INC_ALLGRP_EXTENDED", CFG.open), 85, 92)); }, CFG.lazy > 1 ? CFG.lazy : 400); } };
   tabs = Ext.create("Ext.tab.Panel", { id: "navbar", items: [
     { title: "Home", id: "body_Home", html: "<h2 style='margin:16px'>Home (finta)</h2>" },
-    { title: "My tickets", id: "body_MYTKT", layout: "fit", items: [mine] },
-    { title: "My Group Tickets", id: "body_DEFGRP", layout: "fit", items: [grp] },
-    { title: "Tickets from my groups", id: "body_INC_MYGRP", layout: "fit", items: [from] },
+    { title: "My tickets", id: "body_MYTKT", layout: "fit", items: [wrap(mine, 43, 50)] },
+    { title: "My Group Tickets", id: "body_DEFGRP", layout: "fit", items: [wrap(grp, 57, 64)] },
+    { title: "Tickets from my groups", id: "body_INC_MYGRP", layout: "fit", items: [wrap(from, 71, 78)] },
     allBody
   ] });
   Ext.create("Ext.container.Viewport", { layout: "fit", items: [tabs] });
@@ -334,7 +345,7 @@ window.Intl = { NumberFormat: function(){ throw new Error("Intl ridefinito"); } 
 
 
 @app.get("/HDAPortal/")
-async def portal(apply: str = "auto", tab: str = "home", ostile: int = 0, lazy: int = 0):
+async def portal(apply: str = "auto", tab: str = "home", ostile: int = 0, lazy: int = 0, openbind: int = 0):
     if apply not in ("auto", "enter", "none"):
         apply = "auto"
     bm = ""
@@ -344,7 +355,7 @@ async def portal(apply: str = "auto", tab: str = "home", ostile: int = 0, lazy: 
     page = (PAGE.replace("__APPLY__", apply).replace("__TAB__", "all" if tab == "all" else "home")
             .replace("__STATUSES__", json.dumps(STATUSES)).replace("__OPEN__", json.dumps(OPEN_DEFAULT))
             .replace("__PRIORITIES__", json.dumps(PRIORITIES)).replace("__SERVICES__", json.dumps(SERVICES))
-            .replace("__USERS__", json.dumps(USERS)).replace("__GROUPS__", json.dumps(GROUPS)).replace("__LAZY__", "true" if lazy else "false")
+            .replace("__USERS__", json.dumps(USERS)).replace("__GROUPS__", json.dumps(GROUPS)).replace("__LAZY__", str(max(0, min(lazy, 20000)))).replace("__OPENBIND__", "true" if openbind else "false")
             .replace("__TOKEN__", TOKEN).replace("__HOSTILE__", HOSTILE if ostile else "").replace("__BM__", bm))
     r = HTMLResponse(page)
     r.set_cookie("ASP.NET_SessionId", "ok", path="/")
@@ -359,6 +370,10 @@ async def vendor(path: str):
     return FileResponse(p)
 
 
+def _run(request: Request) -> str:
+    return request.headers.get("x-e2e-run", "")
+
+
 def _auth(request: Request) -> JSONResponse | None:
     if request.cookies.get("ASP.NET_SessionId") != "ok":
         return JSONResponse({"success": False, "message": "Sessione scaduta"}, status_code=401)
@@ -371,7 +386,7 @@ def _auth(request: Request) -> JSONResponse | None:
 async def list_data(request: Request, list_name: str = Query("", alias="list")):
     body = (await request.body()).decode("utf-8")
     params = {k: v[0] for k, v in parse_qs(body, keep_blank_values=True).items()}
-    entry = {"list": list_name, "params": params, "token": request.headers.get("requestverificationtoken") == TOKEN}
+    entry = {"run": _run(request), "list": list_name, "params": params, "token": request.headers.get("requestverificationtoken") == TOKEN}
     try:
         filters = json.loads(params.get("filters") or "[]")
     except ValueError:
@@ -407,7 +422,7 @@ async def lookup_users(request: Request, query: str = ""):
     if denied:
         return denied
     q = norm(query)
-    LOG.append({"lookup": query})
+    LOG.append({"run": _run(request), "lookup": query})
     return {"data": [{"value": c, "text": n} for c, n in USERS if q and q in norm(n)][:20]}
 
 
@@ -418,7 +433,7 @@ async def find(request: Request):
         return denied
     body = (await request.body()).decode("utf-8")
     code = (parse_qs(body).get("code") or [""])[0].strip().upper()
-    LOG.append({"find": code})
+    LOG.append({"run": _run(request), "find": code})
     for r in data():
         if r["TicketCode"] == code:
             return {"found": True, "code": code, "subject": r["Subject"]}
@@ -437,11 +452,11 @@ async def get_data(limit: int = 5, q: str = ""):
 
 
 @app.get("/__log")
-async def get_log():
-    return JSONResponse(LOG)
+async def get_log(run: str = ""):
+    return JSONResponse([e for e in LOG if e.get("run") == run] if run else LOG)
 
 
 @app.post("/__reset")
-async def reset():
-    LOG.clear()
+async def reset(run: str = ""):
+    LOG[:] = [e for e in LOG if e.get("run") != run] if run else []
     return {"ok": True}
