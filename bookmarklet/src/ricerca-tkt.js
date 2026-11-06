@@ -354,14 +354,47 @@
     return d ? isDate(now) && isoOf(now) === iso : !now;
   }
   const fieldLabel = (f, fb) => { try { return textOf(String((typeof f.getFieldLabel === "function" ? f.getFieldLabel() : f.fieldLabel) || f.emptyText || fb)); } catch { return fb; } };
+  // Nei campi objectlink-field e combo-field di Touch il valore interno o l'input nascosto può essere JSON:
+  // [{"value":"C349471X","text":"COOPERATIVA SERVIZI ELABORAZIONE","index":0}]
+  function parseJsonValue(raw) {
+    if (raw === null || raw === undefined) return null;
+    let arr = raw;
+    if (typeof raw === "string") {
+      const s = raw.trim();
+      if (!s.startsWith("[") && !s.startsWith("{")) return null;
+      try { arr = JSON.parse(s); } catch { return null; }
+    }
+    const items = (Array.isArray(arr) ? arr : [arr]).filter((x) => x && typeof x === "object" && ("value" in x || "Value" in x || "text" in x || "Text" in x));
+    if (!items.length) return null;
+    const vals = items.map((x) => String(x.value ?? x.Value ?? "")).filter(Boolean);
+    const txts = items.map((x) => textOf(String(x.text ?? x.Text ?? x.value ?? x.Value ?? ""))).filter(Boolean);
+    if (!vals.length) return { v: "", t: "" };
+    return { v: vals[0], vals, t: txts.join(", ") || vals.join(", ") };
+  }
   function fieldDisplay(f) {
     try {
       const raw = typeof f.getRawValue === "function" ? f.getRawValue() : "";
-      if (raw && String(raw).trim()) return String(raw).trim();
+      if (raw && String(raw).trim()) {
+        const j = parseJsonValue(raw);
+        if (j) return j.t;
+        return String(raw).trim();
+      }
+      // In Touch gli objectlink-field salvano {value,text} in un <input type="hidden"> dentro il componente
+      try {
+        const dom = f && f.el && f.el.dom;
+        if (dom) {
+          for (const inp of dom.querySelectorAll('input[type="hidden"]')) {
+            const j = parseJsonValue(inp.value);
+            if (j && j.t) return j.t;
+          }
+        }
+      } catch { /* */ }
       const v = f.getValue();
+      const jv = parseJsonValue(v);
+      if (jv) return jv.t;
       if (isDate(v)) return fmtDate(isoOf(v));
       if (Array.isArray(v)) return v.length ? v.join(", ") : "";
-      if (v && typeof v === "object") return "";
+      if (v && typeof v === "object") return String(v.text || v.Text || v.Description || "");
       return v === null || v === undefined ? "" : String(v).trim();
     } catch { return ""; }
   }
@@ -384,19 +417,48 @@
   }
   // Gruppi e persone: campi del portale con menu ad albero o ricerca (valori = codici del portale)
   const PEOPLE = [
-    ["AssignedUserOrGroupFilter", "Assegnato a (persona o gruppo)"],
-    ["OwnerUserGroupID", "Gruppo proprietario"],
-    ["ModifiedBy", "Modificato da (chi ci ha lavorato)"],
+    ["AssignedUserOrGroupFilter", "Assegnato a (Assigned to)"],
+    ["OwnerUserGroupID", "Gruppo proprietario (Owner group)"],
+    ["ModifiedBy", "Modificato da (Modified by)"],
     ["OwnerUserID", "Responsabile (Resource Owner)"],
   ];
   const PEOPLE_KEYS = new Set(PEOPLE.map(([k]) => k));
+  // Etichette chiare (italiano + nome Touch) e ordine logico per tutti gli altri filtri di Touch
+  const PF_META = {
+    ServiceID: { label: "Servizio (Service)", group: "main", order: 1, hint: "Albero dei servizi / prodotti" },
+    RefAccountID: { label: "Sede / Cliente (Site)", group: "main", order: 2, hint: "Ragione sociale o codice sede" },
+    ReferenceID: { label: "Contatto (Contact)", group: "main", order: 3, hint: "Persona di riferimento del ticket" },
+    TicketSource: { label: "Origine ticket (Ticket Source)", group: "main", order: 4, hint: "es. Customer, Intern, Automatic" },
+    Channel: { label: "Canale (Channel)", group: "main", order: 5, hint: "es. Web, Phone, E-Mail" },
+    FlagSollecito: { label: "Sollecitato (Solicited)", group: "main", order: 6, hint: "Yes / No" },
+    CustomerTop: { label: "Top Client", group: "main", order: 7, hint: "Cliente prioritario" },
+    Tags: { label: "Tag (Tags)", group: "main", order: 8, hint: "Etichette del ticket nel portale" },
+    CatalogItemID: { label: "Voce di classificazione (Classification)", group: "class", order: 10, hint: "Scelta dall'albero di classificazione" },
+    ClassCli: { label: "Voce classif. cliente (Customer class.)", group: "class", order: 11, hint: "Scelta dall'albero cliente" },
+    Escalated: { label: "Escalated", group: "other", order: 20 },
+    WorkingStatus: { label: "Stato lavorazione (Working status)", group: "other", order: 21 },
+  };
   function scalarValue(f, v) {
+    const j = parseJsonValue(v);
+    if (j) return j.v;
     if (Array.isArray(v)) v = v[0];
     if (v && typeof v === "object") {
       try { if (typeof v.get === "function") return String(v.get(f.valueField || "value") ?? ""); } catch { /* */ }
       return String(v.value ?? v.id ?? v.Value ?? v.ID ?? "");
     }
-    return v === null || v === undefined ? "" : String(v);
+    if (v === null || v === undefined) {
+      try {
+        const dom = f && f.el && f.el.dom;
+        if (dom) {
+          for (const inp of dom.querySelectorAll('input[type="hidden"]')) {
+            const jh = parseJsonValue(inp.value);
+            if (jh && jh.v) return jh.v;
+          }
+        }
+      } catch { /* */ }
+      return "";
+    }
+    return String(v);
   }
   // nomi già visti per i codici (ricerche salvate, scelte nel pannello): un campo ad albero appena caricato
   // mostra il codice finché il suo ramo non viene aperto
@@ -429,11 +491,12 @@
       try { if (!plain || typeof st.getModel !== "function") return false; const M = st.getModel(); f.setValue(new M({ [vf]: code, [df]: label })); return same(); } catch { return false; }
     };
     // campi ad albero (tree-field): il valore è il codice del nodo, non il nodo
-    if (st && st.isTreeStore) {
+    const ts = (st && st.isTreeStore ? st : null) || treeStoreOf(f);
+    if (ts) {
       // un TreePicker non segnala il cambio da solo: checkChange avvisa il portale (che ricarica l'elenco)
       const changed = () => { try { if (typeof f.checkChange === "function") f.checkChange(); } catch { /* */ } };
       try { f.setValue(code); changed(); if (same()) return true; } catch { /* */ }
-      try { const n = st.getNodeById(code); if (n) { f.setValue(n); changed(); if (same() && typeof f.getValue() !== "object") return true; } } catch { /* */ }
+      try { const n = ts.getNodeById(code); if (n) { f.setValue(n); changed(); if (same() && typeof f.getValue() !== "object") return true; } } catch { /* */ }
       try { f.setValue(code); changed(); } catch { /* */ }
       return same();
     }
@@ -458,17 +521,39 @@
         try { st.remove(r); } catch { /* */ }
       }
     } catch { /* */ }
+    // objectlink-field di Touch con stato JSON salvato nel campo o nell'input nascosto
+    try {
+      const jStr = JSON.stringify([{ value: code, text: label, index: 0 }]);
+      f.setValue(jStr);
+      if (typeof f.setRawValue === "function") f.setRawValue(label);
+      if (same()) { signal(); return true; }
+    } catch { /* */ }
     return false;
   }
   function clearField(f) {
     try { if (typeof f.clearValue === "function") f.clearValue(); else f.setValue(null); } catch { try { f.setValue(""); } catch { /* */ } }
+    try {
+      const dom = f && f.el && f.el.dom;
+      if (dom) {
+        for (const inp of dom.querySelectorAll('input[type="hidden"]')) {
+          if (/^\s*\[\s*\{/.test(inp.value || "")) inp.value = '[{"value":"","text":""}]';
+        }
+      }
+    } catch { /* */ }
   }
   // ===================================================================== tutti i filtri del portale nel pannello
   // Tipo di ogni campo filtro: albero (tree-field), ricerca sul server (objectlink), elenco (combo con le
   // scelte già nella pagina), data o testo. I valori sono i codici del portale, con il nome per mostrarli.
   const clsOf = (f) => { try { return `${f.cls || ""} ${f.userCls || ""} ${f.el && f.el.dom ? f.el.dom.className : ""}`; } catch { return ""; } };
   function treeStoreOf(f) {
-    const gets = [() => f.getStore && f.getStore(), () => f.store, () => f.treeStore, () => f.picker && f.picker.getStore && f.picker.getStore(), () => f.tree && f.tree.getStore && f.tree.getStore()];
+    const gets = [
+      () => f.getStore && f.getStore(),
+      () => f.store,
+      () => f.treeStore,
+      () => f.picker && f.picker.getStore && f.picker.getStore(),
+      () => f.getPicker && f.getPicker() && f.getPicker().getStore && f.getPicker().getStore(),
+      () => f.tree && f.tree.getStore && f.tree.getStore(),
+    ];
     for (const get of gets) { try { const st = get(); if (st && st.isTreeStore && typeof st.getRootNode === "function") return st; } catch { /* */ } }
     return null;
   }
@@ -484,12 +569,22 @@
       return "text";
     } catch { return "text"; }
   }
-  // campi filtro gestiti dal pannello (oltre a quelli della barra di ricerca): gruppi e persone prima
+  // campi filtro gestiti dal pannello (oltre a quelli della barra di ricerca): gruppi e persone prima, poi in ordine logico Touch
   function pfFields(m) {
     const all = filterFields(m).filter(({ suffix }) => !(suffix in CONTROLLED)).map((x) => Object.assign(x, { kind: fieldKind(x.f) })).filter((x) => x.kind !== "hidden");
-    const rank = (x) => { const i = PEOPLE.findIndex(([k]) => k === x.suffix); return i < 0 ? 100 : i; };
-    return all.map((x, i) => Object.assign(x, { i, label: PEOPLE_KEYS.has(x.suffix) ? PEOPLE.find(([k]) => k === x.suffix)[1] : fieldLabel(x.f, x.suffix) }))
-      .sort((a, b) => rank(a) - rank(b) || a.i - b.i);
+    const rank = (x) => {
+      const pi = PEOPLE.findIndex(([k]) => k === x.suffix);
+      if (pi >= 0) return pi;
+      const meta = PF_META[x.suffix];
+      return meta ? 10 + meta.order : 100;
+    };
+    return all.map((x, i) => {
+      const meta = PF_META[x.suffix];
+      const label = PEOPLE_KEYS.has(x.suffix)
+        ? PEOPLE.find(([k]) => k === x.suffix)[1]
+        : (meta && meta.label) || fieldLabel(x.f, x.suffix);
+      return Object.assign(x, { i, label, hint: (meta && meta.hint) || "", group: PEOPLE_KEYS.has(x.suffix) ? "people" : (meta && meta.group) || "other" });
+    }).sort((a, b) => rank(a) - rank(b) || a.i - b.i);
   }
   const isMulti = (f) => !!(f && f.multiSelect);
   const emptyJson = (v) => /^\[\{"value":""/.test(String(v || ""));
@@ -744,7 +839,7 @@
         if (!f) continue;
         try {
           if (Array.isArray(v) || f.multiSelect) setMulti(f, asList(v));
-          else if (v === null || v === undefined || v === "") { if (typeof f.clearValue === "function") f.clearValue(); else f.setValue(null); }
+          else if (v === null || v === undefined || v === "" || emptyJson(v)) clearField(f);
           // con il nome: se una ricerca per nome ha ricaricato l'elenco del campo il codice da solo non basta
           else if (sn.people && sn.people[suffix]) setPerson(f, sn.people[suffix]);
           else f.setValue(v);
@@ -943,6 +1038,9 @@
         if (parts[1] && /^[\w-]{2,20}$/.test(parts[1])) t.siteCode = parts[1];
       } else if (sem === "code") {
         if (!t.code) t.code = parts[0] || text;
+        if (parts.length > 1 && !t.counters) t.counters = parts.slice(1).filter(Boolean);
+      } else if (sem === "service") {
+        if (!t.service) t.service = parts.length > 1 ? parts.join(" / ") : text;
       } else if (!t[sem]) t[sem] = text;
     }
     t.key = t.code ? `c:${t.code}` : `r:${m.key}:${t.recId}`;
@@ -1009,6 +1107,95 @@
       } catch { /* */ }
     }
   }
+  // Schede di dettaglio ticket aperte dentro la stessa pagina di HDA TOUCH (_UC_DetailCt o _UC_DetailViewCt)
+  const DETAIL_RE = /_UC_Detail(View)?Ct$/;
+  function findDetailModules(w) {
+    w = w || window;
+    const doc = w.document, X = w.Ext;
+    const ids = new Set();
+    if (doc) {
+      for (const el of doc.querySelectorAll('[id$="_UC_DetailCt"],[id$="_UC_DetailViewCt"],.detail-content-wrapper.detail')) {
+        if (el.id) ids.add(el.id);
+      }
+    }
+    if (X && X.ComponentManager) {
+      try {
+        const all = typeof X.ComponentManager.getAll === "function" ? X.ComponentManager.getAll() : Object.values((X.ComponentManager.all && X.ComponentManager.all.map) || {});
+        for (const c of all) if (c && typeof c.id === "string" && DETAIL_RE.test(c.id)) ids.add(c.id);
+      } catch { /* */ }
+    }
+    const out = [];
+    for (const id of ids) {
+      const cmp = X && typeof X.getCmp === "function" ? X.getCmp(id) : null;
+      const el = (doc && doc.getElementById(id)) || (cmp && cmp.el && cmp.el.dom) || null;
+      const m = /^(.+)_UC_Detail(View)?Ct$/.exec(id);
+      const prefix = m ? m[1] : "";
+      const P = prefix ? prefix + "_UC_" : "";
+      let titleText = "";
+      try {
+        const tel = el && el.querySelector(".detail-title-text,[id$='_UC_Title']");
+        if (tel) titleText = textOf(tel.textContent || "");
+      } catch { /* */ }
+      if (!titleText && X && P) {
+        try { const tc = X.getCmp(P + "Title"); if (tc) titleText = textOf(String(tc.text || (tc.el && tc.el.dom && tc.el.dom.textContent) || "")); } catch { /* */ }
+      }
+      let code = "";
+      const cm = /^([A-Z0-9_-]{3,24})\s*:/.exec(titleText);
+      if (cm) code = cm[1];
+      if (!code && el) {
+        try {
+          const cinp = el.querySelector('input[id$="_Code_inputEl"],[id$="_secGeneral_Code"] input');
+          if (cinp && cinp.value) code = cinp.value.trim();
+        } catch { /* */ }
+      }
+      if (!code && X && P) {
+        try {
+          const cf = X.getCmp(P + "ctrl_secGeneral_Code") || (cmp && cmp.query && cmp.query('[id$="_Code"]')[0]);
+          if (cf && typeof cf.getValue === "function") code = String(cf.getValue() || "").trim();
+        } catch { /* */ }
+      }
+      const tabChild = el ? el.closest(".portal-tab,.x-tabpanel-child") : null;
+      const tabCmp = (tabChild && X && X.getCmp(tabChild.id)) || null;
+      if (!code && tabCmp && tabCmp.title) {
+        const tm = /^([A-Z0-9_-]{3,24})\s*:/.exec(textOf(String(tabCmp.title)));
+        if (tm) code = tm[1];
+      }
+      out.push({ id, prefix, P, cmp, el, code, title: titleText, tabCmp, tabId: tabChild ? tabChild.id : "" });
+    }
+    return out;
+  }
+  function matchDetailModule(w, code, excludeIds) {
+    const list = findDetailModules(w);
+    const normCode = String(code || "").trim().toUpperCase();
+    if (normCode) {
+      const exact = list.find((d) => (!excludeIds || !excludeIds.has(d.id)) && d.code.toUpperCase() === normCode);
+      if (exact) return exact;
+    }
+    if (excludeIds) {
+      const fresh = list.filter((d) => !excludeIds.has(d.id));
+      if (fresh.length) {
+        if (!normCode) return fresh[fresh.length - 1];
+        const compat = fresh.find((d) => !d.code || d.code.toUpperCase() === normCode);
+        if (compat) return compat;
+      }
+    }
+    return null;
+  }
+  function activateDetailTab(d) {
+    if (!d) return false;
+    try {
+      const pc = Ext.getCmp("body_portalPagesContainer");
+      if (pc && d.tabCmp && typeof pc.setActiveTab === "function") { pc.setActiveTab(d.tabCmp); return true; }
+      for (let p = d.cmp || d.tabCmp, i = 0; p && p.ownerCt && i < 40; p = p.ownerCt, i++) {
+        if (isTabPanel(p.ownerCt)) { p.ownerCt.setActiveTab(p); return true; }
+      }
+      if (d.code) {
+        const tab = portalTabs().find((x) => x.text.toUpperCase().startsWith(d.code.toUpperCase() + ":"));
+        if (tab && tab.t && tab.t.el && tab.t.el.dom) { tab.t.el.dom.click(); return true; }
+      }
+    } catch { /* */ }
+    return false;
+  }
   function recordFor(m, t) {
     if (!m || !m.store || t.list !== m.key) return null;
     const cols = gridColumns(m.grid);
@@ -1023,7 +1210,7 @@
     for (let i = 0; i < recs.length; i++) if (codeOf(recs[i], i) === t.code) return recs[i];
     return null;
   }
-  // ---- indirizzo del ticket nel portale (HDA TOUCH apre ogni ticket in una nuova scheda del browser)
+  // ---- indirizzo del ticket nel portale (HDA TOUCH apre ogni ticket in una scheda ExtJS o in una nuova scheda del browser)
   // La prima apertura insegna lo schema dell'indirizzo (quale dato del ticket contiene): dopo, ogni risultato
   // ha il suo collegamento diretto e il ticket si può leggere nel pannello senza aprire schede.
   const URLKEY = "touchUrl";
@@ -1058,11 +1245,10 @@
     }
     return null;
   }
-  // Apre il ticket con i comandi del portale (Open, doppio clic, Find by ID) e intercetta la nuova scheda:
-  // mode "observe" la lascia aprire e ne ricorda l'indirizzo; mode "intercept" non apre nulla e restituisce
-  // l'indirizzo (oppure carica la pagina nella cornice indicata, se il portale la apre con un modulo POST).
-  // Una sola apertura alla volta: chi arriva dopo (Leggi mentre un'altra lettura è in corso, «Apri in Touch» dalla
-  // finestra di lettura) aspetta. Due intercettazioni sovrapposte prenderebbero l'una il window.open dell'altra.
+  // Apre il ticket con i comandi del portale (Open, doppio clic, Find by ID) e intercetta la nuova scheda
+  // (sia scheda del browser window.open / form POST, sia scheda ExtJS interna nel portale Touch):
+  // mode "observe" la lascia aprire; mode "intercept" non apre schede esterne e restituisce l'indirizzo,
+  // la cornice o la scheda interna del portale.
   let portalLock = Promise.resolve();
   async function portalOpen(m, t, mode, frame, signal) {
     const prev = portalLock;
@@ -1075,9 +1261,21 @@
     } finally { release(); }
   }
   async function portalOpenOnce(m, t, mode, frame) {
+    const W = window;
+    // Se il ticket è già aperto in una scheda interna di Touch, lo usiamo subito
+    const already = t && t.code ? matchDetailModule(W, t.code) : null;
+    if (already && mode === "intercept") {
+      return { url: null, posted: false, detail: already, freshTab: false, how: "scheda Touch già aperta", manual: false };
+    }
     const rec = recordFor(m, t);
-    const got = { url: null, posted: false, how: "", manual: false };
-    const W = window, origOpen = W.open, FP = HTMLFormElement.prototype, origSubmit = FP.submit, AP = HTMLAnchorElement.prototype, origClick = AP.click;
+    const beforeDetails = new Set(findDetailModules(W).map((d) => d.id));
+    const got = { url: null, posted: false, detail: null, freshTab: false, how: "", manual: false };
+    const checkDetail = () => {
+      const d = matchDetailModule(W, t && t.code, beforeDetails) || (t && t.code ? matchDetailModule(W, t.code) : null);
+      if (d) { got.detail = d; got.freshTab = !beforeDetails.has(d.id); return true; }
+      return false;
+    };
+    const origOpen = W.open, FP = HTMLFormElement.prototype, origSubmit = FP.submit, AP = HTMLAnchorElement.prototype, origClick = AP.click;
     // richieste del portale partite dopo il nostro comando (Find by ID, Open...): finché sono in corso si aspetta
     const reqsBefore = new Set(Object.keys((Ext.Ajax && Ext.Ajax.requests) || {}));
     const pendingNew = () => { try { return Object.entries(Ext.Ajax.requests || {}).some(([id, r]) => !reqsBefore.has(id) && r && typeof r.isLoading === "function" && r.isLoading()); } catch { return false; } };
@@ -1117,8 +1315,6 @@
       const u = formUrl(fm);
       if (u) { take(u); if (mode === "observe") return false; return true; }
       if (mode !== "observe" && frame) {
-        // solo per questo invio: il modulo del portale torna subito com'era (altrimenti le aperture successive
-        // del portale finirebbero tutte nella stessa scheda con il nome della cornice)
         const was = fm.getAttribute("target");
         fm.target = frame.name; got.posted = true;
         setTimeout(() => { if (fm.getAttribute("target") === frame.name) { if (was === null) fm.removeAttribute("target"); else fm.setAttribute("target", was); } }, 0);
@@ -1140,7 +1336,6 @@
         try { m.grid.getSelectionModel().select([rec]); } catch { /* */ }
         const b = findButton(m, /^(open|apri)$/i, /_RecordView$/);
         const usable = () => !!b && !b.destroyed && !(typeof b.isDisabled === "function" && b.isDisabled());
-        // il portale riabilita i comandi dopo il cambio di selezione (binding con timer o disable/enable della barra)
         if (b) await waitUntil(usable, 1500);
         let href = "";
         try { href = typeof b.getHref === "function" ? b.getHref() || "" : b.href || ""; } catch { href = ""; }
@@ -1154,7 +1349,6 @@
             const was = !!(document.body && document.body.inert);
             if (document.body) document.body.inert = false;
             try {
-              // doppio clic vero: Ext genera itemdblclick/rowdblclick/celldblclick sulla view e li ripete sulla griglia
               if (cell) cell.dispatchEvent(new MouseEvent("dblclick", { bubbles: true, cancelable: true, view: window }));
               else view.fireEvent("itemdblclick", view, rec, node, m.store.indexOf(rec), new Ext.event.Event(new MouseEvent("dblclick", { bubbles: true })));
             } finally { if (document.body) document.body.inert = was; }
@@ -1163,14 +1357,13 @@
         }
       }
       if (!got.how && t.code) {
-        // per l'utente («Apri in Touch»): numero negli appunti e finestra lasciata aperta se non si può confermare
         const r = await findById(m, t.code, mode !== "observe");
         if (r === true) got.how = "Find by ID"; else if (r === "manual") got.manual = true;
       }
       if (got.how) {
-        const done = () => !!got.url || got.posted;
-        // portale lento: si aspetta finché la sua richiesta è in corso (poi la nuova scheda si aprirebbe lo stesso)
+        const done = () => !!got.url || got.posted || checkDetail();
         if (!(await waitUntil(done, 4000)) && pendingNew()) await waitUntil(() => done() || !pendingNew(), 16000);
+        if (!got.url && !got.posted && !got.detail) checkDetail();
       }
     } finally {
       if (W.open === hookOpen) W.open = origOpen;
@@ -1184,15 +1377,18 @@
     if (got.url) learnTemplate(got.url, t, rec);
     return got;
   }
-  // «Apri in Touch»: con l'indirizzo noto si apre direttamente, altrimenti con i comandi del portale
+  // «Apri in Touch»: con l'indirizzo noto si apre direttamente, altrimenti con la scheda interna o i comandi del portale
   async function openTicket(t) {
     if (t.src === "ar") { arOpen(t); return; }
     const url = touchUrl(t);
     if (url) { window.open(url, "_blank", "noopener"); return; }
+    const existing = t && t.code ? matchDetailModule(window, t.code) : null;
+    if (existing) { hide(); activateDetailTab(existing); return; }
     const m = currentModule();
     hide();
     const got = await portalOpen(m, t, "observe");
-    if (got.url) { show(); render(); return; } // il ticket è nella nuova scheda; il pannello resta qui con i risultati
+    if (got.url) { show(); render(); return; } // il ticket è nella nuova scheda del browser; il pannello resta qui con i risultati
+    if (got.detail) { activateDetailTab(got.detail); return; } // aperto nella scheda interna di Touch
     if (got.manual) return; // Find by ID compilato (o numero negli appunti): si conferma nel portale
     if (!got.how && !t.code) { show(); toast("Ticket non presente nell'elenco"); } // con il numero: messaggio già dato da findById
   }
@@ -1203,8 +1399,6 @@
     if (!b) { if (!quiet) { show(); toast(code ? `Ticket ${code} non presente nell'elenco: numero copiato, aprilo dal portale` : "Ticket non presente nell'elenco"); } return false; }
     showModuleTab(m);
     await sleep(50);
-    // solo una finestra comparsa DOPO il clic è quella di Find by ID: mai scrivere o confermare in una finestra
-    // già aperta dall'utente (Change status..., Reply...)
     const visWins = () => Ext.ComponentQuery.query("window").filter((w) => !w.destroyed && w.isVisible && w.isVisible());
     const before = new Set(visWins());
     if ((typeof b.isDisabled === "function" && b.isDisabled()) || !clickBtn(b)) { if (!quiet) { show(); toast(code ? `Numero ${code} copiato: aprilo dal portale` : "Apri il ticket dal portale"); } return false; }
@@ -1218,9 +1412,8 @@
       if (f) { field = f; return true; }
       return false;
     }, 2500);
-    if (!field) return quiet ? false : "manual"; // il numero è già negli appunti
+    if (!field) return quiet ? false : "manual";
     try { field.setValue(code); if (!quiet) field.focus(true, 30); } catch { /* */ }
-    // conferma con il pulsante della finestra (OK / Find / Cerca...), se riconoscibile
     try {
       const w = field.up("window");
       const ok = w && w.query("button").filter((x) => x.isVisible && x.isVisible(true))
@@ -1231,12 +1424,11 @@
     return quiet ? false : "manual";
   }
 
-  // ---- lettura del ticket completo: la pagina del ticket in una cornice nascosta, poi il testo nel pannello
+  // ---- lettura del ticket completo: da scheda interna di Touch o in una cornice nascosta, con navigazione dello storico
   let readerSeq = 0;
   function readerFrame() {
     const fr = document.createElement("iframe");
     fr.name = `rtkt-reader-${++readerSeq}`;
-    // senza allow-top-navigation e allow-popups: la pagina del ticket non può cambiare la pagina del portale
     fr.setAttribute("sandbox", "allow-same-origin allow-scripts allow-forms");
     fr.setAttribute("aria-hidden", "true");
     fr.tabIndex = -1;
@@ -1263,10 +1455,8 @@
       const X = w.Ext;
       if (X) {
         if (!X.isReady) return false;
-        // tutte le richieste in corso (isLoading() senza argomenti guarda solo l'ultima), tranne quelle continue
         try { if (X.Ajax && X.Ajax.requests && Object.values(X.Ajax.requests).some((r) => r && typeof r.isLoading === "function" && r.isLoading() && !/signalr|poll|heartbeat|keepalive/i.test(String((r.options && r.options.url) || "")))) return false; } catch { /* */ }
         try { if (X.ComponentQuery.query("loadmask").some((lm) => lm.isVisible && lm.isVisible())) return false; } catch { /* */ }
-        // una finestra di avviso aperta ha la sua maschera: allora la pagina è pronta (il suo testo si legge)
         let modal = false;
         try { modal = X.ComponentQuery.query("window").some((x) => x.modal && x.isVisible && x.isVisible()); } catch { /* */ }
         try { if (!modal && [...doc.querySelectorAll(".x-mask")].some((el) => busyMask(X, w, el))) return false; } catch { /* */ }
@@ -1278,6 +1468,22 @@
     if (cross) throw new Error("La pagina del ticket è su un altro sito: aprila con «Apri in Touch».");
     if (!ok) throw new Error("La pagina del ticket non ha finito di caricarsi.");
   }
+  async function waitDetailReady(w, domRoot, signal, maxMs = 12000) {
+    const X = w.Ext;
+    let lastLen = -1, since = 0;
+    await waitUntil(() => {
+      if (X) {
+        try { if (X.Ajax && X.Ajax.requests && Object.values(X.Ajax.requests).some((r) => r && typeof r.isLoading === "function" && r.isLoading() && !/signalr|poll|heartbeat|keepalive/i.test(String((r.options && r.options.url) || "")))) return false; } catch { /* */ }
+      }
+      if (domRoot) {
+        try { if ([...domRoot.querySelectorAll(".x-mask")].some((el) => busyMask(X, w, el))) return false; } catch { /* */ }
+      }
+      const txt = domRoot ? (domRoot.innerText || domRoot.textContent || "") : "";
+      const len = txt.length;
+      if (len !== lastLen) { lastLen = len; since = performance.now(); return false; }
+      return len > 20 && performance.now() - since > 350;
+    }, maxMs, signal);
+  }
   // testo leggibile (anche da HTML), con gli a capo
   function plainText(v) {
     let s = String(v ?? "");
@@ -1287,49 +1493,346 @@
     }
     return s.replace(/\r\n?/g, "\n").replace(/[ \t\u00a0]+/g, " ").replace(/ *\n */g, "\n").replace(/\n{3,}/g, "\n\n").trim();
   }
-  // contenuto leggibile di una pagina ExtJS (o di un suo pannello, root): campi con etichetta, testi lunghi, elenchi
+  // Legge il testo da un campo HTML ricco di Touch (ProblemHTML / SolutionHTML con TinyMCE, iframe o div.htmlEditor)
+  function extractHtmlFieldEl(w, el, X) {
+    if (!el) return "";
+    // 1. Istanza TinyMCE attiva
+    try {
+      if (w.tinymce && typeof w.tinymce.get === "function") {
+        for (const edEl of el.querySelectorAll(".htmlEditor,[id$='_Editor']")) {
+          const ed = edEl.id && w.tinymce.get(edEl.id);
+          if (ed && typeof ed.getContent === "function") {
+            const c = plainText(ed.getContent());
+            if (c) return c;
+          }
+        }
+      }
+    } catch { /* */ }
+    // 2. iframe di TinyMCE (_ifr)
+    try {
+      for (const ifr of el.querySelectorAll("iframe")) {
+        const idoc = ifr.contentDocument || (ifr.contentWindow && ifr.contentWindow.document);
+        if (idoc && idoc.body) {
+          const c = plainText(idoc.body.innerHTML || idoc.body.innerText || "");
+          if (c) return c;
+        }
+      }
+    } catch { /* */ }
+    // 3. Componente ExtJS
+    try {
+      if (X && el.id) {
+        const cmp = X.getCmp(el.id);
+        if (cmp && typeof cmp.getValue === "function") {
+          const c = plainText(cmp.getValue());
+          if (c && !emptyJson(c)) return c;
+        }
+      }
+    } catch { /* */ }
+    // 4. div.htmlEditor o input nascosto del campo
+    try {
+      for (const n of el.querySelectorAll(".htmlEditor,input[type='hidden'],textarea")) {
+        const raw = n.tagName === "INPUT" || n.tagName === "TEXTAREA" ? n.value : n.innerHTML || n.textContent;
+        const c = plainText(raw);
+        if (c && !emptyJson(c)) return c;
+      }
+    } catch { /* */ }
+    return "";
+  }
+  // Estrae i messaggi da una griglia conversazioni di Touch (entity-ticketconversationitem: Storico conversazioni,
+  // Conversation / publicCommunications, Internal notes, Other departments conversations)
+  function extractConversationGrid(g, domEl, sectionTitle) {
+    const messages = [];
+    const rows = [];
+    const seenMsg = new Set();
+    const addMsg = (type, author, date, text, internal, files) => {
+      type = plainText(type || "");
+      author = plainText(author || "");
+      date = plainText(date || "");
+      text = plainText(text || "");
+      if (!text && !author && !type) return;
+      const sig = `${type}|${date}|${author}|${text.slice(0, 120)}`;
+      if (seenMsg.has(sig)) return;
+      seenMsg.add(sig);
+      messages.push({
+        section: sectionTitle || "Storico conversazioni",
+        type: type || (internal ? "Nota interna" : "Messaggio"),
+        author,
+        date,
+        text: files && files.length ? `${text}${text ? "\n" : ""}[Allegati: ${files.join(", ")}]` : text,
+        internal: !!internal || /internal|nota interna/i.test(type) || /internal|note interne/i.test(sectionTitle || ""),
+      });
+      rows.push([type || "—", [author, date].filter(Boolean).join(" · "), text]);
+    };
+    // 1. Record dello store ExtJS (contengono il testo completo non troncato a ~400 caratteri)
+    const storeRecs = [];
+    try {
+      const st = g && typeof g.getStore === "function" ? g.getStore() : null;
+      if (st && typeof st.getRange === "function") storeRecs.push(...st.getRange());
+    } catch { /* */ }
+    // 2. Righe DOM renderizzate nella tabella (.list-view-row o tr.x-grid-row)
+    const domRows = domEl ? [...domEl.querySelectorAll("tr.x-grid-row")] : [];
+    const count = Math.max(storeRecs.length, domRows.length);
+    for (let i = 0; i < count; i++) {
+      const r = storeRecs[i];
+      const tr = domRows[i];
+      let type = "", author = "", date = "", text = "", internal = false;
+      const files = [];
+      if (tr) {
+        try {
+          const icon = tr.querySelector("i[title],i[data-qtip],[data-columnid$='_c7_0'] [title],[data-columnid$='_c7_0'] [data-qtip]");
+          if (icon) type = icon.getAttribute("title") || icon.getAttribute("data-qtip") || "";
+          const userTd = tr.querySelector("[data-columnid$='_c5_1']") || tr.querySelectorAll("td.x-grid-cell")[1];
+          if (userTd) {
+            const dtEl = userTd.querySelector(".text-datetime-date");
+            if (dtEl) date = dtEl.textContent || "";
+            const bolds = [...userTd.querySelectorAll("b,strong,[style*='font-weight']")].map((b) => plainText(b.textContent)).filter(Boolean);
+            if (bolds.length && !type) type = bolds[0];
+            const clone = userTd.cloneNode(true);
+            clone.querySelectorAll(".text-datetime-date").forEach((n) => n.remove());
+            let rawAuthor = plainText(clone.textContent || "");
+            if (rawAuthor && type && rawAuthor.toLowerCase() === type.toLowerCase()) rawAuthor = "";
+            else if (rawAuthor && type && rawAuthor.toLowerCase().startsWith(type.toLowerCase())) rawAuthor = plainText(rawAuthor.slice(type.length));
+            author = rawAuthor;
+          }
+          const bodyEl = tr.querySelector(".ticketconversationitem-text,[data-columnid$='_c12_3'],[data-columnid$='_c9_2']");
+          if (bodyEl) text = plainText(bodyEl.innerHTML || bodyEl.textContent || "");
+          for (const att of tr.querySelectorAll("[data-columnid$='_c8_2'] [title],[data-columnid$='_c8_2'] a,[data-columnid$='_c13_2'] [title],[data-columnid$='_c13_2'] a")) {
+            const at = plainText(att.getAttribute("title") || att.textContent || "");
+            if (at) files.push(at);
+          }
+        } catch { /* */ }
+      }
+      if (r) {
+        try {
+          const d = (typeof r.getData === "function" ? r.getData() : r.data) || {};
+          const pickStr = (re) => {
+            for (const [k, v] of Object.entries(d)) if (re.test(k) && v && (typeof v === "string" || typeof v === "number")) return String(v);
+            return "";
+          };
+          const sText = plainText(pickStr(/^(text|body|message|detail|description|html|content|note|testo|messaggio|comunicazione)/i));
+          // Se il testo nello store è più lungo di quello troncato nel DOM, usiamo il testo completo dello store
+          if (sText && sText.length >= text.length) text = sText;
+          if (!type) type = pickStr(/^(type|kind|itemtype|eventtype|category|subject|title|tipo)/i);
+          if (!author) {
+            const cand = pickStr(/^(user|author|sender|from|createdby|operator|utente|autore|mittente)/i);
+            if (cand && (!type || cand.toLowerCase() !== type.toLowerCase())) author = cand;
+          }
+          if (!date) {
+            for (const [k, v] of Object.entries(d)) {
+              if (/date|time|created|timestamp|data/i.test(k) && v) {
+                date = isDate(v) ? `${fmtDate(isoOf(v))} ${pad(v.getHours())}:${pad(v.getMinutes())}` : String(v);
+                break;
+              }
+            }
+          }
+          if (/internal|note|intern/i.test(String(d.Type || d.ItemType || d.Kind || ""))) internal = true;
+        } catch { /* */ }
+      }
+      addMsg(type, author, date, text, internal, files);
+    }
+    return { messages, rows };
+  }
+  // Contenuto leggibile di una pagina ExtJS o di un pannello di dettaglio Touch (root):
+  // campi con etichetta, pannello destro (Overview/Contatto/SLA), ProblemHTML/SolutionHTML, storico conversazioni e tabelle
   function extractTicket(w, root) {
     const doc = w.document, X = w.Ext;
-    const out = { title: plainText(doc.title), fields: [], texts: [], tables: [] };
-    const q = (sel) => (root && typeof root.query === "function" ? root.query(sel) : X.ComponentQuery.query(sel));
+    const out = { title: plainText(doc ? doc.title : ""), fields: [], texts: [], tables: [], messages: [] };
+    const rootCmp = root && typeof root.query === "function" ? root : null;
+    const rootDom = (root && root.el && root.el.dom) || (root && root.nodeType === 1 ? root : null) || (doc ? doc.body : null);
+    const q = (sel) => {
+      if (rootCmp) return rootCmp.query(sel);
+      if (rootDom && rootDom !== (doc && doc.body) && X && X.ComponentQuery) {
+        return X.ComponentQuery.query(sel).filter((c) => { try { return c.el && c.el.dom && rootDom.contains(c.el.dom); } catch { return false; } });
+      }
+      return X && X.ComponentQuery ? X.ComponentQuery.query(sel) : [];
+    };
     const seen = new Set();
+    const seenField = new Map();
     const fmt = (v) => (isDate(v) ? `${fmtDate(isoOf(v))} ${pad(v.getHours())}:${pad(v.getMinutes())}` : v);
+    const addField = (label, value, forceLong) => {
+      label = plainText(label || "").replace(/:$/, "").trim();
+      value = plainText(fmt(value));
+      if (!value || emptyJson(value) || value === "—" || value === "-") return;
+      const j = parseJsonValue(value);
+      if (j) {
+        if (!j.v && !j.t) return;
+        value = j.t && j.v && j.t !== j.v && !j.t.includes(j.v) ? `${j.t} (${j.v})` : (j.t || j.v);
+      }
+      const k = norm(label) + "\u0001" + norm(value);
+      if (seen.has(k)) return;
+      seen.add(k);
+      const long = forceLong || value.length > 160 || value.includes("\n");
+      if (!long && label) {
+        const lk = norm(label);
+        if (seenField.has(lk)) {
+          const prev = seenField.get(lk);
+          if (value.length > prev.value.length && value.includes(prev.value)) prev.value = value.slice(0, 20000);
+          return;
+        }
+      }
+      const item = { label, value: value.slice(0, 40000) };
+      if (long) out.texts.push(item);
+      else { out.fields.push(item); if (label) seenField.set(norm(label), item); }
+    };
+    // Titolo del dettaglio Touch (<TicketCode>: <Subject>)
+    if (rootDom) {
+      try {
+        const dt = rootDom.querySelector(".detail-title-text,[id$='_UC_Title']");
+        if (dt) { const t = plainText(dt.textContent || ""); if (t) out.title = t; }
+      } catch { /* */ }
+    }
+    // 1. Campi HTML ricchi di Touch: ProblemHTML (Issue/Request) e SolutionHTML (Resolution)
+    if (rootDom) {
+      for (const hf of rootDom.querySelectorAll(".html-field,[id$='_ProblemHTML'],[id$='_SolutionHTML']")) {
+        try {
+          const id = hf.id || "";
+          const lblEl = hf.querySelector(".field-label-inner,.x-form-item-label-inner,.x-form-item-label-text,label.field-label");
+          let label = plainText((lblEl && lblEl.textContent) || "");
+          if (/ProblemHTML$/i.test(id) || /^issue\/request$/i.test(label)) label = "Richiesta (Issue/Request)";
+          else if (/SolutionHTML$/i.test(id) || /^resolution$/i.test(label)) label = "Soluzione (Resolution)";
+          const val = extractHtmlFieldEl(w, hf, X);
+          if (val) addField(label || "Testo", val, true);
+        } catch { /* */ }
+      }
+    }
+    // 2. Campi ExtJS [isFormField]
     if (X && X.ComponentQuery) {
       for (const c of q("[isFormField]")) {
         try {
           if (c.ownerCt && c.ownerCt.isXType && (c.ownerCt.isXType("checkboxgroup") || c.ownerCt.isXType("radiogroup"))) continue;
           if ((c.isXType && c.isXType("hiddenfield")) || c.inputType === "password" || (c.isHidden && c.isHidden())) continue;
+          // evita i campi filtro della barra di ricerca e il selettore Page size delle sotto-griglie
+          if (/filter_default_|defaultFilter_default_|ComboPageSize/i.test(c.id || "") || /ComboPageSize/i.test(c.name || "")) continue;
           const label = plainText((typeof c.getFieldLabel === "function" ? c.getFieldLabel() : c.fieldLabel) || c.boxLabel || c.name || "").replace(/:$/, "");
           let v;
           if (c.isXType && (c.isXType("checkboxgroup") || c.isXType("radiogroup"))) v = (typeof c.getChecked === "function" ? c.getChecked() : []).map((b) => b.boxLabel || b.inputValue || "").filter(Boolean).join(", ");
           else if (c.isXType && c.isXType("checkbox")) v = c.getValue() ? "Sì" : "No";
           else {
-            v = typeof c.getDisplayValue === "function" ? c.getDisplayValue() : null;
+            v = fieldDisplay(c);
+            if (!v) v = typeof c.getDisplayValue === "function" ? c.getDisplayValue() : null;
             if (v === null || v === undefined || v === "") v = c.rendered && typeof c.getRawValue === "function" ? c.getRawValue() : c.getValue();
           }
-          if (v !== null && typeof v === "object" && !Array.isArray(v) && !isDate(v)) continue; // valore strutturato senza testo leggibile
-          v = plainText(fmt(v));
-          if (!v || emptyJson(v)) continue;
-          const key = label + "\u0001" + v;
-          if (seen.has(key)) continue;
-          seen.add(key);
-          const long = v.length > 160 || v.includes("\n") || (c.isXType && (c.isXType("textareafield") || c.isXType("htmleditor")));
-          (long ? out.texts : out.fields).push({ label, value: v.slice(0, 20000) });
+          if (v !== null && typeof v === "object" && !Array.isArray(v) && !isDate(v)) {
+            const j = parseJsonValue(v);
+            if (j) v = j.t || j.v;
+            else continue;
+          }
+          const forceLong = !!(c.isXType && (c.isXType("textareafield") || c.isXType("htmleditor")));
+          addField(label, v, forceLong);
         } catch { /* */ }
       }
+    }
+    // 3. Campi nel DOM (inclusi objectlink-field, tree-field, tag-field e input nascosti JSON di Touch)
+    if (rootDom) {
+      for (const fld of rootDom.querySelectorAll(".field,.x-field")) {
+        try {
+          if (fld.classList.contains("html-field") || fld.classList.contains("filterField") || fld.classList.contains("page-size-field") || /filter_default_|defaultFilter_default_|ComboPageSize/i.test(fld.id || "")) continue;
+          if (fld.closest(".x-grid,.list-grid")) continue;
+          const lblEl = fld.querySelector(".field-label-inner,.x-form-item-label-inner,.x-form-item-label-text,label.field-label");
+          const label = plainText((lblEl && lblEl.textContent) || "");
+          if (!label) continue;
+          let val = "";
+          for (const inp of fld.querySelectorAll('input[type="hidden"]')) {
+            const j = parseJsonValue(inp.value);
+            if (j && (j.t || j.v)) { val = j.t && j.v && j.t !== j.v && !j.t.includes(j.v) ? `${j.t} (${j.v})` : (j.t || j.v); break; }
+          }
+          if (!val) {
+            const tags = [...fld.querySelectorAll(".x-tagfield-item-text,.x-taglabel-item,.tag-item")].map((n) => plainText(n.textContent)).filter(Boolean);
+            if (tags.length) val = tags.join(", ");
+          }
+          if (!val) {
+            const vis = fld.querySelector('input:not([type="hidden"]):not([type="button"]),textarea');
+            if (vis && vis.value) val = vis.value;
+          }
+          if (val) addField(label, val, false);
+        } catch { /* */ }
+      }
+      // 4. Pannello destro di riepilogo Touch (RightCustomValues: ContactDetails0, TicketOverView2, ServiceLevels1, ClientNotesDetails)
+      for (const box of rootDom.querySelectorAll("[id$='_TicketOverView2'],.ticket-overview")) {
+        for (const n of box.querySelectorAll("[data-qtip]")) {
+          const tip = plainText(n.getAttribute("data-qtip") || "");
+          const val = plainText(n.textContent || "");
+          if (tip && val && val !== "-") addField(tip, val, false);
+        }
+      }
+      for (const box of rootDom.querySelectorAll("[id$='_ContactDetails0'],.contact-details-box")) {
+        const name = plainText((box.querySelector(".contact-main-info-name") || {}).textContent || "");
+        const company = plainText((box.querySelector(".contact-main-info-company") || {}).textContent || "");
+        const block = plainText((box.querySelector(".HighlightBlock") || {}).textContent || "");
+        if (name) addField("Contatto", name, false);
+        if (company) addField("Azienda / Sede", company, false);
+        if (block) addField("Stato amministrativo cliente", block, false);
+        for (const item of box.querySelectorAll(".contact-other-info-item")) {
+          const v = plainText(item.textContent || "");
+          if (!v || v === "-") continue;
+          const ic = item.querySelector("i");
+          const cls = (ic && ic.className) || "";
+          const lbl = /envelope|mail/i.test(cls) || /@/.test(v) ? "Email contatto" : /phone|tel/i.test(cls) || /^[\d+\s/.()-]{6,}$/.test(v) ? "Telefono contatto" : /map|marker/i.test(cls) ? "Località contatto" : "Info contatto";
+          addField(lbl, v, false);
+        }
+      }
+      for (const box of rootDom.querySelectorAll("[id$='_ServiceLevels1'],.sla-panel")) {
+        const parts = [...box.querySelectorAll(".sla-title,.sla-type,.sla-info-item")].map((n) => plainText(n.textContent)).filter(Boolean);
+        if (parts.length) addField("SLA", parts.join(" · "), false);
+      }
+      for (const box of rootDom.querySelectorAll("[id$='_ClientNotesDetails']")) {
+        const v = plainText(box.textContent || "");
+        if (v) addField("Note sul cliente", v, false);
+      }
+    }
+    // 5. Griglie e tabelle (Storico conversazioni, Comunicazioni, Note interne, Allegati, Log...)
+    const handledGrids = new Set();
+    if (X && X.ComponentQuery) {
       for (const g of q("tablepanel")) {
         try {
-          const st = g.getStore();
-          const cols = (typeof g.getVisibleColumns === "function" ? g.getVisibleColumns() : typeof g.getColumns === "function" ? g.getColumns() : g.columns || []).filter((c) => c.dataIndex && !c.hidden);
-          if (!st || !cols.length || typeof st.getRange !== "function") continue;
-          const rows = st.getRange().slice(0, 300).map((r, i) => cols.map((c, j) => {
-            let v = r.get(c.dataIndex);
-            if (typeof c.renderer === "function") { try { v = c.renderer.call(c.usingDefaultRenderer ? c : c.scope || g, v, {}, r, i, j, st, g.getView && g.getView()); } catch { /* valore grezzo */ } }
-            return plainText(fmt(v));
-          }));
-          if (rows.length) out.tables.push({ title: plainText(g.title || (g.tab && g.tab.text) || ""), head: cols.map((c) => plainText(c.text || c.dataIndex)), rows });
+          // Non saltiamo le griglie _UC_grd interne al ticket; saltiamo solo l'elenco principale dei ticket del portale
+          if (!root && S.modules && S.modules.some((m) => m.grid === g)) continue;
+          const gDom = g.el && g.el.dom;
+          if (gDom) handledGrids.add(gDom);
+          const cls = `${g.cls || ""} ${g.userCls || ""} ${(gDom && gDom.className) || ""}`;
+          const rawTitle = plainText(g.title || (g.tab && g.tab.text) || (g.up && g.up("panel[title]") && g.up("panel[title]").title) || "");
+          if (/entity-ticketconversationitem/i.test(cls)) {
+            const secTitle = rawTitle || (gDom && gDom.closest("[id$='_ConversationHistory']") ? "Storico conversazioni" : "Conversazioni");
+            const conv = extractConversationGrid(g, gDom, secTitle);
+            for (const m of conv.messages) out.messages.push(m);
+            if (conv.rows.length) out.tables.push({ title: secTitle, head: ["Tipo", "Utente e data", "Messaggio"], rows: conv.rows });
+            continue;
+          }
+          const st = g.getStore && g.getStore();
+          const allCols = (typeof g.getVisibleColumns === "function" ? g.getVisibleColumns() : typeof g.getColumns === "function" ? g.getColumns() : g.columns || [])
+            .filter((c) => c && !c.hidden && !c.isCheckerHd && !/^(checkcolumn|rownumberer|actioncolumn)$/.test(c.xtype || ""));
+          const cols = allCols.filter((c) => c.dataIndex || c.text || c.header);
+          if (st && cols.length && typeof st.getRange === "function" && st.getRange().length) {
+            const rows = st.getRange().slice(0, 300).map((r, i) => cols.map((c, j) => {
+              let v = c.dataIndex ? r.get(c.dataIndex) : "";
+              if (typeof c.renderer === "function") { try { v = c.renderer.call(c.usingDefaultRenderer ? c : c.scope || g, v, {}, r, i, j, st, g.getView && g.getView()); } catch { /* valore grezzo */ } }
+              const txt = plainText(fmt(v));
+              if (txt) return txt;
+              try {
+                const view = g.getView && g.getView();
+                const node = view && view.getNode(r);
+                const cid = typeof c.getId === "function" ? c.getId() : c.id;
+                const td = node && cid && node.querySelector(`[data-columnid="${cssEsc(cid)}"]`);
+                if (td) return plainText(td.innerText || td.textContent || "");
+              } catch { /* */ }
+              return "";
+            })).filter((r) => r.some(Boolean));
+            if (rows.length) out.tables.push({ title: rawTitle || "Elenco", head: cols.map((c) => plainText(c.text || c.header || c.dataIndex || "")), rows });
+          }
         } catch { /* */ }
       }
+    }
+    // Griglie di conversazione o tabelle presenti nel DOM ma non lette via ExtJS
+    if (rootDom) {
+      for (const gDom of rootDom.querySelectorAll(".entity-ticketconversationitem.x-grid")) {
+        if (handledGrids.has(gDom)) continue;
+        const secTitle = gDom.closest("[id$='_ConversationHistory']") ? "Storico conversazioni" : "Conversazioni";
+        const conv = extractConversationGrid(X && gDom.id ? X.getCmp(gDom.id) : null, gDom, secTitle);
+        for (const m of conv.messages) out.messages.push(m);
+        if (conv.rows.length) out.tables.push({ title: secTitle, head: ["Tipo", "Utente e data", "Messaggio"], rows: conv.rows });
+      }
+    }
+    if (X && X.ComponentQuery) {
       // elenchi disegnati con un modello (dataview con itemTpl: comunicazioni, note...), non le griglie e i menu a tendina
       for (const dv of q("dataview")) {
         try {
@@ -1343,21 +1846,135 @@
       }
       for (const c of q("component")) {
         try {
-          // testo libero dei pannelli (Ext cancella c.html dopo averlo disegnato: allora si legge il DOM)
           const ic = c.initialConfig || {};
           if (!(ic.html || ic.tpl || ic.contentEl || typeof c.html === "string") || (c.items && c.items.getCount && c.items.getCount())) continue;
           if (c.isXType && ["htmleditor", "tablepanel", "menu", "toolbar", "tabbar", "boundlist", "field"].some((x) => c.isXType(x))) continue;
           const el = c.rendered ? (c.body || (typeof c.getTargetEl === "function" ? c.getTargetEl() : null) || c.el) : null;
+          if (el && el.dom && el.dom.closest("[id$='_RightCustomValues']")) continue;
           const raw = el && el.dom ? el.dom.innerText : typeof c.html === "string" ? c.html : "";
           const v = plainText(raw);
           if (v.length > 30 && !seen.has(v)) { seen.add(v); out.texts.push({ label: plainText(c.title || ""), value: v.slice(0, 20000) }); }
         } catch { /* */ }
       }
     }
-    if (!out.fields.length && !out.texts.length && !out.tables.length) {
-      const el = root && root.el && root.el.dom ? root.el.dom : doc.body;
+    if (!out.fields.length && !out.texts.length && !out.tables.length && !out.messages.length) {
+      const el = rootDom || (doc && doc.body);
       const v = plainText((el && el.innerText) || "");
       if (v) out.texts.push({ label: "", value: v.slice(0, 40000) });
+    }
+    return out;
+  }
+  function mergeExtracted(target, src, sectionLabel) {
+    if (!src) return target;
+    if (!target.title && src.title) target.title = src.title;
+    const fSeen = new Set(target.fields.map((x) => `${norm(x.label)}\u0001${norm(x.value)}`));
+    for (const f of src.fields || []) {
+      const k = `${norm(f.label)}\u0001${norm(f.value)}`;
+      if (!fSeen.has(k)) { fSeen.add(k); target.fields.push(f); }
+    }
+    const tSeen = new Set(target.texts.map((x) => `${norm(x.label)}\u0001${norm(x.value)}`));
+    for (const x of src.texts || []) {
+      const lbl = x.label || sectionLabel || "";
+      const k = `${norm(lbl)}\u0001${norm(x.value)}`;
+      if (!tSeen.has(k)) { tSeen.add(k); target.texts.push({ label: lbl, value: x.value }); }
+    }
+    const mSeen = new Set((target.messages || []).map((m) => `${m.type}|${m.date}|${m.author}|${(m.text || "").slice(0, 120)}`));
+    for (const m of src.messages || []) {
+      const k = `${m.type}|${m.date}|${m.author}|${(m.text || "").slice(0, 120)}`;
+      if (!mSeen.has(k)) { mSeen.add(k); target.messages.push(m); }
+    }
+    const tbSeen = new Set((target.tables || []).map((tb) => `${tb.title}|${tb.rows.length}|${(tb.rows[0] || []).join(",")}`));
+    for (const tb of src.tables || []) {
+      const title = tb.title && tb.title !== "Elenco" ? tb.title : (sectionLabel || tb.title || "Elenco");
+      const k = `${title}|${tb.rows.length}|${(tb.rows[0] || []).join(",")}`;
+      if (!tbSeen.has(k)) { tbSeen.add(k); target.tables.push(Object.assign({}, tb, { title })); }
+    }
+    return target;
+  }
+  // Naviga l'albero laterale del dettaglio Touch (<prefix>_UC_PagesTree: Ticket, Storico conversazioni,
+  // Internal notes, Attachments, Log, History Email...) per caricare tutte le sezioni della storia del ticket
+  async function loadDetailHistory(w, detail, t, signal) {
+    const X = w.Ext;
+    const dom = detail.el || (detail.cmp && detail.cmp.el && detail.cmp.el.dom);
+    await waitDetailReady(w, dom, signal, 10000);
+    const out = extractTicket(w, detail.cmp || { el: { dom } });
+    const tree = (X && detail.P && X.getCmp(detail.P + "PagesTree")) || (detail.cmp && detail.cmp.query && detail.cmp.query("treepanel")[0]) || null;
+    const cards = (X && detail.P && X.getCmp(detail.P + "DetailPagesCard")) || null;
+    if (!tree) return out;
+    const treeDom = tree.el && tree.el.dom;
+    // Elenco dei nodi nell'albero laterale con eventuale contatore badge
+    const nodes = [];
+    try {
+      const st = tree.getStore && tree.getStore();
+      const root = st && st.getRootNode && st.getRootNode();
+      const walk = (n) => {
+        for (const c of (n && n.childNodes) || []) {
+          const text = plainText(String(c.get("text") || "")).replace(/\s+\d+$/, "").trim();
+          const rawHtml = String(c.get("text") || "");
+          const bm = /class=["']badge["'][^>]*>\s*(\d+)/i.exec(rawHtml);
+          let badge = bm ? +bm[1] : 0;
+          if (!badge && treeDom) {
+            const item = treeDom.querySelector(`[data-recordid="${cssEsc(String(c.internalId ?? c.getId()))}"] .badge`);
+            if (item) badge = parseInt(item.textContent, 10) || 0;
+          }
+          nodes.push({ rec: c, id: String(c.getId() || ""), text, badge });
+          walk(c);
+        }
+      };
+      if (root) walk(root);
+    } catch { /* */ }
+    if (!nodes.length && treeDom) {
+      for (const item of treeDom.querySelectorAll(".x-grid-item")) {
+        const badgeEl = item.querySelector(".badge");
+        const badge = badgeEl ? parseInt(badgeEl.textContent, 10) || 0 : 0;
+        const clone = item.cloneNode(true);
+        clone.querySelectorAll(".badge").forEach((b) => b.remove());
+        const text = plainText(clone.textContent || "");
+        nodes.push({ rec: null, domItem: item, id: item.getAttribute("data-recordid") || text, text, badge });
+      }
+    }
+    const hasInternalCounter = t && Array.isArray(t.counters) && t.counters.some((c) => /internal|note/i.test(c));
+    const wantNode = (n) => {
+      const tx = norm(n.text);
+      if (/^(ticket|incident|dettaglio)$/i.test(tx)) return true;
+      if (/storico conversazioni|conversation\s*history|comunicazioni|conversazioni/i.test(tx)) return true;
+      if (/internal notes|note interne/i.test(tx) && (n.badge > 0 || hasInternalCounter)) return true;
+      if (/history email|storico email|other departments|altri reparti|notes on customer|note sul cliente|attachments|allegati/i.test(tx) && n.badge > 0) return true;
+      return false;
+    };
+    const selModel = tree.getSelectionModel && tree.getSelectionModel();
+    const initialRec = selModel && selModel.getSelection && selModel.getSelection()[0];
+    const initialText = initialRec ? plainText(String(initialRec.get("text") || "")).replace(/\s+\d+$/, "").trim() : "";
+    const selectNode = async (n) => {
+      const was = !!(w.document.body && w.document.body.inert);
+      if (w.document.body) w.document.body.inert = false;
+      try {
+        const rowEl = n.domItem || (treeDom && n.rec && treeDom.querySelector(`[data-recordid="${cssEsc(String(n.rec.internalId ?? n.rec.getId()))}"]`));
+        const cell = rowEl && (rowEl.querySelector(".x-tree-node-text") || rowEl.querySelector("td.x-grid-cell") || rowEl);
+        if (cell && typeof cell.click === "function") cell.click();
+        else if (n.rec && selModel && typeof selModel.select === "function") {
+          selModel.select([n.rec]);
+          const view = tree.getView && tree.getView();
+          if (view && typeof view.fireEvent === "function") view.fireEvent("itemclick", view, n.rec, rowEl, 0);
+        }
+      } catch { /* */ } finally { if (w.document.body) w.document.body.inert = was; }
+      await sleep(120);
+      const activeCard = (cards && cards.getLayout && cards.getLayout().getActiveItem && cards.getLayout().getActiveItem()) || detail.cmp;
+      const cardDom = (activeCard && activeCard.el && activeCard.el.dom) || dom;
+      await waitDetailReady(w, cardDom, signal, 8000);
+      return activeCard || { el: { dom: cardDom } };
+    };
+    for (const n of nodes) {
+      if (!wantNode(n)) continue;
+      if (initialText && norm(n.text) === norm(initialText)) continue;
+      if (signal && signal.aborted) break;
+      const activeCard = await selectNode(n);
+      mergeExtracted(out, extractTicket(w, activeCard), n.text);
+    }
+    // Ripristina il nodo iniziale (es. Ticket)
+    if (initialRec) {
+      const initNode = nodes.find((n) => n.rec === initialRec);
+      if (initNode) { try { await selectNode(initNode); } catch { /* */ } }
     }
     return out;
   }
@@ -1383,7 +2000,7 @@
       }, 15000, signal);
       if (!ok) return null;
       const c = extractTicket(window, pv);
-      return c.fields.length || c.texts.length || c.tables.length ? c : null;
+      return c.fields.length || c.texts.length || c.tables.length || (c.messages && c.messages.length) ? c : null;
     } finally { if (was) { try { pv.collapse(); } catch { /* */ } } }
   }
   // diagnosi per i dati tecnici (senza contenuti)
@@ -1399,29 +2016,59 @@
   }
   async function loadTouchPage(t, signal) {
     const m = currentModule();
+    // 1. Se il ticket è già aperto in una scheda interna di Touch, leggiamo direttamente quella scheda + storico
+    const existingDetail = t && t.code ? matchDetailModule(window, t.code) : null;
+    if (existingDetail) {
+      const content = await loadDetailHistory(window, existingDetail, t, signal);
+      conn.reader = { at: new Date().toISOString(), how: "scheda Touch aperta", url: null, tpl: null, ext: true, fields: content.fields.length, texts: content.texts.length, messages: (content.messages || []).length, tables: content.tables.map((x) => x.rows.length) };
+      return Object.assign(content, { url: touchUrl(t) });
+    }
     const fr = readerFrame();
     try {
-      let url = touchUrl(t), how = url ? "indirizzo noto" : "";
+      let url = touchUrl(t), how = url ? "indirizzo noto" : "", detail = null, freshTab = false;
+      const pc = Ext.getCmp("body_portalPagesContainer");
+      const prevTab = pc && typeof pc.getActiveTab === "function" ? pc.getActiveTab() : null;
       if (!url) {
         if (!m) throw new Error("Non trovo l'elenco «All tickets» del portale.");
         const got = await portalOpen(m, t, "intercept", fr, signal);
-        url = got.url; how = got.how + (got.posted ? " (modulo)" : "");
-        if (!url && !got.posted) throw new Error(got.how ? "Il portale non ha aperto il ticket: usa «Apri in Touch»." : "Ticket non presente nell'elenco del portale: cercalo o aprilo con «Apri in Touch».");
+        url = got.url; detail = got.detail; freshTab = !!got.freshTab;
+        how = got.how + (got.posted ? " (modulo)" : detail ? " (scheda Touch)" : "");
+        if (!url && !got.posted && !detail) throw new Error(got.how ? "Il portale non ha aperto il ticket: usa «Apri in Touch»." : "Ticket non presente nell'elenco del portale: cercalo o aprilo con «Apri in Touch».");
       }
+      // 2. Il portale ha aperto il ticket in una scheda ExtJS interna della stessa pagina
+      if (detail) {
+        try {
+          const content = await loadDetailHistory(window, detail, t, signal);
+          conn.reader = { at: new Date().toISOString(), how, url: null, tpl: null, ext: true, fields: content.fields.length, texts: content.texts.length, messages: (content.messages || []).length, tables: content.tables.map((x) => x.rows.length) };
+          return Object.assign(content, { url: null });
+        } finally {
+          if (freshTab && prevTab && pc && typeof pc.setActiveTab === "function") {
+            try { pc.setActiveTab(prevTab); } catch { /* */ }
+          }
+        }
+      }
+      // 3. Il portale ha fornito un URL o inviato un modulo nella cornice nascosta
       if (url) { if (new URL(url).origin !== location.origin) throw Object.assign(new Error("La pagina del ticket è su un altro sito: aprila con «Apri in Touch»."), { url }); fr.src = url; }
       await waitFrame(fr, signal);
       const w = frameWin(fr);
-      // schede interne non ancora disegnate (deferredRender): si aprono una per volta, poi si torna alla prima
-      try {
-        for (const tp of w.Ext.ComponentQuery.query("tabpanel")) {
-          const cur = tp.getActiveTab();
-          const todo = tp.items.getRange().filter((c) => !c.rendered);
-          for (const c of todo.slice(0, 8)) { try { tp.setActiveTab(c); } catch { /* */ } }
-          if (todo.length) { await sleep(300); await waitFrame(fr, signal); try { tp.setActiveTab(cur); } catch { /* */ } }
-        }
-      } catch { /* */ }
-      const content = extractTicket(w);
-      conn.reader = { at: new Date().toISOString(), how, url: url ? url.replace(/[?#].*$/, "") + (url.includes("?") ? "?…" : "") : null, tpl: touchTemplate() ? touchTemplate().field : null, ext: !!w.Ext, fields: content.fields.length, texts: content.texts.length, tables: content.tables.map((x) => x.rows.length), classes: (() => { try { return [...new Set(w.Ext.ComponentQuery.query("component").map((c) => c.xtype))].slice(0, 60); } catch { return null; } })() };
+      // Se dentro la cornice c'è un modulo di dettaglio Touch con PagesTree, navighiamo anche lì lo storico
+      const frameDetail = findDetailModules(w)[0];
+      let content;
+      if (frameDetail) {
+        content = await loadDetailHistory(w, frameDetail, t, signal);
+      } else {
+        // schede interne non ancora disegnate (deferredRender): si aprono una per volta, poi si torna alla prima
+        try {
+          for (const tp of w.Ext.ComponentQuery.query("tabpanel")) {
+            const cur = tp.getActiveTab();
+            const todo = tp.items.getRange().filter((c) => !c.rendered);
+            for (const c of todo.slice(0, 8)) { try { tp.setActiveTab(c); } catch { /* */ } }
+            if (todo.length) { await sleep(300); await waitFrame(fr, signal); try { tp.setActiveTab(cur); } catch { /* */ } }
+          }
+        } catch { /* */ }
+        content = extractTicket(w);
+      }
+      conn.reader = { at: new Date().toISOString(), how, url: url ? url.replace(/[?#].*$/, "") + (url.includes("?") ? "?…" : "") : null, tpl: touchTemplate() ? touchTemplate().field : null, ext: !!w.Ext, fields: content.fields.length, texts: content.texts.length, messages: (content.messages || []).length, tables: content.tables.map((x) => x.rows.length), classes: (() => { try { return [...new Set(w.Ext.ComponentQuery.query("component").map((c) => c.xtype))].slice(0, 60); } catch { return null; } })() };
       return Object.assign(content, { url: url || touchUrl(t) });
     } finally {
       try { const w = frameWin(fr); if (w && w.Ext && w.Ext.Ajax && typeof w.Ext.Ajax.abortAll === "function") w.Ext.Ajax.abortAll(); } catch { /* */ }
@@ -1481,7 +2128,7 @@ input:disabled,select:disabled{opacity:.55;background:var(--sf2);cursor:not-allo
 .btn:hover{background:var(--sf2);text-decoration:none}.btn.pri{background:var(--ac);border-color:var(--ac);color:var(--act);font-weight:600}.btn.pri:hover{background:var(--ac2)}
 .btn.gh{background:transparent;border-color:transparent;color:var(--ac)}.btn.gh:hover{background:var(--acs)}.btn.s{min-height:28px;padding:3px 9px;font-size:13px}.btn.dg{color:var(--er)}.btn:disabled{opacity:.55;cursor:default}
 .ib{display:inline-flex;align-items:center;justify-content:center;width:28px;height:28px;border-radius:6px;border:0;background:transparent;color:var(--mu);cursor:pointer;font-size:15px;line-height:1}.ib:hover{background:var(--sf2);color:var(--tx)}.ib.on{color:var(--st)}
-.badge{display:inline-block;font-size:11.5px;font-weight:600;padding:1px 8px;border-radius:999px;background:var(--acs);color:var(--ac);white-space:nowrap}.badge.cl{background:var(--okb);color:var(--ok)}.badge.pr{background:var(--sf2);color:var(--mu)}.badge.src{background:var(--wnb,#fff4d6);color:var(--wn,#7a5200)}
+.badge{display:inline-block;font-size:11.5px;font-weight:600;padding:1px 8px;border-radius:999px;background:var(--acs);color:var(--ac);white-space:nowrap}.badge.cl{background:var(--okb);color:var(--ok)}.badge.pr{background:var(--sf2);color:var(--mu)}.badge.src{background:var(--wb);color:var(--wt)}.badge.cnt{background:var(--sf2);color:var(--mu);font-weight:500}
 .card{background:var(--sf);border:1px solid var(--bd);border-radius:10px;box-shadow:var(--sh);padding:16px}.card+.card{margin-top:14px}
 .top{display:flex;align-items:center;gap:16px;padding:8px 18px;background:var(--sf);border-bottom:1px solid var(--bd);flex:none}
 #close{margin-left:auto}.brand{display:flex;align-items:center;gap:9px;font-weight:700;font-size:16px;white-space:nowrap}
@@ -1493,9 +2140,10 @@ input:disabled,select:disabled{opacity:.55;background:var(--sf2);cursor:not-allo
 .sbar{display:flex;gap:8px}.sbar input{min-height:44px;font-size:16px}.sbar .btn.pri{min-height:44px;padding:0 22px;font-size:15px}
 .row{display:flex;align-items:center;gap:8px;flex-wrap:wrap}.between{justify-content:space-between}.end{justify-content:flex-end}
 .quick{display:grid;grid-template-columns:170px 150px 150px 190px minmax(160px,1fr);gap:10px;align-items:end}
-details.adv{border-top:1px solid var(--bd);padding-top:10px}details.adv summary{cursor:pointer;font-weight:600;color:var(--ac)}
+details.adv{border-top:1px solid var(--bd);padding-top:10px}details.adv summary{cursor:pointer;font-weight:600;color:var(--ac);display:flex;align-items:center;gap:8px;user-select:none}
+details.adv summary:hover{text-decoration:underline}
 .ag{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:12px;margin-top:12px}
-fieldset{border:1px solid var(--bd);border-radius:8px;padding:10px 12px 12px;margin:0;display:flex;flex-direction:column;gap:9px;min-width:0}legend{font-weight:600;font-size:13px;padding:0 4px}.full{grid-column:1/-1}
+fieldset{border:1px solid var(--bd);border-radius:8px;padding:10px 12px 12px;margin:0;display:flex;flex-direction:column;gap:9px;min-width:0}legend{font-weight:600;font-size:13px;padding:0 6px;color:var(--tx)}.full{grid-column:1/-1}
 .two{display:grid;grid-template-columns:1fr 1fr;gap:9px 12px}
 .tg{display:flex;flex-wrap:wrap;gap:5px}.tg button{border:1px solid var(--bd2);background:var(--sf);border-radius:999px;padding:3px 10px;cursor:pointer;font-size:12.5px}.tg button[aria-pressed=true]{background:var(--ac);border-color:var(--ac);color:var(--act);font-weight:600}
 .qp{display:flex;align-items:center;gap:10px;background:var(--sf2);border-radius:8px;padding:6px 10px;flex-wrap:wrap}.qp code{flex:1;min-width:200px;background:transparent;padding:0;overflow-wrap:anywhere;white-space:pre-wrap;max-height:4.5em;overflow:auto;font-family:inherit;font-size:13px}
@@ -1503,19 +2151,35 @@ fieldset{border:1px solid var(--bd);border-radius:8px;padding:10px 12px 12px;mar
 .tree{border:1px solid var(--bd2);border-radius:6px;padding:6px;background:var(--sf);display:flex;flex-direction:column;gap:4px}.tree input{width:100%}
 .tl{list-style:none;margin:0;padding:0;max-height:260px;overflow:auto}.tl li{display:flex;align-items:center;gap:2px}.tl .tgl{width:22px;min-width:22px;height:22px;border:0;background:transparent;cursor:pointer;color:var(--mu);border-radius:4px;padding:0}
 .tl .nm{border:0;background:transparent;text-align:left;padding:3px 6px;border-radius:4px;cursor:pointer;color:var(--tx);font:inherit;overflow-wrap:anywhere}.tl button.nm:hover{background:var(--acs)}.tl .nm.on{background:var(--acs);color:var(--ac);font-weight:600}.tl .nm.off{color:var(--mu)}
-.srcs{display:flex;flex-wrap:wrap;align-items:center;gap:6px 12px;margin-top:8px}.srcs .srcn{font-weight:600}.pill{font-size:12px;border-radius:999px;padding:1px 8px;background:var(--sf2);color:var(--mu)}.pill.on{background:var(--okb);color:var(--ok)}.pill.wait{background:var(--wnb,#fff4d6);color:var(--wn,#7a5200)}
-.lk,.lst{display:flex;flex-direction:column;gap:4px}.lst .tg{max-height:200px;overflow:auto}.yb span.ar{background:var(--wn,#b07a00);opacity:.75}
-dialog.rd{width:min(980px,calc(100vw - 24px));max-width:none;height:min(90vh,1000px);padding:0;display:none;flex-direction:column}dialog.rd[open]{display:flex}
+.srcs{display:flex;flex-wrap:wrap;align-items:center;gap:6px 12px;margin-top:4px}.srcs .srcn{font-weight:600}.pill{font-size:12px;border-radius:999px;padding:1px 8px;background:var(--sf2);color:var(--mu)}.pill.on{background:var(--okb);color:var(--ok)}.pill.wait{background:var(--wnb,#fff4d6);color:var(--wn,#7a5200)}
+.lk,.lst{display:flex;flex-direction:column;gap:4px}.lst .tg{max-height:180px;overflow:auto}.yb span.ar{background:var(--wn,#b07a00);opacity:.75}
+dialog.rd{width:min(1120px,calc(100vw - 24px));max-width:none;height:min(92vh,1040px);padding:0;display:none;flex-direction:column}dialog.rd[open]{display:flex}
 .rdh{display:flex;gap:10px;align-items:flex-start;justify-content:space-between;flex-wrap:wrap;padding:12px 16px;border-bottom:1px solid var(--bd)}.rdt{min-width:0;flex:1 1 300px}.rdt h3{margin:2px 0 0;font-size:16px;overflow-wrap:anywhere}
-.rdb{overflow:auto;padding:12px 16px 20px;display:flex;flex-direction:column;gap:14px}.rdb h4{margin:0 0 4px;font-size:13px;color:var(--mu);text-transform:uppercase;letter-spacing:.03em}
-.rdf{display:grid;grid-template-columns:minmax(120px,max-content) minmax(0,1fr);gap:3px 14px;margin:0}.rdf dt{color:var(--mu);font-size:13px}.rdf dd{margin:0;overflow-wrap:anywhere}
+.rdb{overflow:auto;padding:14px 18px 24px;display:flex;flex-direction:column;gap:16px}.rdb0{display:flex;flex-direction:column;gap:16px}.rdb h4{margin:0 0 6px;font-size:12.5px;color:var(--mu);text-transform:uppercase;letter-spacing:.04em}
+.rdf{display:grid;grid-template-columns:minmax(130px,max-content) minmax(0,1fr) minmax(130px,max-content) minmax(0,1fr);gap:4px 14px;margin:0;background:var(--sf2);border:1px solid var(--bd);border-radius:8px;padding:10px 12px}.rdf dt{color:var(--mu);font-size:12.5px;font-weight:600}.rdf dd{margin:0;overflow-wrap:anywhere;font-size:13.5px}
+.rd-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(320px,1fr));gap:12px}
+.rd-box{border:1px solid var(--bd);border-radius:8px;padding:10px 12px;background:var(--sf);display:flex;flex-direction:column;gap:6px}
+.rd-box.req{border-left:4px solid var(--ac)}.rd-box.sol{border-left:4px solid var(--ok);background:var(--okb)}
+.tl-list{display:flex;flex-direction:column;gap:10px}
+.tl-item{border:1px solid var(--bd);border-left:4px solid var(--ac);border-radius:8px;background:var(--sf);padding:10px 12px;display:flex;flex-direction:column;gap:6px}
+.tl-item.note-int{border-left-color:var(--st);background:var(--wb)}
+.tl-hd{display:flex;align-items:center;gap:8px;flex-wrap:wrap;font-size:12.5px;color:var(--mu);border-bottom:1px solid var(--bd);padding-bottom:5px}
+.tl-hd b{color:var(--tx);font-size:13px}
+.tl-bd{white-space:pre-wrap;overflow-wrap:anywhere;line-height:1.5;font-size:13.5px}
 .pre{white-space:pre-wrap;overflow-wrap:anywhere;background:var(--sf2);border:1px solid var(--bd);border-radius:6px;padding:8px 10px;line-height:1.5}
 .rdtab{width:100%;border-collapse:collapse;font-size:13px}.rdtab th,.rdtab td{border-bottom:1px solid var(--bd);padding:5px 6px;text-align:left;vertical-align:top;white-space:pre-wrap;overflow-wrap:anywhere}.rdtab th{color:var(--mu);font-weight:600}.rdtw{overflow:auto}
-.ppl{display:flex;flex-direction:column;gap:8px}.pr{display:grid;grid-template-columns:230px minmax(0,1fr) auto;gap:8px;align-items:start}.pr .lb{font-size:13px;padding-top:6px}.pr .cv{display:flex;flex-direction:column;gap:4px;min-width:0}.pr .act{display:flex;gap:4px;flex-wrap:wrap}
+.ppl{display:grid;grid-template-columns:repeat(auto-fill,minmax(300px,1fr));gap:10px;align-items:start}
+.pf-ghd{grid-column:1/-1;font-size:12px;font-weight:700;text-transform:uppercase;letter-spacing:.04em;color:var(--mu);margin:4px 0 -2px;padding-bottom:3px;border-bottom:1px dashed var(--bd)}
+.pr{display:flex;flex-direction:column;gap:6px;background:var(--sf2);border:1px solid var(--bd);border-radius:8px;padding:8px 10px;min-width:0}
+.pr.on{border-color:var(--ac);background:var(--acs)}
+.pr.open{grid-column:1/-1}
+.pr-hd{display:flex;align-items:flex-start;justify-content:space-between;gap:8px}
+.pr .lb{font-size:13px;font-weight:600;color:var(--tx);line-height:1.3}.pr .lb small{display:block;font-weight:400;font-size:11.5px;color:var(--mu)}
+.pr .cv{display:flex;flex-direction:column;gap:4px;min-width:0}.pr .act{display:flex;gap:4px;flex-wrap:wrap;justify-content:flex-end}
 .sug{list-style:none;margin:0;padding:4px;border:1px solid var(--bd2);border-radius:6px;background:var(--sf);max-height:220px;overflow:auto}.sug li button{width:100%;text-align:left;border:0;background:transparent;padding:5px 8px;border-radius:4px;cursor:pointer}.sug li button:hover{background:var(--acs)}
 .yc{margin-bottom:10px;padding:12px 14px}.yc h3{margin:0 0 8px}.yr{display:grid;grid-template-columns:52px minmax(0,1fr) 110px auto;gap:8px;align-items:center;font-size:13px;padding:2px 0}.yr .yb{height:8px;background:var(--sf2);border-radius:4px;overflow:hidden;display:flex}.yr .yb span{display:block;height:100%;background:var(--ac)}.yr .yn{text-align:right;font-variant-numeric:tabular-nums}.yr.on b{color:var(--ac)}.yr.on .yb span{background:var(--st)}
-.chip{display:inline-flex;align-items:center;gap:3px;background:var(--acs);color:var(--ac);border-radius:999px;padding:1px 4px 1px 9px;font-size:12.5px;font-weight:600}.chip button{border:0;background:transparent;color:inherit;cursor:pointer;padding:0 3px;font-size:14px;line-height:1;border-radius:50%}
-.chips{display:flex;flex-wrap:wrap;gap:6px}.chips:empty{display:none}
+.chip{display:inline-flex;align-items:center;gap:3px;background:var(--acs);color:var(--ac);border-radius:999px;padding:2px 5px 2px 10px;font-size:12.5px;font-weight:600}.chip button{border:0;background:transparent;color:inherit;cursor:pointer;padding:0 3px;font-size:14px;line-height:1;border-radius:50%}
+.chips{display:flex;flex-wrap:wrap;gap:6px;align-items:center}.chips:empty{display:none}
 .tips{margin:0;padding-left:18px;display:flex;flex-direction:column;gap:6px;color:var(--mu)}.tips b{color:var(--tx)}
 .res-grid{display:grid;grid-template-columns:250px minmax(0,1fr);gap:16px;margin-top:16px;align-items:start}
 .facets{position:sticky;top:0;padding:12px;display:flex;flex-direction:column;gap:16px;max-height:calc(100vh - 90px);overflow:auto}
@@ -1540,7 +2204,7 @@ mark{background:var(--mk);color:var(--mkt);border-radius:2px;padding:0 1px}
 dialog{border:1px solid var(--bd2);border-radius:12px;padding:20px;width:min(480px,calc(100vw - 32px));background:var(--sf);color:var(--tx);box-shadow:0 20px 50px rgba(0,0,0,.25)}dialog::backdrop{background:rgba(10,15,25,.45)}dialog form{display:flex;flex-direction:column;gap:10px}dialog h3{margin:0;font-size:16px}
 .toast{position:fixed;bottom:20px;left:50%;transform:translateX(-50%);background:var(--tx);color:var(--bg);padding:9px 16px;border-radius:8px;box-shadow:0 8px 24px rgba(0,0,0,.25);font-size:13.5px;z-index:3;max-width:min(680px,calc(100vw - 32px))}
 @media (max-width:1100px){.quick{grid-template-columns:repeat(3,minmax(0,1fr))}.quick>:nth-child(4),.quick>:nth-child(5){grid-column:span 3}}
-@media (max-width:820px){.pr{grid-template-columns:1fr}.res-grid{grid-template-columns:1fr}.facets{position:static;flex-direction:row;flex-wrap:wrap;max-height:none}.facet{flex:1 1 200px}.ag,.two{grid-template-columns:1fr}.top{flex-wrap:wrap;gap:8px}.tabs{order:3;flex-basis:100%}}
+@media (max-width:820px){.ppl{grid-template-columns:1fr}.rdf{grid-template-columns:minmax(110px,max-content) minmax(0,1fr)}.res-grid{grid-template-columns:1fr}.facets{position:static;flex-direction:row;flex-wrap:wrap;max-height:none}.facet{flex:1 1 200px}.ag,.two{grid-template-columns:1fr}.top{flex-wrap:wrap;gap:8px}.tabs{order:3;flex-basis:100%}}
 @media (max-width:560px){.quick{grid-template-columns:1fr 1fr}.quick>:nth-child(1),.quick>:nth-child(4),.quick>:nth-child(5){grid-column:span 2}}
 `;
 
@@ -1560,33 +2224,34 @@ dialog{border:1px solid var(--bd2);border-radius:12px;padding:20px;width:min(480
  <div class="body" id="scroller"><div class="page">
   <section id="tab-search">
    <form id="sf" class="card panel" autocomplete="off">
-    <div class="sbar"><input id="q" type="search" placeholder="Cerca nei ticket… es. detassazione premio" aria-label="Testo da cercare" spellcheck="false" list="hist-list"><datalist id="hist-list"></datalist><button type="submit" class="btn pri" id="go">Cerca</button></div>
+    <div class="sbar"><input id="q" type="search" placeholder="Cerca nei ticket (Search)… es. detassazione premio, codice ticket, testo" aria-label="Testo da cercare" spellcheck="false" list="hist-list"><datalist id="hist-list"></datalist><button type="submit" class="btn pri" id="go">Cerca</button></div>
     <div class="quick">
-     <label class="fld">Data di apertura<select id="preset"><option value="">Qualsiasi</option><option value="30d">Ultimi 30 giorni</option><option value="3m">Ultimi 3 mesi</option><option value="6m">Ultimi 6 mesi</option><option value="1y">Ultimi 12 mesi</option><option value="ytd">Anno corrente</option><option value="py">Anno scorso</option><option value="2y">Ultimi 2 anni</option><option value="5y">Ultimi 5 anni</option><option value="custom">Personalizzato</option></select></label>
-     <label class="fld">Dal<input type="date" id="dfrom"></label>
-     <label class="fld">Al<input type="date" id="dto"></label>
-     <label class="fld">Stato<select id="st"><option value="all">Tutti gli stati</option><option value="open">Aperti</option><option value="closed">Chiusi e risolti</option><option value="custom">Scegli…</option><option value="page">Come nella pagina</option></select></label>
+     <label class="fld">Data di apertura (Opening date)<select id="preset"><option value="">Qualsiasi</option><option value="30d">Ultimi 30 giorni</option><option value="3m">Ultimi 3 mesi</option><option value="6m">Ultimi 6 mesi</option><option value="1y">Ultimi 12 mesi</option><option value="ytd">Anno corrente</option><option value="py">Anno scorso</option><option value="2y">Ultimi 2 anni</option><option value="5y">Ultimi 5 anni</option><option value="custom">Personalizzato</option></select></label>
+     <label class="fld">Aperta dal (From)<input type="date" id="dfrom"></label>
+     <label class="fld">Aperta al (To)<input type="date" id="dto"></label>
+     <label class="fld">Stato (Status)<select id="st"><option value="all">Tutti gli stati</option><option value="open">Aperti</option><option value="closed">Chiusi e risolti</option><option value="custom">Scegli stati…</option><option value="page">Come nella pagina</option></select></label>
      <label class="fld">Massimo ticket<select id="capq" title="Righe chieste al portale in una ricerca (le più recenti)"><option>50</option><option>100</option><option>200</option><option>500</option></select></label>
     </div>
     <div class="srcs" id="srcs"><span class="mu sm">Dove cercare:</span><span class="srcn">Portale Touch</span><label class="ck"><input type="checkbox" id="src-ar"> anche nell'Area Riservata <span class="mu sm">(vecchia Ricerca rapida, altri ticket)</span></label><span id="ar-state" class="pill"></span><button type="button" class="btn gh s" id="ar-connect">Collega l'Area Riservata</button></div>
     <div id="ar-help" class="note" hidden></div>
-    <details class="adv" id="adv"><summary>Opzioni avanzate <span class="mu sm" id="adv-n"></span></summary>
+    <div id="qactive" class="chips"></div>
+    <details class="adv" id="adv"><summary>Tutti i filtri di Touch e opzioni avanzate <span class="mu sm" id="adv-n"></span></summary>
      <div class="ag">
-      <fieldset><legend>Testo</legend>
-       <label class="fld">L'oggetto contiene<input id="subject" placeholder="es. conguaglio"></label>
+      <fieldset><legend>Oggetto e parole nel testo</legend>
+       <label class="fld">Oggetto (Subject)<input id="subject" placeholder="es. conguaglio"></label>
        <label class="fld">Escludi parole (sui risultati)<input id="exclude" placeholder='es. storno "cassa integrazione"'></label>
        <label class="ck"><input type="checkbox" id="allw"> Tutte le parole cercate devono comparire in oggetto, richiesta o soluzione (verifica sui risultati)</label>
       </fieldset>
-      <fieldset><legend>Ultimo aggiornamento e classificazione</legend>
-       <div class="two"><label class="fld">Aggiornato dal<input type="date" id="ufrom"></label><label class="fld">Aggiornato al<input type="date" id="uto"></label></div>
-       <div class="two"><label class="fld">Classificazione (testo)<input id="classif" placeholder="es. Normativa"></label><label class="fld">Classificazione cliente (testo)<input id="classcli"></label></div>
+      <fieldset><legend>Ultimo aggiornamento e classificazioni (Touch)</legend>
+       <div class="two"><label class="fld">Aggiornato dal (Last update from)<input type="date" id="ufrom"></label><label class="fld">Aggiornato al (Last update to)<input type="date" id="uto"></label></div>
+       <div class="two"><label class="fld">Classificazione (Classification)<input id="classif" placeholder="es. Normativa"></label><label class="fld">Classificazione cliente (Client Classification)<input id="classcli" placeholder="es. Custom"></label></div>
       </fieldset>
-      <fieldset class="full" id="st-box" hidden><legend>Stati</legend><div class="tg" id="st-list"></div><div class="row"><button type="button" class="btn gh s" data-sel="st:all">Tutti</button><button type="button" class="btn gh s" data-sel="st:open">Solo aperti</button><button type="button" class="btn gh s" data-sel="st:closed">Solo chiusi</button><button type="button" class="btn gh s" data-sel="st:none">Nessuno</button></div></fieldset>
-      <fieldset class="full"><legend>Priorità <span class="mu sm">(nessuna scelta = tutte)</span></legend><div class="tg" id="pr-list"></div></fieldset>
-      <fieldset class="full" id="ppl-box"><legend>Gruppi e persone <span class="mu sm">(filtri del portale, su tutti i ticket)</span></legend><div class="ppl" id="ppl"></div>
-       <p class="mu sm" style="margin:0">Apri l'elenco con <b>Scegli…</b> (o scrivi un nome) e scegli: il filtro vale nel portale su tutti i ticket. <b>Menu del portale</b> resta disponibile se un campo non si lascia impostare da qui.</p></fieldset>
-      <fieldset class="full" id="pf-box"><legend>Altri filtri del portale</legend><div class="ppl" id="pf"></div>
-       <p class="mu sm" style="margin:0">Servizio, Sede, Contatto, Etichette e gli altri filtri dell'elenco All tickets: si scelgono qui e restano nelle ricerche salvate.</p></fieldset>
+      <fieldset class="full" id="st-box" hidden><legend>Stati (Status)</legend><div class="tg" id="st-list"></div><div class="row"><button type="button" class="btn gh s" data-sel="st:all">Tutti</button><button type="button" class="btn gh s" data-sel="st:open">Solo aperti</button><button type="button" class="btn gh s" data-sel="st:closed">Solo chiusi</button><button type="button" class="btn gh s" data-sel="st:none">Nessuno</button></div></fieldset>
+      <fieldset class="full"><legend>Priorità (Priority) <span class="mu sm">— nessuna scelta = tutte</span></legend><div class="tg" id="pr-list"></div></fieldset>
+      <fieldset class="full" id="ppl-box"><legend>Gruppi e persone (Assegnato a, Gruppo proprietario, Modificato da, Responsabile)</legend><div class="ppl" id="ppl"></div>
+       <p class="mu sm" style="margin:0">Usa i tasti rapidi <b>Io</b> / <b>Il mio gruppo</b>, scrivi un nome per cercare o premi <b>Scegli…</b> per aprire l'albero dei gruppi.</p></fieldset>
+      <fieldset class="full" id="pf-box"><legend>Servizio, cliente, canale e altri filtri di Touch</legend><div class="ppl" id="pf"></div>
+       <p class="mu sm" style="margin:0">Tutti i filtri dell'elenco <b>All tickets</b> di Touch (Servizio, Sede/Account, Contatto, Origine, Canale, Sollecito, Top client, Tag, Catalogo, Escalated, Stato lavorazione): valgono su tutti i ticket e si salvano nelle ricerche salvate.</p></fieldset>
      </div>
     </details>
     <div class="qp"><span class="mu sm">Filtri inviati al portale</span><code id="qprev"></code>
@@ -1597,9 +2262,9 @@ dialog{border:1px solid var(--bd2);border-radius:12px;padding:20px;width:min(480
     <li>Il testo va nel campo <b>Search</b> dell'elenco del portale, insieme a periodo, stato e gli altri filtri: la ricerca la fa il portale, sui suoi dati aggiornati. Chiudendo il pannello l'elenco del portale mostra la stessa ricerca; <b>Ripristina il portale</b> rimette i filtri di prima.</li>
     <li>Per i ticket storici lascia <b>Tutti gli stati</b> (la pagina del portale di solito mostra solo quelli aperti).</li>
     <li>La ricerca è su <b>tutti i ticket</b> (elenco All tickets), ma il portale li ordina per data: arrivano i <b class="capn">200</b> più recenti. Se il portale ne ha di più, <b>Quanti per anno?</b> mostra la distribuzione su tutti gli anni e con un clic cerchi in un anno solo.</li>
-    <li>In <b>Opzioni avanzate</b> ci sono tutti i filtri del portale: gruppi e persone (Assegnato a, Gruppo proprietario, Modificato da, Responsabile, con <b>Io</b> e <b>Il mio gruppo</b>), Servizio, Sede, Contatto, Etichette… Valgono su tutti i ticket e restano nelle ricerche salvate.</li>
+    <li>In <b>Tutti i filtri di Touch e opzioni avanzate</b> trovi tutti i 23 filtri di Touch organizzati in riquadri chiari: gruppi e persone (con <b>Io</b> e <b>Il mio gruppo</b>), Servizio, Sede/Account, Contatto, Origine, Canale, Sollecito, Top client, Tag, Voce di catalogo, Escalated, Stato lavorazione.</li>
     <li>Con <b>Collega l'Area Riservata</b> si cerca anche nella vecchia Ricerca rapida (altri ticket): si apre in una nuova scheda, lì si preme il segnalibro e si conferma.</li>
-    <li><b>Leggi</b> mostra il ticket completo nel pannello (richiesta, soluzione, messaggi); <b>Apri in Touch</b> apre la sua pagina nel portale. <kbd>/</kbd> per cercare, <kbd>Esc</kbd> per tornare al portale, un altro clic sul segnalibro per riaprire.</li></ul></div>
+    <li><b>Leggi</b> mostra il ticket completo nel pannello con <b>Richiesta</b>, <b>Soluzione</b> e l'intero <b>Storico conversazioni / Note interne</b>; <b>Apri in Touch</b> apre la scheda nel portale. <kbd>/</kbd> per cercare, <kbd>Esc</kbd> per tornare al portale, un altro clic sul segnalibro per riaprire.</li></ul></div>
    <div id="results" class="res-grid" hidden>
     <aside class="card facets" id="facets"></aside>
     <div>
@@ -1744,12 +2409,29 @@ dialog{border:1px solid var(--bd2);border-radius:12px;padding:20px;width:min(480
     try { return !!fn(); } catch { return false; }
   }
   function afterPf() { renderFilters(currentModule()); previewNow(); advCount(); }
+  const PF_GROUP_LABELS = {
+    client: "Servizio, sede, cliente e catalogo",
+    extra: "Canale, origine, sollecito e stato lavorazione",
+    other: "Altri filtri del portale",
+  };
   function renderFilters(m) {
     const fields = m ? pfFields(m) : [];
     const people = fields.filter((x) => PEOPLE_KEYS.has(x.suffix)), others = fields.filter((x) => !PEOPLE_KEYS.has(x.suffix));
-    const fill = (box, list) => { clear(box); for (const x of list) box.appendChild(filterRow(m, x)); };
-    fill($("#ppl"), people); $("#ppl-box").hidden = !people.length;
-    fill($("#pf"), others); $("#pf-box").hidden = !others.length;
+    const fill = (box, list, withGroups) => {
+      clear(box);
+      const multiGroups = withGroups && new Set(list.map((x) => x.group || "other")).size > 1;
+      let lastG = null;
+      for (const x of list) {
+        const g = x.group || "other";
+        if (multiGroups && g !== lastG) {
+          box.appendChild(h("div", { class: "pf-ghd" }, PF_GROUP_LABELS[g] || g));
+          lastG = g;
+        }
+        box.appendChild(filterRow(m, x));
+      }
+    };
+    fill($("#ppl"), people, false); $("#ppl-box").hidden = !people.length;
+    fill($("#pf"), others, true); $("#pf-box").hidden = !others.length;
   }
   const renderPeople = renderFilters;
   // utente collegato e suo gruppo predefinito (Portal.Const del portale): scelte rapide «Io» e «Il mio gruppo»
@@ -1760,21 +2442,21 @@ dialog{border:1px solid var(--bd2);border-radius:12px;padding:20px;width:min(480
       const u = C.TypedLoggedUser || C.LoggedUser || {};
       const H = C.HDAUser || {};
       const id = u.ID || u.Id || u.UserID || H.UserID || "";
-      const nm = u.Name || u.Description || u.FullName || (String(H.ID || "") === String(id) ? H.FullName || H.ObjectDescription : "") || "";
+      const nm = u.Name || u.Description || u.FullName || (!H.ID || String(H.ID) === String(id) ? H.FullName || H.ObjectDescription : "") || "";
       return { id: String(id || ""), name: textOf(String(nm)), group: String(H.DefaultUserGroupID || ""), groupName: textOf(String(H.DefaultUserGroupDescription || H.DefaultUserGroupName || "")) };
     } catch { return null; }
   }
   const ME_FIELDS = new Set(["AssignedUserOrGroupFilter", "ModifiedBy", "OwnerUserID"]);
   const MYGROUP_FIELDS = new Set(["AssignedUserOrGroupFilter", "OwnerUserGroupID"]);
   function filterRow(m, x) {
-    const { suffix, f, kind, label } = x;
+    const { suffix, f, kind, label, hint } = x;
     const cur = pfValue(f, kind);
     const multiList = kind === "list" && isMulti(f);
     const cv = h("div", { class: "cv" });
     const act = h("div", { class: "act" });
     if (cur && !multiList && kind !== "text" && kind !== "date") {
       cv.appendChild(h("span", { class: "chips" }, h("span", { class: "chip" }, cur.t, h("button", { type: "button", "aria-label": `Togli ${label}`, title: "Togli il filtro", onclick: () => { if (changePf(m, () => { clearField(f); return true; })) afterPf(); } }, "×"))));
-    } else if (!cur && (kind === "tree" || kind === "remote" || kind === "treemenu")) cv.appendChild(h("span", { class: "mu sm", style: "padding-top:6px" }, "qualsiasi"));
+    } else if (!cur && (kind === "tree" || kind === "remote" || kind === "treemenu")) cv.appendChild(h("span", { class: "mu sm" }, "qualsiasi"));
     if (kind === "remote") cv.appendChild(lookupEditor(m, f, label, suffix, !!cur));
     else if (kind === "list") cv.appendChild(listEditor(m, f, label, suffix));
     else if (kind === "date") {
@@ -1805,7 +2487,10 @@ dialog{border:1px solid var(--bd2);border-radius:12px;padding:20px;width:min(480
     if (kind === "tree" || kind === "treemenu" || kind === "remote" || (kind === "list" && !comboOptions(f).length)) {
       act.appendChild(h("button", { type: "button", class: kind === "treemenu" ? "btn s" : "btn gh s", title: "Scegli con il menu del portale: il pannello si nasconde e si riapre dopo la scelta", onclick: () => { if (!busy()) pickInPortal(m, f, label); } }, kind === "treemenu" ? "Scegli nel portale…" : "Menu del portale"));
     }
-    return h("div", { class: "pr", "data-pf": suffix }, h("span", { class: "lb" }, label), cv, act);
+    const cls = "pr" + (cur ? " on" : "") + (openTrees.has(suffix) ? " open" : "");
+    return h("div", { class: cls, "data-pf": suffix },
+      h("div", { class: "pr-hd" }, h("span", { class: "lb" }, label, hint ? h("small", null, hint) : null), act),
+      cv);
   }
   // ricerca del nome nel portale mentre si scrive (campi con ricerca sul server: persone, sedi, contatti...)
   function lookupEditor(m, f, label, suffix, has) {
@@ -2320,10 +3005,52 @@ dialog{border:1px solid var(--bd2);border-radius:12px;padding:20px;width:min(480
     if (s.exclude) p.push(`poi senza: ${s.exclude}`);
     return p.join(" · ");
   }
+  function renderQueryChips(s, m) {
+    const box = clear($("#qactive"));
+    if (!box) return;
+    const chips = [];
+    const pushChip = (text, fn) => chips.push(h("span", { class: "chip" }, text, h("button", { type: "button", title: "Togli questo filtro", "aria-label": `Togli ${text}`, onclick: fn }, "×")));
+    if (s.dfrom || s.dto) pushChip(`Apertura: ${s.dfrom ? fmtDate(s.dfrom) : "…"} → ${s.dto ? fmtDate(s.dto) : "…"}`, () => { $("#dfrom").value = ""; $("#dto").value = ""; $("#preset").value = ""; onFormChange(); });
+    if (s.ufrom || s.uto) pushChip(`Aggiornato: ${s.ufrom ? fmtDate(s.ufrom) : "…"} → ${s.uto ? fmtDate(s.uto) : "…"}`, () => { $("#ufrom").value = ""; $("#uto").value = ""; onFormChange(); });
+    if (s.st && s.st !== "all") {
+      const stl = { open: "Stato: Aperti", closed: "Stato: Chiusi e risolti", page: "Stato: Come nella pagina", custom: `Stati scelti (${(s.stCodes || []).length})` };
+      pushChip(stl[s.st] || `Stato: ${s.st}`, () => { $("#st").value = "all"; $("#st-box").hidden = true; onFormChange(); });
+    }
+    for (const p of s.pr || []) pushChip(`Priorità: ${p}`, () => { S.prCodes.delete(p); renderToggles(); onFormChange(); });
+    if (s.subject) pushChip(`Oggetto: "${s.subject}"`, () => { $("#subject").value = ""; onFormChange(); });
+    if (s.exclude) pushChip(`Escludi: ${s.exclude}`, () => { $("#exclude").value = ""; onFormChange(); });
+    if (s.allWords) pushChip("Tutte le parole", () => { $("#allw").checked = false; onFormChange(); });
+    if (s.classif) pushChip(`Classificazione: "${s.classif}"`, () => { $("#classif").value = ""; onFormChange(); });
+    if (s.classcli) pushChip(`Classif. cliente: "${s.classcli}"`, () => { $("#classcli").value = ""; onFormChange(); });
+    for (const [suffix, label] of PEOPLE) {
+      const v = s.people && s.people[suffix];
+      if (v) pushChip(`${label.replace(/ \(.*$/, "")}: ${v.t || v.v}`, () => {
+        const mod = currentModule(); const f = mod && mod.field(suffix);
+        if (f && changePf(mod, () => { clearField(f); return true; })) afterPf();
+      });
+    }
+    if (s.pf && typeof s.pf === "object") {
+      const metaMap = m ? new Map(pfFields(m).map((x) => [x.suffix, x])) : new Map();
+      for (const [suffix, v] of Object.entries(s.pf)) {
+        if (!v || v.v === undefined) continue;
+        const info = metaMap.get(suffix);
+        const lbl = (info && info.label) || suffix;
+        pushChip(`${lbl}: ${v.t || (Array.isArray(v.v) ? v.v.join(", ") : v.v)}`, () => {
+          const mod = currentModule(); const f = mod && mod.field(suffix);
+          if (f && changePf(mod, () => { clearField(f); return true; })) afterPf();
+        });
+      }
+    }
+    if (chips.length) {
+      box.appendChild(h("span", { class: "mu sm" }, "Filtri attivi:"));
+      for (const c of chips) box.appendChild(c);
+    }
+  }
   function previewNow() {
     const m = currentModule();
     const s = spec();
     $("#qprev").textContent = `${describe(s, m)} · tutti i ticket (${m ? m.title : "All tickets"}) · i ${settings.cap} più recenti`;
+    renderQueryChips(s, m);
     const box = clear($("#qwarn"));
     if (!m) box.appendChild(h("div", { class: "note", text: S.opening ? "Apro la scheda «All tickets» del portale…" : "Non trovo l'elenco «All tickets» del portale: aprilo una volta dalla barra delle schede e riapri il segnalibro." }));
     $("#qrestore").hidden = !(m && S.snaps[m.key]);
@@ -2761,6 +3488,7 @@ dialog{border:1px solid var(--bd2);border-radius:12px;padding:20px;width:min(480
     const words = noSel ? [] : S.words;
     const extra = [];
     if (fav) { for (const g of fav.tags) extra.push(h("span", { class: "tag", text: g })); if (fav.note) extra.push(h("span", { class: "nt", text: fav.note })); }
+    const cnts = Array.isArray(t.counters) ? t.counters.map((c) => h("span", { class: "pill", text: c })) : [];
     return h("article", { class: "res" + (sel ? " sel" : "") },
       h("div", { class: "rh" },
         noSel ? null : h("input", { type: "checkbox", "aria-label": `Seleziona ${label}`, checked: sel, onchange: (e) => { if (e.target.checked) S.selected.add(t.key); else S.selected.delete(t.key); render(); } }),
@@ -2770,6 +3498,7 @@ dialog{border:1px solid var(--bd2);border-radius:12px;padding:20px;width:min(480
         t.status ? h("span", { class: "badge" + (CLOSED_RE.test(t.status) ? " cl" : "") }, t.status) : null,
         t.priority ? h("span", { class: "badge pr" }, t.priority) : null,
         t.date ? h("time", { class: "mu", text: `${fmtDate(t.date)}${t.time ? " " + t.time : ""}` }) : null,
+        cnts,
         h("span", { class: "sp" }),
         h("button", { type: "button", class: "ib" + (fav ? " on" : ""), "aria-pressed": String(!!fav), title: fav ? "Rimuovi dai preferiti" : "Aggiungi ai preferiti", onclick: () => toggleFav(t) }, fav ? "★" : "☆"),
         h("button", { type: "button", class: "ib", title: "Nota ed etichette", "aria-label": "Nota ed etichette", onclick: () => openNote(t) }, "✎"),
@@ -2807,10 +3536,62 @@ dialog{border:1px solid var(--bd2);border-radius:12px;padding:20px;width:min(480
       ["Assegnato a", t.assigned], ["Gruppo", t.group], ["Responsabile", t.owner], ["Modificato da", t.modifiers]].filter(([, v]) => v);
     return items.length ? h("dl", { class: "rdf" }, items.map(([k, v]) => [h("dt", null, k), h("dd", null, v)])) : null;
   }
-  function renderRead(box, c) {
+  const isInternalMsg = (m) => /nota interna|internal note/i.test(String((m && m.kind) || ""));
+  function renderRead(box, c, t) {
     const words = S.words;
+    const texts = Array.isArray(c.texts) ? c.texts : [];
+    const msgs = Array.isArray(c.messages) ? c.messages : [];
+    const usedIdx = new Set();
+    const reqIdx = texts.findIndex((x) => /^(richiesta|issue|request|problem|descrizione)/i.test(x.label || ""));
+    const solIdx = texts.findIndex((x) => /^(soluzione|resolution|solution|risoluzione)/i.test(x.label || ""));
+    if (reqIdx >= 0) usedIdx.add(reqIdx);
+    if (solIdx >= 0) usedIdx.add(solIdx);
+    const earliestReqMsg = !reqIdx && reqIdx < 0 && msgs.length ? [...msgs].reverse().find((m) => !isInternalMsg(m) && m.body) : null;
+    const reqVal = (reqIdx >= 0 ? texts[reqIdx].value : "") || (t && t.preview) || (earliestReqMsg ? earliestReqMsg.body : "");
+    const reqLbl = (reqIdx >= 0 && texts[reqIdx].label) || "Richiesta (Issue/Request)";
+    const solVal = (solIdx >= 0 ? texts[solIdx].value : "") || (t && t.resolution) || "";
+    const solLbl = (solIdx >= 0 && texts[solIdx].label) || "Soluzione (Resolution)";
+    if (reqVal || solVal) {
+      const grid = h("div", { class: "rd-grid" });
+      if (reqVal) grid.appendChild(h("section", { class: "rd-box req" }, h("h4", null, reqLbl), h("div", { class: "pre" }, hl(reqVal, words))));
+      if (solVal) grid.appendChild(h("section", { class: "rd-box sol" }, h("h4", null, solLbl), h("div", { class: "pre" }, hl(solVal, words))));
+      box.appendChild(grid);
+    }
+    if (msgs.length) {
+      let mode = "all";
+      const listEl = h("div", { class: "tl-list" });
+      const nInt = msgs.filter(isInternalMsg).length, nPub = msgs.length - nInt;
+      const filterBar = nInt > 0 && nPub > 0 ? h("div", { class: "tg" }) : null;
+      const drawMsgs = () => {
+        clear(listEl);
+        if (filterBar) {
+          clear(filterBar);
+          for (const [k, lbl] of [["all", `Tutti (${msgs.length})`], ["pub", `Comunicazioni (${nPub})`], ["int", `Note interne (${nInt})`]]) {
+            filterBar.appendChild(h("button", { type: "button", "aria-pressed": String(mode === k), onclick: () => { mode = k; drawMsgs(); } }, lbl));
+          }
+        }
+        const shown = msgs.filter((m) => mode === "all" || (mode === "int" ? isInternalMsg(m) : !isInternalMsg(m)));
+        for (const m of shown) {
+          const isInt = isInternalMsg(m);
+          listEl.appendChild(h("article", { class: "tl-item" + (isInt ? " note-int" : "") },
+            h("div", { class: "tl-hd" },
+              h("span", { class: "badge" + (isInt ? " src" : "") }, m.kind || "Messaggio"),
+              m.who ? h("b", null, hl(m.who, words)) : null,
+              m.date ? h("span", { class: "mu" }, m.date) : null,
+              m.hasAttachment ? h("span", { class: "pill" }, "📎 Allegato") : null),
+            h("div", { class: "tl-bd" }, hl(m.body || "", words))));
+        }
+      };
+      drawMsgs();
+      box.appendChild(h("section", null,
+        h("div", { class: "row between", style: "margin-bottom:6px" }, h("h4", { style: "margin:0" }, `Storico conversazioni e note (${msgs.length})`), filterBar),
+        listEl));
+    }
+    texts.forEach((x, i) => {
+      if (usedIdx.has(i)) return;
+      box.appendChild(h("section", null, x.label ? h("h4", null, x.label) : null, h("div", { class: "pre" }, hl(x.value, words))));
+    });
     if (c.fields && c.fields.length) box.appendChild(h("section", null, h("h4", null, "Dati del ticket"), h("dl", { class: "rdf" }, c.fields.map((x) => [h("dt", null, x.label || "—"), h("dd", null, hl(x.value, words))]))));
-    for (const x of c.texts || []) box.appendChild(h("section", null, x.label ? h("h4", null, x.label) : null, h("div", { class: "pre" }, hl(x.value, words))));
     for (const tb of c.tables || []) {
       box.appendChild(h("section", null, h("h4", null, `${tb.title || "Elenco"} (${tb.rows.length})`),
         h("div", { class: "rdtw" }, h("table", { class: "rdtab" }, h("thead", null, h("tr", null, tb.head.map((x) => h("th", null, x)))), h("tbody", null, tb.rows.map((r) => h("tr", null, r.map((x) => h("td", null, hl(x, words))))))))));
@@ -2822,6 +3603,10 @@ dialog{border:1px solid var(--bd2);border-radius:12px;padding:20px;width:min(480
     if (c) {
       for (const x of c.fields || []) out.push(`${x.label}: ${x.value}`);
       for (const x of c.texts || []) out.push("", x.label ? `${x.label}:` : "", x.value);
+      if (c.messages && c.messages.length) {
+        out.push("", "Storico conversazioni:");
+        for (const m of c.messages) out.push(`[${[m.date, m.kind, m.who].filter(Boolean).join(" · ")}]`, m.body || "");
+      }
       for (const tb of c.tables || []) { out.push("", `${tb.title || "Elenco"}:`, tb.head.join(" | ")); for (const r of tb.rows) out.push(r.join(" | ")); }
     }
     return out.filter((x, i) => x !== "" || i > 0).join("\n");
@@ -2843,14 +3628,14 @@ dialog{border:1px solid var(--bd2);border-radius:12px;padding:20px;width:min(480
     // il ticket già letto si riusa solo se l'elenco non lo mostra aggiornato da allora
     const ver = `${t.status || ""}|${t.updated || ""}|${t.updTime || ""}`;
     const cached = READ.get(t.key);
-    if (cached && cached.ver === ver) { renderRead(box, cached); setReadLink(t, cached.url); return; }
-    box.appendChild(h("div", { class: "mu", text: t.src === "ar" ? "Leggo il ticket dall'Area Riservata…" : "Leggo il ticket dal portale…" }));
+    if (cached && cached.ver === ver) { renderRead(box, cached, t); setReadLink(t, cached.url); return; }
+    box.appendChild(h("div", { class: "mu", text: t.src === "ar" ? "Leggo il ticket dall'Area Riservata…" : "Leggo il ticket completo e lo storico dal portale…" }));
     try {
       const c = t.src === "ar" ? await arRead(t, ctrl.signal) : await loadTouchTicket(t, ctrl.signal);
       if (ctrl !== readCtrl) return;
       c.ver = ver;
       READ.set(t.key, c);
-      clear(box); renderRead(box, c); setReadLink(t, c.url);
+      clear(box); renderRead(box, c, t); setReadLink(t, c.url);
       if (t.src !== "ar") render(); // ora i risultati hanno il collegamento diretto
     } catch (e) {
       if (ctrl !== readCtrl || (e && e.name === "AbortError")) return;

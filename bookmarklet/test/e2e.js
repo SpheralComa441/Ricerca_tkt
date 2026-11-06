@@ -981,6 +981,21 @@ const isOpen = async (page) => host(page).evaluate((e) => e.style.display !== "n
     await p.close();
   }
 
+  // ---- ticket aperto come scheda ExtJS interna a Touch (inpage=1) con PagesTree e Storico conversazioni
+  {
+    const p = await fresh("?apply=auto&tab=all&inpage=1");
+    await clickBookmarklet(p);
+    await search(p, "detassazione");
+    await p.locator("#list .res").first().locator("button", { hasText: "Leggi" }).click();
+    await p.locator("#rbody .tl-item").first().waitFor({ timeout: 30000 });
+    const tlCount = await p.locator("#rbody .tl-item").count();
+    const reqCount = await p.locator("#rbody .rd-box.req .pre").count();
+    check(tlCount >= 2 && reqCount === 1, `scheda interna Touch: Richiesta e Storico conversazioni (${tlCount} messaggi)`);
+    await p.click("#rclose");
+    check(p.__err.length === 0, `nessun errore con scheda interna Touch ${p.__err.length ? JSON.stringify(p.__err) : ""}`);
+    await p.close();
+  }
+
   check(errors.length === 0, `nessun errore JavaScript ${errors.length ? JSON.stringify(errors) : ""}`);
   await browser.close();
   console.log(failures ? `\n${failures} controlli falliti` : "\nTutti i controlli superati");

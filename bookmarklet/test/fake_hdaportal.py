@@ -192,7 +192,7 @@ __BM__
 <script>
 window.__opened = []; window.__activity = 0;
 window.Portal = { Const: { LoggedUser: { Name: "Utente di prova" }, TypedLoggedUser: { ID: "U005", Name: __ME__ }, HDAUser: { DefaultUserGroupID: "G3" } }, PageManager: {}, MessageBus: {} };
-var CFG = { apply: "__APPLY__", tab: "__TAB__", lazy: __LAZY__, openbind: __OPENBIND__, statuses: __STATUSES__, open: __OPEN__, priorities: __PRIORITIES__, services: __SERVICES__, users: __USERS__, groups: __GROUPS__ };
+var CFG = { apply: "__APPLY__", tab: "__TAB__", lazy: __LAZY__, openbind: __OPENBIND__, inpage: __INPAGE__, statuses: __STATUSES__, open: __OPEN__, priorities: __PRIORITIES__, services: __SERVICES__, users: __USERS__, groups: __GROUPS__ };
 Ext.onReady(function () {
   Ext.ns("Ext.ux");
   Ext.ux.ActivityMonitor = { lastActive: new Date(), captureActivity: function () { this.lastActive = new Date(); window.__activity++; } };
@@ -206,9 +206,77 @@ Ext.onReady(function () {
   function multi(a, b) { return '<div class="list-cell"><div class="list-cell-multitext"><div class="text-default">' + enc(a || "") + '</div><div class="text-caption">' + enc(b || "") + "</div></div></div>"; }
   function dt(v) { return v ? '<div class="list-cell list-cell-datetime"><div class="list-cell-multitext"><div class="text-datetime-date">' + Ext.Date.format(v, "n/j/Y") + '</div><div class="text-datetime-time">' + Ext.Date.format(v, "g:i a") + "</div></div></div>" : ""; }
   var tabs;
-  // come nel portale vero: il ticket si apre in una nuova scheda del browser, con un suo indirizzo
+  function openInPageDetail(code, recId) {
+    var dp = "id" + String(recId).padStart(16, "0") + "_UC_";
+    var existing = Ext.getCmp("tab_" + code);
+    if (existing) { tabs.setActiveTab(existing); return; }
+    Ext.Ajax.request({ url: "/HDAPortal/Ticket/Get", method: "GET", params: { id: recId }, success: function (resp) {
+      var o = Ext.decode(resp.responseText);
+      if (!o || !o.success) return;
+      var d = o.data;
+      var fmt = function (v) { return v ? Ext.Date.format(new Date(parseInt(String(v).replace(/\\D/g, ""), 10)), "d/m/Y H:i") : ""; };
+      var mainCard = Ext.create("Ext.panel.Panel", {
+        id: dp + "CardTicket",
+        html:
+          '<div id="' + dp + 'TicketCode" class="field text-field"><label class="x-form-item-label"><span class="x-form-item-label-Text">Ticket Code</span></label><input class="x-form-field" readonly value="' + enc(d.TicketCode) + '"></div>' +
+          '<div id="' + dp + 'TicketStatusID" class="field objectlink-field"><label class="x-form-item-label"><span class="x-form-item-label-Text">Status</span></label><input class="x-form-field" readonly value="' + enc(d.TicketStatusText) + '"></div>' +
+          '<div id="' + dp + 'Subject" class="field text-field"><label class="x-form-item-label"><span class="x-form-item-label-Text">Subject</span></label><input class="x-form-field" readonly value="' + enc(d.Subject) + '"></div>' +
+          '<div id="' + dp + 'ProblemHTML" class="field html-field"><label class="x-form-item-label"><span class="x-form-item-label-Text">Issue/Request</span></label><div class="htmlEditor">' + enc(d.Description) + '</div></div>' +
+          '<div id="' + dp + 'SolutionHTML" class="field html-field"><label class="x-form-item-label"><span class="x-form-item-label-Text">Resolution</span></label><div class="htmlEditor">' + enc(d.Resolution || "") + '</div></div>' +
+          '<div id="' + dp + 'RightCustomValues">' +
+            '<div id="' + dp + 'ContactDetails0"><div class="detail-group-header">Contact Details</div><div class="text-default">' + enc(d.ContactName) + '</div><div class="text-default">' + enc(d.AccountName) + ' (' + enc(d.AccountCode) + ')</div></div>' +
+            '<div id="' + dp + 'TicketOverView2"><div class="detail-group-header">Ticket Overview</div><div class="text-default">Service: ' + enc(d.ServiceText) + '</div><div class="text-default">Assigned: ' + enc(d.AssignedTo) + '</div></div>' +
+          '</div>'
+      });
+      var convRows = (d.Interactions || []).map(function (it, idx) {
+        return {
+          Id: idx + 1,
+          Kind: it.Kind,
+          Author: it.Author,
+          When: fmt(it.When),
+          Text: it.Text
+        };
+      });
+      var convStore = Ext.create("Ext.data.Store", { fields: ["Id", "Kind", "Author", "When", "Text"], data: convRows });
+      var convGrid = Ext.create("Ext.grid.Panel", {
+        id: dp + "ConversationHistory_UC_grd",
+        cls: "list-view list-grid listViewGrid",
+        store: convStore,
+        columns: [
+          { text: "Type", dataIndex: "Kind", width: 90, renderer: function (v) { return '<div class="list-cell"><i title="' + enc(v) + '" class="fa"></i></div>'; } },
+          { text: "Date", dataIndex: "When", width: 140, renderer: function (v) { var p = String(v || "").split(" "); return '<div class="list-cell-datetime"><div class="text-datetime-date">' + enc(p[0] || "") + '</div><div class="text-datetime-time">' + enc(p[1] || "") + '</div></div>'; } },
+          { text: "Author", dataIndex: "Author", width: 180, renderer: function (v, m, r) { return '<div class="list-cell"><div class="text-default">' + enc(r.get("Kind") + " - " + v) + '</div></div>'; } },
+          { text: "Message", dataIndex: "Text", flex: 1, renderer: function (v) { return '<div class="list-cell"><div class="text-default" title="' + enc(v) + '">' + enc(Ext.String.ellipsis(v, 80)) + '</div></div>'; } }
+        ]
+      });
+      var convListCt = Ext.create("Ext.panel.Panel", { id: dp + "ConversationHistory_UC_ListCt", cls: "module list entity-ticketconversationitem", layout: "fit", items: [convGrid] });
+      var viewCt = Ext.create("Ext.panel.Panel", { id: dp + "DetailViewCt", layout: "card", flex: 1, items: [mainCard, convListCt] });
+      var pagesTree = Ext.create("Ext.tree.Panel", {
+        id: dp + "PagesTree", width: 220, rootVisible: false,
+        store: Ext.create("Ext.data.TreeStore", {
+          root: { expanded: true, children: [
+            { id: dp + "node_ticket", text: "Ticket", leaf: true },
+            { id: dp + "node_conv", text: 'Storico conversazioni<span class="badge">' + convRows.length + '</span>', leaf: true }
+          ] }
+        }),
+        listeners: {
+          itemclick: function (v, rec) {
+            viewCt.getLayout().setActiveItem(rec.getId().indexOf("node_conv") >= 0 ? 1 : 0);
+          }
+        }
+      });
+      var detailCt = Ext.create("Ext.panel.Panel", {
+        id: dp + "DetailCt", cls: "module detail entity-incident", layout: { type: "hbox", align: "stretch" },
+        items: [pagesTree, viewCt]
+      });
+      var tabCard = tabs.add({ id: "tab_" + code, title: code + " - " + d.Subject.slice(0, 22), closable: true, layout: "fit", items: [detailCt] });
+      tabs.setActiveTab(tabCard);
+    } });
+  }
+  // come nel portale vero: il ticket si apre in una scheda ExtJS interna (?inpage=1) o in una nuova scheda del browser
   function openTicket(code, recId) {
     window.__opened.push(code);
+    if (CFG.inpage) { openInPageDetail(code, recId); return; }
     window.open("/HDAPortal/Ticket/View?id=" + encodeURIComponent(recId), "_blank");
   }
   // come il tree-field del portale: campo in sola lettura con un menu ad albero, rami caricati quando si aprono
@@ -383,7 +451,7 @@ window.Intl = { NumberFormat: function(){ throw new Error("Intl ridefinito"); } 
 
 
 @app.get("/HDAPortal/")
-async def portal(apply: str = "auto", tab: str = "home", ostile: int = 0, lazy: int = 0, openbind: int = 0):
+async def portal(apply: str = "auto", tab: str = "home", ostile: int = 0, lazy: int = 0, openbind: int = 0, inpage: int = 0):
     if apply not in ("auto", "enter", "none"):
         apply = "auto"
     bm = ""
@@ -393,7 +461,7 @@ async def portal(apply: str = "auto", tab: str = "home", ostile: int = 0, lazy: 
     page = (PAGE.replace("__APPLY__", apply).replace("__TAB__", "all" if tab == "all" else "home")
             .replace("__STATUSES__", json.dumps(STATUSES)).replace("__OPEN__", json.dumps(OPEN_DEFAULT))
             .replace("__PRIORITIES__", json.dumps(PRIORITIES)).replace("__SERVICES__", json.dumps(SERVICES))
-            .replace("__USERS__", json.dumps(USERS)).replace("__GROUPS__", json.dumps(GROUPS)).replace("__LAZY__", str(max(0, min(lazy, 20000)))).replace("__OPENBIND__", "true" if openbind else "false")
+            .replace("__USERS__", json.dumps(USERS)).replace("__GROUPS__", json.dumps(GROUPS)).replace("__LAZY__", str(max(0, min(lazy, 20000)))).replace("__OPENBIND__", "true" if openbind else "false").replace("__INPAGE__", "true" if inpage else "false")
             .replace("__ME__", json.dumps(USERS[4][1])).replace("__TOKEN__", TOKEN).replace("__HOSTILE__", HOSTILE if ostile else "").replace("__BM__", bm))
     r = HTMLResponse(page)
     r.set_cookie("ASP.NET_SessionId", "ok", path="/")

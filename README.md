@@ -59,27 +59,19 @@ aperti). Il portale ordina per data, quindi arrivano i ticket **più recenti**: 
 più, **Quanti per anno?** conta i ticket della ricerca anno per anno (una richiesta per anno, solo
 fino a coprire il totale) e con un clic si cerca in un anno solo.
 
-**Tutti i filtri del portale si scelgono nel pannello** e valgono su tutti i ticket:
+**Tutti i 23 filtri di Touch si scelgono nel pannello** in una griglia organizzata e valgono su tutti i ticket:
 
-- *gruppi e persone*: *Assegnato a* persona o gruppo, *Gruppo proprietario*, *Modificato da* cioè
-  chi ha lavorato il ticket, *Responsabile*; con le scelte rapide **Io** e **Il mio gruppo**;
-- gli altri filtri dell'elenco All tickets: *Servizio*, *Sede*, *Contatto*, *Etichette* e così via.
+- *barra principale e chip dei filtri attivi*: ricerca testuale (*Search*), data di apertura (*From date* / *To date*), stato (*Status*) e riepilogo immediato dei filtri attivi rimovibili con un clic;
+- *gruppi e persone*: *Assegnato a* persona o gruppo (`AssignedUserOrGroupFilter`), *Gruppo proprietario* (`OwnerUserGroupID`), *Modificato da* (`ModifiedBy`), *Responsabile* (`OwnerUserID`), con le scelte rapide **Io** e **Il mio gruppo**;
+- *servizio, sede, cliente e catalogo*: *Servizio* (`ServiceID`), *Sede / Azienda* (`RefAccountID`), *Contatto* (`ReferenceID`), *Top client* (`CustomerTop`), *Voce di catalogo* (`CatalogItemID`), *Classificazione* e *Classificazione cliente*;
+- *canale, origine, sollecito e stato lavorazione*: *Origine ticket* (`TicketSource`), *Canale* (`Channel`), *Stato lavorazione* (`WorkingStatus`), *Sollecito* (`FlagSollecito`), *Escalated* (`Escalated`), *Tag / Etichette* (`Tags`).
 
-Per ogni campo il pannello usa le scelte del portale: i campi ad albero (*tree-field*) diventano un
-elenco ad albero nel pannello, con i rami caricati dal portale quando si aprono e la ricerca di un
-nome in tutto l'albero; i campi con ricerca sul server si cercano scrivendo un nome (richiesta a
-parte, senza aprire il menu del portale); gli elenchi diventano pulsanti; poi date e testo.
-**Menu del portale** resta disponibile come alternativa (il pannello si nasconde e si riapre dopo
-la scelta). I filtri restano nelle ricerche salvate. Sui risultati ci sono anche le faccette per
-fonte, gruppo, assegnatario, responsabile e "modificato da".
+Per ogni campo il pannello legge e imposta anche i campi Touch con stato JSON nascosto (`[{"value":"…","text":"…"}]`): i campi ad albero (*tree-field*) diventano un elenco ad albero nel pannello, con i rami caricati dal portale quando si aprono e la ricerca di un nome in tutto l'albero; i campi con ricerca sul server (*objectlink-field*) si cercano scrivendo un nome; gli elenchi diventano pulsanti; poi date e testo. **Menu del portale** resta disponibile come alternativa (il pannello si nasconde e si riapre dopo la scelta). I filtri restano nelle ricerche salvate.
 
-**Il ticket completo si legge nel pannello** (**Leggi**): il portale apre ogni ticket in una nuova
-scheda del browser, con un suo indirizzo. La prima volta il segnalibro preme *Open* (o *Find by
-ID…*) e intercetta la nuova scheda senza aprirla; poi carica la pagina del ticket in una cornice
-nascosta e ne legge campi, testi della richiesta e della soluzione, messaggi e altri elenchi (anche
-delle schede interne non ancora disegnate). L'indirizzo imparato serve anche per **Apri in Touch**:
-ogni risultato ha il collegamento diretto alla pagina del ticket. Se la pagina del ticket non si
-può leggere, il segnalibro usa l'anteprima del portale accanto all'elenco.
+**Il ticket completo e tutta la sua storia si leggono nel pannello** (**Leggi**): il segnalibro supporta sia le schede ticket aperte dentro la pagina ExtJS di Touch (`<id>_UC_DetailCt` / `<id>_UC_DetailViewCt`), sia le pagine aperte in una nuova scheda. Quando legge un ticket:
+
+- estrae **Richiesta** (`ProblemHTML`, inclusi editor TinyMCE/iframe) e **Soluzione** (`SolutionHTML`), tutti i campi del modulo e i riquadri laterali di riepilogo (`ContactDetails0`, `TicketOverView2`, `ServiceLevels1`, `ClientNotesDetails`);
+- naviga automaticamente l'albero laterale del ticket (`<id>_UC_PagesTree`: *Ticket*, *Storico conversazioni* / `ConversationHistory`, *Internal notes*, *Attachments*, *History Email*) per caricare l'intero **Storico conversazioni e note interne** (`entity-ticketconversationitem`), mostrando ogni messaggio o nota interna in ordine cronologico con tipo, autore, data/ora, allegati e testo integrale non troncato (con filtro rapido *Tutti* / *Comunicazioni* / *Note interne*).
 
 Dopo una ricerca l'elenco del portale mostra la stessa ricerca: **Ripristina il portale** rimette
 i filtri e le righe per pagina di prima.
