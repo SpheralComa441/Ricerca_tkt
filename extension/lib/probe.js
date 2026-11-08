@@ -1,10 +1,10 @@
 // Diagnostica: prova sul portale vero ogni funzione usata dall'app e produce un rapporto
 // senza dati personali (solo esiti, nomi di campi, operatori, conteggi e lunghezze).
 
-import { DOMAIN_CONDITION } from "./filters.js";
+import { DOMAIN_CONDITION, pickCalibrationSample } from "./filters.js";
 import { CONV_COLUMNS, TICKET_COLUMNS } from "./ticket.js";
 
-export async function runProbe(hda, { onStep = () => {}, sampleTicketId = null, learned = {}, captures = [] } = {}) {
+export async function runProbe(hda, { onStep = () => {}, sampleTicketId = null, learned = {}, captures = [], log = () => {} } = {}) {
   const steps = [];
   const step = async (name, fn) => {
     const s = { name, ok: false, detail: "" };
@@ -19,17 +19,27 @@ export async function runProbe(hda, { onStep = () => {}, sampleTicketId = null, 
       s.detail = e.message + (e.info && e.info.sample ? " — " + String(e.info.sample).slice(0, 160) : "");
     }
     s.ms = Date.now() - t0;
+    log(`diagnostica ${s.ok ? "✓" : "✗"} ${name}: ${s.detail} (${s.ms} ms)`);
     onStep(steps);
     return s;
   };
 
   let ticketId = sampleTicketId;
-  await step("Elenco ticket (ListData)", async () => {
-    const { rows, total } = await hda.listData("Incidents", { conditions: [DOMAIN_CONDITION], limit: 3, sort: [{ property: "c20", direction: "DESC" }] });
+  let sampleSubject = "";
+
+  await step("Ticket di prova (Projection rapida)", async () => {
+    const rows = await hda.projection("Incident", ticketId ? [{ property: "ID", op: "eq", value: ticketId }] : [], TICKET_COLUMNS, 1);
+    if (!rows[0]) throw new Error("nessuna riga");
+    if (!ticketId) ticketId = rows[0].ID;
+    sampleSubject = rows[0].Subject || "";
+    return `ID ${ticketId}, richiesta: ${String(rows[0].ProblemHTML || rows[0].Problem || "").length} caratteri`;
+  });
+
+  await step("Elenco ticket (ListData su 1 ticket)", async () => {
+    const conds = ticketId ? [DOMAIN_CONDITION, { property: "ID", op: "eq", value: ticketId, id: "ID" }] : [DOMAIN_CONDITION];
+    const { rows, total } = await hda.listData("Incidents", { conditions: conds, limit: 1, sort: [{ property: "c20", direction: "DESC" }] });
     if (!rows.length) throw new Error("nessuna riga");
-    const idKey = Object.keys(rows[0]).find((k) => /^\d{6,}Z$/.test(String(rows[0][k])));
-    if (!ticketId && idKey) ticketId = rows[0][idKey];
-    return `${total} ticket visibili; colonne: ${Object.keys(rows[0]).length}`;
+    return `${total} riga, ${Object.keys(rows[0]).length} colonne`;
   });
 
   let cfg = null;
@@ -37,14 +47,9 @@ export async function runProbe(hda, { onStep = () => {}, sampleTicketId = null, 
     cfg = await hda.listConfig("Incidents");
     const n = Object.keys(cfg.mapping).length;
     if (!n) throw new Error(`mappa colonne non trovata (risposta di ${cfg.size} caratteri)`);
+    const summary = cfg.filters.map((f) => `${f.itemId}=${f.property || f.name || "?"}/${f.op || "?"}${f.extKey ? "[" + f.extKey + "]" : ""}`).join(", ");
+    log("filtri configurazione Touch: " + summary);
     return `${n} colonne, ${cfg.filters.length} filtri`;
-  });
-
-  await step("Testo completo del ticket (Projection)", async () => {
-    if (!ticketId) throw new Error("nessun ticket di prova");
-    const rows = await hda.projection("Incident", [{ property: "ID", op: "eq", value: ticketId }], TICKET_COLUMNS, 1);
-    if (!rows[0]) throw new Error("nessuna riga");
-    return `richiesta: ${String(rows[0].ProblemHTML || rows[0].Problem || "").length} caratteri`;
   });
 
   await step("Ticket completo (WSC/Get)", async () => {
@@ -79,11 +84,45 @@ export async function runProbe(hda, { onStep = () => {}, sampleTicketId = null, 
     });
   }
 
-  for (const op of ["sw", "like", "ct"]) {
-    await step(`Operatore testo "${op}" su Subject`, async () => {
-      const { total } = await hda.listData("Incidents", { conditions: [DOMAIN_CONDITION, { property: "Subject", op, value: "pag" }], limit: 1 });
-      return `${total} ticket`;
+  const { word, mid } = pickCalibrationSample(sampleSubject);
+  const idCond = ticketId ? { property: "ID", op: "eq", value: ticketId, id: "ID" } : null;
+  let workingContains = null;
+  let workingFullText = null;
+
+  const ftCfg = (cfg && cfg.filters || []).find((f) => f.itemId === "FullText") || {};
+  const ftProp = ftCfg.property || ftCfg.name || "FullText";
+  const ftCandidates = [
+    { op: ftCfg.op || "sw", extKey: ftCfg.extKey || undefined, label: `${ftProp}/${ftCfg.op || "sw"}${ftCfg.extKey ? "[" + ftCfg.extKey + "]" : ""}` },
+    { op: "in", extKey: ftCfg.extKey || undefined, label: `${ftProp}/in` },
+    { op: "like", extKey: ftCfg.extKey || undefined, label: `${ftProp}/like` },
+  ];
+  for (const cand of ftCandidates) {
+    const s = await step(`Filtro FullText (${cand.label})`, async () => {
+      const c = { property: ftProp, op: cand.op, value: word || "a", id: "FullText" };
+      if (cand.extKey) c.extKey = cand.extKey;
+      const conds = idCond ? [DOMAIN_CONDITION, idCond, c] : [DOMAIN_CONDITION, c];
+      const { total } = await hda.listData("Incidents", { conditions: conds, limit: 1 });
+      if (idCond && word && !total) throw new Error("0 righe (non trova la parola)");
+      return `${total} righe`;
     });
+    if (s.ok && !workingFullText) workingFullText = { property: ftProp, op: cand.op, extKey: cand.extKey };
+  }
+
+  for (const [op, wildcard, label] of [
+    ["ct", false, 'ct senza "%"'],
+    ["like", true, 'like con "%…%"'],
+    ["sw", true, 'sw con "%…%"'],
+    ["like", false, 'like senza "%"'],
+  ]) {
+    const s = await step(`Ricerca nell'oggetto (${label})`, async () => {
+      const q = mid || word || "a";
+      const val = wildcard ? `%${q}%` : q;
+      const conds = idCond ? [DOMAIN_CONDITION, idCond, { property: "Subject", op, value: val, id: "Subject" }] : [DOMAIN_CONDITION, { property: "Subject", op, value: val, id: "Subject" }];
+      const { total } = await hda.listData("Incidents", { conditions: conds, limit: 1 });
+      if (idCond && (mid || word) && !total) throw new Error("0 righe (non trova a metà oggetto)");
+      return `trova sottostringa (${total} righe)`;
+    });
+    if (s.ok && !workingContains) workingContains = { op, wildcard };
   }
 
   await step("Stati (GetStaticList)", async () => {
@@ -95,13 +134,15 @@ export async function runProbe(hda, { onStep = () => {}, sampleTicketId = null, 
     version: typeof chrome !== "undefined" && chrome.runtime && chrome.runtime.getManifest ? chrome.runtime.getManifest().version : "dev",
     at: new Date().toISOString(),
     steps: steps.map(({ name, ok, detail, ms }) => ({ name, ok, detail, ms })),
+    workingContains,
+    workingFullText,
     columns: cfg ? cfg.mapping : null,
     filters: cfg ? cfg.filters.map(({ itemId, op, xtype, label, name, extKey, property, hidden }) => ({ itemId, op, xtype, label, name, extKey, property, hidden })) : null,
     // dei filtri appresi si riportano solo forma e formato del valore, non i valori
     learned: Object.fromEntries(Object.entries(learned).map(([k, v]) => [k, { property: v.property, op: v.op, extKey: v.extKey, valueShape: shape(v.value) }])),
     captures: captures.slice(0, 15).map((c) => ({ collection: c.collection, viewId: c.viewId, conditions: (c.conditions || []).map((x) => ({ id: x.id, property: x.property, op: x.op, extKey: x.extKey, lock: x.lock, valueShape: shape(x.value) })) })),
   };
-  return { steps, report, config: cfg };
+  return { steps, report, config: cfg, workingContains, workingFullText };
 }
 
 /** Forma del valore senza il contenuto: "/Date(13 cifre)/", "testo(12)", "lista(3)" */

@@ -10,7 +10,7 @@ import { openDiag } from "./diag.js";
 import { makeTransport, AuthError, PORTAL_BASE } from "../lib/transport.js";
 import { makeHda } from "../lib/hda.js";
 import { makeRowReader } from "../lib/rows.js";
-import { emptyFilters, buildConditions, describeFilters, ruleFor, DEF, DOMAIN_CONDITION } from "../lib/filters.js";
+import { emptyFilters, buildConditions, describeFilters, ruleFor, DEF, DOMAIN_CONDITION, pickCalibrationSample } from "../lib/filters.js";
 import { statusInfo, mergePortalStatuses } from "../lib/statuses.js";
 import { loadTicket } from "../lib/ticket.js";
 import { saveTicket, getTicket, searchArchive, archivedMap, archiveInfo, kvGet, kvSet, onKvChange, reviveRow } from "../lib/store.js";
@@ -51,8 +51,9 @@ const S = {
   archived: new Map(),
   saved: [],
   captures: [],
-  calib: { learned: {}, config: [] },
+  calib: { learned: {}, config: [], overrides: {}, containsText: null },
   caps: {},
+  sampleTicket: null,
   favorites: [],
   recent: [],
   typesSeen: {},
@@ -138,9 +139,15 @@ function setConn(state, text) {
 async function checkConnection() {
   setConn(null);
   try {
-    const { total } = await hda.listData("Incidents", { conditions: [{ ...DOMAIN_CONDITION }], limit: 1, sort: [{ property: "c20", direction: "DESC" }] });
+    try {
+      const rows = await hda.projection("Incident", [], ["ID", "Subject"], 1);
+      if (rows && rows[0] && rows[0].ID) S.sampleTicket = { id: rows[0].ID, subject: rows[0].Subject || "" };
+    } catch (e) {
+      if (e instanceof AuthError) throw e;
+      await hda.listData("Incidents", { conditions: [{ ...DOMAIN_CONDITION }], limit: 1, sort: [{ property: "c20", direction: "DESC" }] });
+    }
     setConn(true, `Connesso a Touch${transport.mode === "proxy" ? " (tramite scheda)" : ""}`);
-    log(`connessione ok: ${total} ticket visibili, utente ${hda.currentUserId || "?"}`);
+    log(`connessione ok: utente ${hda.currentUserId || "?"}${S.sampleTicket ? ", ticket campione " + S.sampleTicket.id : ""}`);
     return true;
   } catch (e) {
     log("connessione: " + e.message);
@@ -152,7 +159,7 @@ async function checkConnection() {
 // ---------------------------------------------------------------- calibrazione (colonne e filtri di Touch)
 
 async function reloadCalibration(force = false) {
-  const cached = await kvGet("listCfg", null);
+  const cached = await kvGet("listCfg_v2", null);
   if (!force && cached && Date.now() - cached.at < DAY && cached.mapping && Object.keys(cached.mapping).length) {
     applyListConfig(cached);
   } else {
@@ -161,9 +168,10 @@ async function reloadCalibration(force = false) {
       const cfg = await hda.listConfig("Incidents", params);
       if (Object.keys(cfg.mapping || {}).length) {
         const keep = { at: Date.now(), mapping: cfg.mapping, filters: cfg.filters, viewId: cfg.viewId || null };
-        await kvSet("listCfg", keep);
+        await kvSet("listCfg_v2", keep);
         applyListConfig(keep);
         log(`configurazione elenco: ${Object.keys(cfg.mapping).length} colonne, ${cfg.filters.length} filtri`);
+        log("filtri Touch: " + cfg.filters.map((f) => `${f.itemId}=${f.property || f.name || "?"}/${f.op || "?"}${f.extKey ? "[" + f.extKey + "]" : ""}`).join(", "));
       } else {
         log(`configurazione elenco senza mappa colonne (${cfg.size} caratteri): uso la mappa di riserva`);
       }
@@ -176,11 +184,87 @@ async function reloadCalibration(force = false) {
   } catch (e) {
     log("stati: " + e.message);
   }
+  if (S.sampleTicket) calibrateTextFilters(S.sampleTicket, force).catch(() => {});
 }
 
 function applyListConfig(cfg) {
   rowReader = makeRowReader(cfg.mapping);
   S.calib.config = cfg.filters || [];
+}
+
+let calibratingText = null;
+async function calibrateTextFilters(sample = S.sampleTicket, force = false) {
+  if (!sample || !sample.id || !sample.subject || !hda) return;
+  if (calibratingText) return calibratingText;
+  calibratingText = (async () => {
+    try {
+      const { word, mid } = pickCalibrationSample(sample.subject);
+      const idCond = { property: "ID", op: "eq", value: sample.id, id: "ID" };
+      let changed = false;
+
+      if ((force || !S.caps.containsText) && (mid || word)) {
+        const q = mid || word;
+        for (const [op, wildcard] of [["ct", false], ["like", true], ["sw", true], ["like", false]]) {
+          try {
+            const val = wildcard ? `%${q}%` : q;
+            const { total } = await hda.listData("Incidents", {
+              conditions: [DOMAIN_CONDITION, idCond, { property: "Subject", op, value: val, id: "Subject" }],
+              limit: 1,
+            });
+            if (total > 0) {
+              S.caps.containsText = { op, wildcard };
+              S.calib.containsText = { op, wildcard };
+              log(`calibrazione Oggetto: op=${op}${wildcard ? ' con "%…%"' : ""}`);
+              changed = true;
+              break;
+            }
+          } catch {
+            /* operatore non supportato */
+          }
+        }
+      }
+
+      const tr = ruleFor(DEF.text, S.calib);
+      const sig = `${tr.property}|${tr.op}|${tr.extKey || ""}`;
+      if ((force || (S.caps.fullTextBroken !== sig && !S.caps.fullTextRule)) && word && tr.source !== "appreso da Touch") {
+        let ok = false;
+        for (const cand of [
+          { property: tr.property, op: tr.op, extKey: tr.extKey },
+          { property: tr.property, op: "in", extKey: tr.extKey },
+        ]) {
+          try {
+            const c = { property: cand.property, op: cand.op, value: word, id: "FullText" };
+            if (cand.extKey) c.extKey = cand.extKey;
+            const { total } = await hda.listData("Incidents", { conditions: [DOMAIN_CONDITION, idCond, c], limit: 1 });
+            if (total > 0) {
+              S.caps.fullTextRule = cand;
+              S.caps.fullTextBroken = null;
+              S.calib.overrides.text = { ...cand, source: "calibrato" };
+              log(`calibrazione FullText: ok (${cand.property}/${cand.op}${cand.extKey ? "[" + cand.extKey + "]" : ""})`);
+              ok = true;
+              changed = true;
+              break;
+            }
+          } catch {
+            /* FullText rifiutato con questo formato */
+          }
+        }
+        if (!ok) {
+          S.caps.fullTextBroken = sig;
+          log("calibrazione FullText: non supportato direttamente, uso Oggetto + Archivio locale");
+          changed = true;
+        }
+      }
+
+      if (changed) {
+        await kvSet("caps", S.caps);
+        refreshSidebar();
+      }
+    } finally {
+      calibratingText = null;
+    }
+  })();
+  return calibratingText;
 }
 
 /** Se la mappa delle colonne non torna con i dati veri, si torna a quella di riserva */
@@ -302,6 +386,10 @@ function saveSearchDialog() {
 
 // ---------------------------------------------------------------- ricerca
 
+function fallbackToSubject(f) {
+  return { ...f, text: "", subject: [f.subject, f.text].filter(Boolean).join(" ") };
+}
+
 async function search({ more = false } = {}) {
   if (!hda) return;
   if (searchAbort) searchAbort.abort();
@@ -330,20 +418,34 @@ async function search({ more = false } = {}) {
   try {
     let res;
     const textRule = f.text && !tid ? ruleFor(DEF.text, S.calib) : null;
-    try {
-      res = await run(f);
-    } catch (e) {
-      if (e instanceof AuthError || e.name === "AbortError" || !textRule || textRule.source !== "predefinito") throw e;
-      // il filtro "testo completo" non è ancora calibrato e il portale lo rifiuta: si cerca nell'oggetto
-      log("ricerca nel testo rifiutata (" + e.message + "): riprovo sull'oggetto");
-      res = await run({ ...f, text: "", subject: [f.subject, f.text].filter(Boolean).join(" ") });
-      if (!more) S.notices.push("Il portale ha rifiutato la ricerca nel testo completo (formato non ancora calibrato): ho cercato le parole nell'oggetto. Usa una volta il filtro «Testo» in Touch e l'estensione imparerà il formato giusto.");
+    const textSig = textRule ? `${textRule.property}|${textRule.op}|${textRule.extKey || ""}` : null;
+    if (textRule && S.caps.fullTextBroken === textSig && textRule.source !== "appreso da Touch") {
+      if (!S.calib.containsText && S.sampleTicket) await calibrateTextFilters(S.sampleTicket);
+      res = await run(fallbackToSubject(f));
+      if (!more) S.notices.push("Ricerca eseguita nell'oggetto del ticket (e nella scheda «Archivio locale» per il testo dei messaggi).");
+    } else {
+      try {
+        res = await run(f);
+      } catch (e) {
+        if (e instanceof AuthError || e.name === "AbortError" || !textRule) throw e;
+        log(`ricerca nel testo (${textSig}) rifiutata (${e.message}): riprovo sull'oggetto`);
+        S.caps.fullTextBroken = textSig;
+        delete S.calib.overrides.text;
+        kvSet("caps", S.caps);
+        if (!S.calib.containsText && S.sampleTicket) await calibrateTextFilters(S.sampleTicket);
+        res = await run(fallbackToSubject(f));
+        if (!more) S.notices.push("Il portale non accetta il filtro «Testo completo» diretto: ho cercato le parole nell'oggetto del ticket (e nell'«Archivio locale» per i messaggi).");
+      }
     }
     if (ac.signal.aborted) return;
     checkReader(res.rows);
     const rows = res.rows.map((r) => rowReader.read(r));
     S.results = more ? S.results.concat(rows) : rows;
     S.total = res.total;
+    if (!S.sampleTicket && rows[0] && rows[0].id && rows[0].subject) {
+      S.sampleTicket = { id: rows[0].id, subject: rows[0].subject };
+      if (!S.caps.containsText) calibrateTextFilters(S.sampleTicket).catch(() => {});
+    }
     lookups.harvest(rows);
     harvestTypes(rows);
     if (S.connected !== true) setConn(true);
@@ -654,7 +756,12 @@ function updateJob() {
 /** Tutte le righe della ricerca corrente (a pagine), fino a max */
 async function fetchAllRows(max, job) {
   const out = [];
-  const conditions = buildConditions(S.filters, S.calib);
+  const f = S.filters;
+  const tid = ticketIdFrom(f.text);
+  const tr = f.text && !tid ? ruleFor(DEF.text, S.calib) : null;
+  const sig = tr ? `${tr.property}|${tr.op}|${tr.extKey || ""}` : null;
+  const eff = tr && S.caps.fullTextBroken === sig && tr.source !== "appreso da Touch" ? fallbackToSubject(f) : f;
+  const conditions = buildConditions(eff, S.calib);
   const size = 200;
   for (let page = 1; out.length < max; page++) {
     if (job && job.cancelled) break;
@@ -787,6 +894,8 @@ async function init() {
   if (sort && SORTS[sort.key]) S.sort = sort;
   Object.assign(S, { saved: saved || [], favorites: favorites || [], recent: recent || [], captures: captures || [], caps: caps || {}, typesSeen: typesSeen || {} });
   S.calib.learned = learned || {};
+  if (S.caps.containsText) S.calib.containsText = S.caps.containsText;
+  if (S.caps.fullTextRule) S.calib.overrides.text = { ...S.caps.fullTextRule, source: "calibrato" };
 
   transport = makeTransport({ log });
   hda = makeHda(transport, { lang: S.settings.lang });

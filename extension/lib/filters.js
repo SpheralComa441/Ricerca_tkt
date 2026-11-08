@@ -27,8 +27,8 @@ export const FILTER_DEFS = [
   { key: "catalog", touchId: "CatalogItem", property: "CTITM", op: "eq", kind: "objects", label: "Prodotto" },
   { key: "subject", touchId: "Subject", property: "Subject", op: "like", kind: "text", label: "Oggetto" },
   { key: "text", touchId: "FullText", property: "FullText", op: "like", kind: "text", label: "Testo" },
-  { key: "classCli", touchId: "ClassCliTxt", property: "CLASSCLI", op: "like", kind: "text", label: "Classificazione cliente" },
-  { key: "tag", touchId: "TagFilter", property: "Tag", op: "like", kind: "text", label: "Tag" },
+  { key: "classCli", touchId: "ClassCliTxt", property: "CLASSCLI.TranslatedDescription", op: "like", kind: "text", label: "Classificazione cliente" },
+  { key: "tag", touchId: "TagFilter", property: "Relations.ObjectTag.ID", op: "eq", kind: "text", label: "Tag" },
   { key: "dateFrom", touchId: "DateFromFilter", property: "Date", op: "ge", kind: "date", label: "Aperto dal" },
   { key: "dateTo", touchId: "DateToFilter", property: "Date", op: "le", kind: "date", endOfDay: true, label: "Aperto fino al" },
   { key: "updFrom", touchId: "LastUpdateDateFromFilter", property: "LastChange", op: "ge", kind: "date", label: "Aggiornato dal" },
@@ -68,18 +68,31 @@ export function formatDateValue(day, sample, endOfDay) {
 
 /**
  * Regola effettiva di un filtro: proprietà, operatore, extKey, valore d'esempio.
- * calib = { learned: {touchId: cond}, config: [filtri da listconfig] }
+ * calib = { learned: {touchId: cond}, config: [filtri da listconfig], overrides: {key: rule}, containsText: {op, wildcard} }
  */
 export function ruleFor(def, calib = {}) {
   const learned = calib.learned && calib.learned[def.touchId];
   const cfg = (calib.config || []).find((f) => f.itemId === def.touchId);
-  const rule = { property: def.property, op: def.op, extKey: undefined, sample: undefined, source: def.verified ? "verificato" : "predefinito" };
+  const ov = calib.overrides && calib.overrides[def.key];
+  const rule = { property: def.property, op: def.op, extKey: undefined, wildcard: false, sample: undefined, source: def.verified ? "verificato" : "predefinito" };
   if (cfg) {
     if (cfg.property) rule.property = cfg.property;
     else if (cfg.name && !/filter$/i.test(cfg.name)) rule.property = cfg.name;
-    if (cfg.op) rule.op = cfg.op;
+    if (cfg.op && !((def.key === "subject" || def.key === "classCli") && cfg.op === "sw")) rule.op = cfg.op;
     if (cfg.extKey) rule.extKey = cfg.extKey;
     rule.source = "configurazione Touch";
+  }
+  if ((def.key === "subject" || def.key === "classCli") && calib.containsText && calib.containsText.op) {
+    rule.op = calib.containsText.op;
+    rule.wildcard = !!calib.containsText.wildcard;
+    rule.source = "calibrato";
+  }
+  if (ov) {
+    if (ov.property) rule.property = ov.property;
+    if (ov.op) rule.op = ov.op;
+    if (ov.extKey !== undefined) rule.extKey = ov.extKey || undefined;
+    if (ov.wildcard !== undefined) rule.wildcard = !!ov.wildcard;
+    if (ov.source) rule.source = ov.source;
   }
   if (learned) {
     rule.property = learned.property;
@@ -115,7 +128,11 @@ export function buildConditions(f, calib = {}) {
     } else if (def.kind === "date") {
       out.push(cond(def, rule, formatDateValue(v, rule.sample, def.endOfDay)));
     } else {
-      out.push(cond(def, rule, String(v).trim()));
+      let s = String(v).trim();
+      if (rule.wildcard && !s.includes("%")) {
+        s = "%" + s.split(/\s+/).filter(Boolean).join("%") + "%";
+      }
+      out.push(cond(def, rule, s));
     }
   }
   if (tid) out.push({ property: "ID", value: tid, op: "eq", id: "ID" });
@@ -177,3 +194,21 @@ export function learnFromConditions(conditions, learned = {}) {
   }
   return learned;
 }
+
+/**
+ * Estrae da un oggetto (Subject) una parola intera e una sottostringa non iniziale,
+ * per verificare in una sola riga quale operatore trova le parole in mezzo al testo.
+ */
+export function pickCalibrationSample(subject) {
+  const s = String(subject || "").trim();
+  const low = s.toLowerCase();
+  const words = s.match(/[A-Za-z]{4,14}/g) || [];
+  const word = words[0] || null;
+  let mid = words.find((w) => !low.startsWith(w.toLowerCase())) || null;
+  if (!mid && word && word.length >= 4) {
+    const sub = word.slice(1);
+    if (!low.startsWith(sub.toLowerCase())) mid = sub;
+  }
+  return { word, mid };
+}
+

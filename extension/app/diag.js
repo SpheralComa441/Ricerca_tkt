@@ -16,11 +16,15 @@ export function openDiag(ctx) {
     h("div", { class: "dlg-h" }, h("h2", null, "Diagnostica e impostazioni"), h("button", { class: "btn btn-icon", title: "Chiudi", onclick: () => dlg.close() }, icon("close"))),
     body,
   );
-  body.append(probeSection(ctx), learnedSection(ctx), settingsSection(ctx), archiveSection(ctx), logSection(ctx));
+  let redrawLearned = () => {};
+  let redrawLog = () => {};
+  const learnedSec = learnedSection(ctx, (fn) => (redrawLearned = fn));
+  const logSec = logSection(ctx, (fn) => (redrawLog = fn));
+  body.append(probeSection(ctx, () => { redrawLearned(); redrawLog(); }), learnedSec, settingsSection(ctx), archiveSection(ctx), logSec);
   dlg.showModal();
 }
 
-function probeSection(ctx) {
+function probeSection(ctx, onDone) {
   const steps = h("div", { class: "steps" });
   let report = null;
   const copyBtn = h("button", { class: "btn", disabled: true, onclick: () => { navigator.clipboard.writeText(JSON.stringify(report, null, 1)); toast("Rapporto copiato: incollalo nella chat", "ok"); } }, icon("copy"), "Copia rapporto");
@@ -41,23 +45,35 @@ function probeSection(ctx) {
     runBtn.disabled = true;
     copyBtn.disabled = true;
     try {
-      const res = await runProbe(ctx.hda, { onStep: draw, sampleTicketId: ctx.S.current, learned: ctx.S.calib.learned, captures: ctx.S.captures });
+      const res = await runProbe(ctx.hda, { onStep: draw, sampleTicketId: ctx.S.current, learned: ctx.S.calib.learned, captures: ctx.S.captures, log: ctx.log });
+      if (res.workingContains) {
+        ctx.S.caps.containsText = res.workingContains;
+        ctx.S.calib.containsText = res.workingContains;
+      }
+      if (res.workingFullText) {
+        ctx.S.caps.fullTextRule = res.workingFullText;
+        ctx.S.caps.fullTextBroken = null;
+        ctx.S.calib.overrides = { ...(ctx.S.calib.overrides || {}), text: { ...res.workingFullText, source: "calibrato" } };
+      }
+      await kvSet("caps", ctx.S.caps);
+      // la configurazione appena letta aggiorna subito colonne e filtri
+      if (res.config && Object.keys(res.config.mapping || {}).length) await ctx.reloadCalibration(true);
       report = {
         ...res.report,
         transport: ctx.hda && ctx.S.connected ? "ok" : "non connesso",
         caps: ctx.S.caps,
-        rules: Object.fromEntries(FILTER_DEFS.map((d) => { const r = ruleFor(d, ctx.S.calib); return [d.key, `${r.property} ${r.op} (${r.source})`]; })),
+        rules: Object.fromEntries(FILTER_DEFS.map((d) => { const r = ruleFor(d, ctx.S.calib); return [d.key, `${r.property} ${r.op}${r.wildcard ? " %…%" : ""}${r.extKey ? " [" + r.extKey + "]" : ""} (${r.source})`]; })),
         lookups: ctx.lookups ? ctx.lookups.sizes() : null,
       };
       copyBtn.disabled = false;
+      onDone();
       const ko = res.steps.filter((s) => !s.ok).length;
       toast(ko ? `Diagnostica finita: ${ko} prove non riuscite` : "Diagnostica finita: tutto ok", ko ? "info" : "ok");
-      // la configurazione appena letta aggiorna subito colonne e filtri
-      if (res.config && Object.keys(res.config.mapping || {}).length) ctx.reloadCalibration(true);
     } catch (e) {
       toast("Diagnostica interrotta: " + e.message, "err");
     } finally {
       runBtn.disabled = false;
+      onDone();
     }
   }
 
@@ -68,7 +84,7 @@ function probeSection(ctx) {
     steps);
 }
 
-function learnedSection(ctx) {
+function learnedSection(ctx, setRedraw) {
   const box = h("div", { class: "learned" });
   function draw() {
     clear(box);
@@ -77,13 +93,14 @@ function learnedSection(ctx) {
     for (const d of FILTER_DEFS) {
       const r = ruleFor(d, ctx.S.calib);
       box.appendChild(h("div", { class: "lrow" },
-        h("div", null, h("b", null, d.label), " — ", h("code", null, `${r.property} ${r.op}${r.extKey ? " [" + r.extKey + "]" : ""}`), " ",
+        h("div", null, h("b", null, d.label), " — ", h("code", null, `${r.property} ${r.op}${r.wildcard ? ' "%…%"' : ""}${r.extKey ? " [" + r.extKey + "]" : ""}`), " ",
           h("span", { class: r.source === "predefinito" ? "ko" : "ok", style: { fontSize: "11.5px" } }, r.source))));
     }
     const extra = keys.filter((k) => !FILTER_DEFS.some((d) => d.touchId === k));
     if (extra.length) box.appendChild(h("div", { class: "hint" }, "Altri filtri visti in Touch: " + extra.join(", ")));
   }
   draw();
+  if (setRedraw) setRedraw(draw);
   return h("section", null,
     h("h3", null, "Filtri: come vengono inviati a Touch"),
     h("p", { class: "hint" }, "«predefinito» = formato ipotizzato. Per renderlo sicuro, apri Touch, usa quel filtro una volta nella lista ticket e l'estensione registra il formato esatto («appreso da Touch»)."),
@@ -131,8 +148,9 @@ function archiveSection(ctx) {
       } }, "Svuota")));
 }
 
-function logSection(ctx) {
-  const pre = h("pre", { class: "log" }, ctx.LOG.slice(-150).join("\n") || "(vuoto)");
+function logSection(ctx, setRedraw) {
+  const pre = h("pre", { class: "log" }, ctx.LOG.slice(-180).join("\n") || "(vuoto)");
+  if (setRedraw) setRedraw(() => { pre.textContent = ctx.LOG.slice(-180).join("\n") || "(vuoto)"; });
   return h("section", null,
     h("h3", null, "Registro"),
     h("p", { class: "hint" }, "Le ultime operazioni (utile in caso di problemi). Può contenere numeri di ticket: non condividerlo se non serve."),

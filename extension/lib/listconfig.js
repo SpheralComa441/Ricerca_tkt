@@ -18,7 +18,7 @@ function findBalanced(src, start) {
       else if (c === q) q = null;
       continue;
     }
-    if (c === '"' || c === "'") q = c;
+    if (c === '"' || c === "'" || c === "`") q = c;
     else if (c === "{") depth++;
     else if (c === "}") {
       depth--;
@@ -56,6 +56,37 @@ function str(win, key) {
   return m ? m[1].replace(/\\(["\\/])/g, "$1") : null;
 }
 
+function stripNested(objSrc) {
+  // Mantiene solo il primo livello di { ... }, svuotando i blocchi { ... } annidati.
+  let out = "";
+  let depth = 0;
+  let q = null;
+  for (let i = 0; i < objSrc.length; i++) {
+    const c = objSrc[i];
+    if (q) {
+      if (depth === 1) out += c;
+      if (c === "\\") {
+        i++;
+        if (depth === 1 && i < objSrc.length) out += objSrc[i];
+      } else if (c === q) q = null;
+      continue;
+    }
+    if (c === '"' || c === "'" || c === "`") {
+      q = c;
+      if (depth === 1) out += c;
+    } else if (c === "{") {
+      depth++;
+      if (depth <= 2) out += c;
+    } else if (c === "}") {
+      if (depth <= 2) out += c;
+      depth--;
+    } else if (depth === 1) {
+      out += c;
+    }
+  }
+  return out;
+}
+
 export function parseFilters(src) {
   const byId = new Map();
   let from = 0;
@@ -64,28 +95,43 @@ export function parseFilters(src) {
     if (idx < 0) break;
     from = idx + 15;
     const start = src.lastIndexOf("{id:", idx);
-    if (start < 0 || idx - start > 2000) continue;
-    const next = src.indexOf('"isFilter":true', from);
-    let win = src.slice(start, Math.min(src.length, idx + 6000, next > 0 ? src.lastIndexOf("{id:", next) : Infinity));
-    // il blocco dei listener contiene molte parentesi: basta la parte prima
-    const lst = win.indexOf("listeners:");
-    if (lst > 0) win = win.slice(0, lst);
+    if (start < 0 || idx - start > 2500) continue;
+    const bal = findBalanced(src, start);
+    const win = bal > start && bal - start < 80000 ? src.slice(start, bal + 1) : src.slice(start, Math.min(src.length, idx + 8000));
+    const top = stripNested(win);
     const f = {
-      domId: str(win, "id"),
-      itemId: str(win, "itemId"),
-      op: str(win, "filterOperator"),
-      xtype: str(win, "xtype"),
-      label: str(win, "fieldLabel") || str(win, "emptyText"),
-      name: str(win, "name"),
-      isDefault: /"isDefaultFilter":true/.test(win),
-      hidden: /(?:^|,)hidden:true/.test(win),
+      domId: str(top, "id"),
+      itemId: str(top, "itemId"),
+      op: str(top, "filterOperator"),
+      xtype: str(top, "xtype"),
+      label: str(top, "fieldLabel") || str(top, "emptyText"),
+      name: str(top, "name") || str(top, "valueHiddenName"),
+      isDefault: /"isDefaultFilter":true/.test(top),
+      hidden: /(?:^|,)hidden:true/.test(top),
     };
-    for (const m of win.matchAll(/"?(\w*[Ee]xt[Kk]ey\w*)"?:"([^"]*)"/g)) f.extKey = m[2];
-    const prop = str(win, "filterProperty") || str(win, "property") || str(win, "dataField");
+    const extRe = /"?(?:filterExtensionKey|\w*[Ee]xt(?:ension)?[Kk]ey\w*)"?:"([^"]*)"/g;
+    for (const m of top.matchAll(extRe)) {
+      if (m[1]) f.extKey = m[1];
+    }
+    if (!f.extKey) {
+      for (const m of win.matchAll(extRe)) {
+        if (m[1]) f.extKey = m[1];
+      }
+    }
+    const prop = str(top, "filterProperty") || str(top, "property") || str(top, "dataField");
     if (prop) f.property = prop;
     if (!f.itemId) continue;
     const prev = byId.get(f.itemId);
-    if (!prev || (prev.isDefault && !f.isDefault)) byId.set(f.itemId, f);
+    if (!prev) {
+      byId.set(f.itemId, f);
+    } else if (prev.isDefault && !f.isDefault) {
+      byId.set(f.itemId, {
+        ...prev,
+        ...Object.fromEntries(Object.entries(f).filter(([, v]) => v != null && v !== "")),
+        isDefault: f.isDefault,
+        hidden: f.hidden,
+      });
+    }
   }
   return [...byId.values()];
 }

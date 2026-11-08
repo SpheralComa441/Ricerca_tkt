@@ -116,8 +116,12 @@ def matches(t, c):
     if op == "eq":
         return str(cur) == v
     if op in ("like", "ct"):
-        return v.lower() in str(cur).lower()
+        parts = [w for w in v.lower().split("%") if w]
+        return all(w in str(cur).lower() for w in parts) if parts else True
     if op == "sw":
+        if "%" in v:
+            parts = [w for w in v.lower().split("%") if w]
+            return all(w in str(cur).lower() for w in parts) if parts else True
         return str(cur).lower().startswith(v.lower())
     raise ValueError(f"Operatore sconosciuto: {op}")
 
