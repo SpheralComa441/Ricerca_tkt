@@ -1,0 +1,153 @@
+// Service worker dell'estensione Ricerca TKT.
+//  - clic sull'icona → apre (o porta in primo piano) l'app in una scheda;
+//  - "ponte" verso una scheda Touch aperta quando l'app non riesce a leggere direttamente;
+//  - "Apri in Touch": apre il dettaglio del ticket nella scheda Touch, come un clic nel portale;
+//  - registra (solo in lettura) i filtri che Touch invia quando li usi nel portale, così l'app
+//    impara proprietà, operatori e formato dei valori di ogni filtro senza doverli indovinare.
+
+import { learnFromConditions } from "./lib/filters.js";
+
+const APP_URL = chrome.runtime.getURL("app/index.html");
+const TOUCH_MATCH = "https://zucchetti.support/HDAPortal/*";
+const TOUCH_HOME = "https://zucchetti.support/HDAPortal/";
+
+async function openApp() {
+  const tabs = await chrome.tabs.query({ url: APP_URL + "*" });
+  if (tabs[0]) {
+    await chrome.tabs.update(tabs[0].id, { active: true });
+    await chrome.windows.update(tabs[0].windowId, { focused: true });
+  } else {
+    await chrome.tabs.create({ url: APP_URL });
+  }
+}
+chrome.action.onClicked.addListener(openApp);
+
+async function touchTab() {
+  const tabs = await chrome.tabs.query({ url: TOUCH_MATCH });
+  // preferisce la scheda attiva / usata più di recente
+  tabs.sort((a, b) => (b.active - a.active) || ((b.lastAccessed || 0) - (a.lastAccessed || 0)));
+  return tabs[0] || null;
+}
+
+async function proxyFetch(req) {
+  const tab = await touchTab();
+  if (!tab) return { error: "no-tab" };
+  const send = () => chrome.tabs.sendMessage(tab.id, { type: "hda-fetch", req });
+  try {
+    return await send();
+  } catch {
+    // scheda aperta prima dell'installazione: si inietta il ponte e si riprova
+    await chrome.scripting.executeScript({ target: { tabId: tab.id }, files: ["content/bridge.js"] });
+    return await send();
+  }
+}
+
+function openDetailInPage(id) {
+  // eseguita nella pagina di Touch (mondo MAIN): stesso meccanismo dei link "openDetail" del portale
+  const P = window.Portal;
+  if (!P || !P.Actions || typeof P.Actions.onClick !== "function") return "not-ready";
+  const el = document.createElement("div");
+  el.setAttribute("data-action", "Portal.PageManager.openDetail");
+  el.setAttribute("data-entity", "Incident");
+  el.setAttribute("data-id", id);
+  el.style.display = "none";
+  document.body.appendChild(el);
+  try {
+    P.Actions.onClick(el);
+    return "ok";
+  } catch (e) {
+    return "error: " + (e && e.message);
+  } finally {
+    el.remove();
+  }
+}
+
+async function openInTouch(id) {
+  let tab = await touchTab();
+  if (!tab) tab = await chrome.tabs.create({ url: TOUCH_HOME, active: true });
+  await chrome.tabs.update(tab.id, { active: true });
+  await chrome.windows.update(tab.windowId, { focused: true });
+  // aspetta che il portale sia pronto (al massimo ~30 s)
+  for (let i = 0; i < 60; i++) {
+    try {
+      const [res] = await chrome.scripting.executeScript({ target: { tabId: tab.id }, world: "MAIN", func: openDetailInPage, args: [id] });
+      if (res && res.result && res.result !== "not-ready") return res.result;
+    } catch {
+      /* pagina in caricamento */
+    }
+    await new Promise((r) => setTimeout(r, 500));
+  }
+  return "timeout";
+}
+
+chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
+  if (!msg) return;
+  if (msg.type === "hda-proxy") {
+    proxyFetch(msg.req).then(sendResponse, (e) => sendResponse({ error: String(e && e.message) }));
+    return true;
+  }
+  if (msg.type === "open-in-touch") {
+    openInTouch(msg.id).then((r) => sendResponse({ result: r }), (e) => sendResponse({ result: "error: " + (e && e.message) }));
+    return true;
+  }
+  if (msg.type === "touch-tab-status") {
+    touchTab().then((t) => sendResponse({ open: !!t }));
+    return true;
+  }
+});
+
+// ---------------------------------------------------------------- filtri appresi da Touch
+
+function formValue(details, name) {
+  const b = details.requestBody;
+  if (!b) return null;
+  if (b.formData && b.formData[name]) return b.formData[name][0];
+  if (b.raw && b.raw[0] && b.raw[0].bytes) {
+    try {
+      const txt = new TextDecoder().decode(b.raw[0].bytes);
+      return new URLSearchParams(txt).get(name);
+    } catch {
+      return null;
+    }
+  }
+  return null;
+}
+
+async function remember(entry, conditions) {
+  const st = await chrome.storage.local.get(["captures", "learned"]);
+  const captures = [entry, ...(st.captures || [])].slice(0, 40);
+  const upd = { captures };
+  if (conditions && entry.collection === "Incidents") upd.learned = learnFromConditions(conditions, st.learned || {});
+  await chrome.storage.local.set(upd);
+}
+
+chrome.webRequest.onBeforeRequest.addListener(
+  (details) => {
+    if (details.tabId < 0 || details.method !== "POST" || /[?&]_rtkt=1/.test(details.url)) return;
+    const u = new URL(details.url);
+    const m = /\/HDAPortal\/WSCView\/ListData\/([^/?]+)/.exec(u.pathname);
+    if (m) {
+      let filter = null;
+      try {
+        filter = JSON.parse(formValue(details, "filter") || "null");
+      } catch {
+        /* */
+      }
+      const conditions = filter && Array.isArray(filter.conditions) ? filter.conditions : null;
+      let sort = null;
+      try {
+        sort = JSON.parse(formValue(details, "sort") || "null");
+      } catch {
+        /* */
+      }
+      remember({ at: Date.now(), kind: "data", collection: m[1], viewId: formValue(details, "ViewID"), conditions, sort, subfilters: filter && filter.subfilters }, conditions);
+      return;
+    }
+    if (/\/HDAPortal\/WSCView\/List$/.test(u.pathname) && u.searchParams.get("Entity") === "Incidents") {
+      const params = Object.fromEntries([...u.searchParams].filter(([k]) => !/^(_dc|_pl)$/.test(k)));
+      chrome.storage.local.set({ touchIncidentsListParams: params });
+    }
+  },
+  { urls: ["https://zucchetti.support/HDAPortal/WSCView/ListData/*", "https://zucchetti.support/HDAPortal/WSCView/List*"] },
+  ["requestBody"],
+);

@@ -10,15 +10,21 @@ potente: tutti i filtri del portale scelti dal pannello, faccette, ordinamenti e
 sui risultati, il ticket completo da leggere nel pannello, esportazione, preferiti con note e
 ricerche salvate.
 
-| | **Segnalibro** (consigliata) | **Applicazione web** |
-|---|---|---|
-| Sito | portale ticket HDA TOUCH (HDAPortal) e, collegata, la vecchia Ricerca rapida dell'Area Riservata | vecchia Area Riservata (indice Solr "Ricerca rapida"), **non aggiornata** |
-| Installazione | nessuna: un segnalibro nel browser | server con Python 3.11+ o Docker |
-| Accesso | la sessione già aperta nel portale | credenziali Zucchetti o cookie di sessione |
-| Dati personali | nel browser (esportabili) | database SQLite sul server |
-| Cartella | [`bookmarklet/`](bookmarklet/) | [`app/`](app/), [`static/`](static/) |
+| | **Estensione browser v4 (consigliata)** | **Segnalibro (legacy)** | **Applicazione web** |
+|---|---|---|---|
+| Sito | portale ticket HDA TOUCH (`zucchetti.support/HDAPortal`) — chiamate dirette in sola lettura ai servizi dati + archivio locale ricercabile nelle conversazioni | portale ticket HDA TOUCH (automazione componenti ExtJS) e vecchia Ricerca rapida dell'Area Riservata | vecchia Area Riservata (indice Solr "Ricerca rapida"), **non aggiornata** |
+| Installazione | Chrome / Edge → `chrome://extensions` → *Carica estensione non pacchettizzata* → cartella [`extension/`](extension/) | un segnalibro nel browser | server con Python 3.11+ o Docker |
+| Accesso | la sessione già aperta nel portale | la sessione già aperta nel portale | credenziali Zucchetti o cookie di sessione |
+| Dati personali | nel browser (`chrome.storage.local` + `IndexedDB`) | nel browser (esportabili) | database SQLite sul server |
+| Cartella | [`extension/`](extension/) — vedi [**`extension/README.md`**](extension/README.md) | [`bookmarklet/`](bookmarklet/) | [`app/`](app/), [`static/`](static/) |
 
-## Segnalibro: provalo subito
+## Estensione Chrome / Edge (`extension/`): installazione rapida
+
+1. Apri `chrome://extensions` (o `edge://extensions`), attiva **Modalità sviluppatore** e premi **Carica estensione non pacchettizzata** selezionando la cartella [`extension/`](extension/).
+2. Apri HDA TOUCH (`https://zucchetti.support/HDAPortal/`) ed esegui l'accesso, poi clicca l'icona **Ricerca TKT** nella barra del browser (o premi <kbd>Alt</kbd>+<kbd>Maiusc</kbd>+<kbd>T</kbd>).
+3. Tutte le istruzioni dettagliate (filtri, lettura timeline, archivio locale delle conversazioni e **Diagnostica**) sono in [**`extension/README.md`**](extension/README.md).
+
+## Segnalibro (legacy): provalo subito
 
 1. Scarica [`bookmarklet/installa.html`](bookmarklet/installa.html) (su GitHub:
    apri il file → pulsante *Download raw file*) e aprilo con Chrome o Edge.

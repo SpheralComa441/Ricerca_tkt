@@ -1,0 +1,31 @@
+<!doctype html>
+<html lang="it">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Ricerca TKT</title>
+  <link rel="icon" href="../icons/icon32.png">
+  <link rel="stylesheet" href="styles.css">
+</head>
+<body>
+  <header class="topbar">
+    <div class="brand"><img src="../icons/icon32.png" alt=""><span>Ricerca <b>TKT</b></span></div>
+    <form class="searchbox" id="searchForm" autocomplete="off">
+      <input id="q" type="search" placeholder="Numero ticket, parole del testo o dell'oggetto…   ( / )" aria-label="Cerca">
+      <button type="submit" class="btn btn-primary" id="searchBtn">Cerca</button>
+    </form>
+    <div class="conn" id="conn" title="Stato della connessione a HDA TOUCH"><span class="dot"></span><span class="conn-text">Verifica…</span></div>
+    <button class="btn btn-ghost" id="diagBtn" title="Diagnostica e impostazioni">Diagnostica</button>
+  </header>
+
+  <main id="layout">
+    <aside class="sidebar" id="sidebar" aria-label="Filtri"></aside>
+    <section class="results" id="results" aria-label="Risultati"></section>
+    <section class="reader" id="reader" aria-label="Ticket" hidden></section>
+  </main>
+
+  <dialog id="diag" class="dialog"></dialog>
+  <dialog id="saveDlg" class="dialog dialog-small"></dialog>
+  <script type="module" src="main.js"></script>
+</body>
+</html>
