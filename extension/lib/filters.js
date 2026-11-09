@@ -13,26 +13,29 @@ import { statusInfo, STATUS_GROUPS, statusesOfGroup } from "./statuses.js";
 
 export const DOMAIN_CONDITION = { property: "id", value: "1", op: "eq", extKey: "TICKETDOMAIN", id: "Domain" };
 
+/** I 7 stati "aperti / in lavorazione" che Touch preimposta quando non ci sono altri filtri. */
+export const OPEN_STATUS_IDS = ["S1", "S2", "S3", "S4", "S5", "S6", "S7"];
+
 // key: chiave nello stato dell'interfaccia; touchId: itemId del filtro nell'elenco Touch
 export const FILTER_DEFS = [
   { key: "statuses", touchId: "StatusFilter", property: "TicketStatusID", op: "in", kind: "multi", verified: true, label: "Stato" },
   { key: "types", touchId: "ObjectTypeFilter", property: "TicketTypeID", op: "in", kind: "multi", verified: true, label: "Tipo" },
-  { key: "priorities", touchId: "PriorityFilter", property: "TicketPriorityID", op: "in", kind: "multi", label: "Priorità" },
+  { key: "priorities", touchId: "PriorityFilter", property: "TicketPriorityID", op: "in", kind: "multi", verified: true, label: "Priorità" },
   { key: "ownerGroups", touchId: "OwnerUserGroupID", property: "OwnerUserGroupID", op: "eq", kind: "objects", verified: true, label: "Gruppo" },
   { key: "assigned", touchId: "AssignedUserOrGroupFilter", property: "AssignedUserOrGroupID", op: "eq", kind: "objects", verified: true, label: "Assegnato a" },
-  { key: "ownerUsers", touchId: "OwnerUserID", property: "OwnerUserID", op: "eq", kind: "objects", label: "Responsabile" },
-  { key: "modifiedBy", touchId: "ModifiedBy", property: "LastUpdateUserID", op: "eq", kind: "objects", label: "Modificato da" },
-  { key: "accounts", touchId: "AccountID", property: "AccountID", op: "eq", kind: "objects", label: "Cliente" },
-  { key: "contacts", touchId: "ContactFilter", property: "ContactID", op: "eq", kind: "objects", label: "Contatto" },
-  { key: "catalog", touchId: "CatalogItem", property: "CTITM", op: "eq", kind: "objects", label: "Prodotto" },
-  { key: "subject", touchId: "Subject", property: "Subject", op: "like", kind: "text", label: "Oggetto" },
-  { key: "text", touchId: "FullText", property: "FullText", op: "like", kind: "text", label: "Testo" },
-  { key: "classCli", touchId: "ClassCliTxt", property: "CLASSCLI.TranslatedDescription", op: "like", kind: "text", label: "Classificazione cliente" },
-  { key: "tag", touchId: "TagFilter", property: "Relations.ObjectTag.ID", op: "eq", kind: "text", label: "Tag" },
-  { key: "dateFrom", touchId: "DateFromFilter", property: "Date", op: "ge", kind: "date", label: "Aperto dal" },
-  { key: "dateTo", touchId: "DateToFilter", property: "Date", op: "le", kind: "date", endOfDay: true, label: "Aperto fino al" },
-  { key: "updFrom", touchId: "LastUpdateDateFromFilter", property: "LastChange", op: "ge", kind: "date", label: "Aggiornato dal" },
-  { key: "updTo", touchId: "LastUpdateDateToFilter", property: "LastChange", op: "le", kind: "date", endOfDay: true, label: "Aggiornato fino al" },
+  { key: "ownerUsers", touchId: "OwnerUserID", property: "OwnerUserID", op: "eq", kind: "objects", verified: true, label: "Responsabile" },
+  { key: "modifiedBy", touchId: "ModifiedBy", property: "id", op: "eq", extKey: "MODIFIEDTICKET", kind: "objects", verified: true, label: "Modificato da" },
+  { key: "accounts", touchId: "AccountID", property: "AccountID", op: "eq", kind: "objects", verified: true, label: "Cliente" },
+  { key: "contacts", touchId: "ContactFilter", property: "ContactID", op: "eq", kind: "objects", verified: true, label: "Contatto" },
+  { key: "catalog", touchId: "CatalogItem", property: "CTITM", op: "eq", kind: "objects", verified: true, label: "Prodotto" },
+  { key: "subject", touchId: "Subject", property: "Subject", op: "like", wildcard: true, kind: "text", verified: true, label: "Oggetto" },
+  { key: "text", touchId: "FullText", property: "FullText", op: "eq", extKey: "INCLUDECONVERSATIONITEM", kind: "text", verified: true, label: "Testo" },
+  { key: "classCli", touchId: "ClassCliTxt", property: "CLASSCLI.TranslatedDescription", op: "like", wildcard: true, kind: "text", verified: true, label: "Classificazione cliente" },
+  { key: "tag", touchId: "TagFilter", property: "Relations.ObjectTag.ID", op: "eq", kind: "text", verified: true, label: "Tag" },
+  { key: "dateFrom", touchId: "DateFromFilter", property: "Date", op: "gt", kind: "date", verified: true, label: "Aperto dal" },
+  { key: "dateTo", touchId: "DateToFilter", property: "Date", op: "le", kind: "date", endOfDay: true, verified: true, label: "Aperto fino al" },
+  { key: "updFrom", touchId: "LastUpdateDateFromFilter", property: "LastChange", op: "gt", kind: "date", verified: true, label: "Aggiornato dal" },
+  { key: "updTo", touchId: "LastUpdateDateToFilter", property: "LastChange", op: "le", kind: "date", endOfDay: true, verified: true, label: "Aggiornato fino al" },
 ];
 
 export const DEF = Object.fromEntries(FILTER_DEFS.map((d) => [d.key, d]));
@@ -49,6 +52,18 @@ export function emptyFilters() {
 
 export function isEmptyFilter(v) {
   return v == null || v === "" || (Array.isArray(v) && v.length === 0);
+}
+
+/** Vero se nessun filtro è impostato (un'interrogazione senza vincoli su tutti gli anni scade per timeout a 25s su SQL Server). */
+export function isUnconstrained(f) {
+  if (!f) return true;
+  return FILTER_DEFS.every((d) => isEmptyFilter(f[d.key])) && isEmptyFilter(f.touch);
+}
+
+/** Vero se oltre al testo libero c'è almeno un filtro che restringe l'insieme (gruppo, cliente, stato, data, ecc.). */
+export function hasNarrowingFilter(f) {
+  if (!f) return false;
+  return FILTER_DEFS.some((d) => d.key !== "text" && d.key !== "subject" && !isEmptyFilter(f[d.key])) || !isEmptyFilter(f.touch);
 }
 
 /** Formato data: imita quello visto nelle richieste vere (se c'è), altrimenti ISO locale. */
@@ -74,11 +89,19 @@ export function ruleFor(def, calib = {}) {
   const learned = calib.learned && calib.learned[def.touchId];
   const cfg = (calib.config || []).find((f) => f.itemId === def.touchId);
   const ov = calib.overrides && calib.overrides[def.key];
-  const rule = { property: def.property, op: def.op, extKey: undefined, wildcard: false, sample: undefined, source: def.verified ? "verificato" : "predefinito" };
+  const rule = {
+    property: def.property,
+    op: def.op,
+    extKey: def.extKey,
+    wildcard: !!def.wildcard,
+    sample: undefined,
+    source: def.verified ? "verificato" : "predefinito",
+  };
   if (cfg) {
     if (cfg.property) rule.property = cfg.property;
     else if (cfg.name && !/filter$/i.test(cfg.name)) rule.property = cfg.name;
-    if (cfg.op && !((def.key === "subject" || def.key === "classCli") && cfg.op === "sw")) rule.op = cfg.op;
+    // Per Oggetto e Classificazione cliente, l'operatore "like" con "%…%" è stato verificato sul server per cercare anche a metà testo (mentre Touch espone "in" o "sw").
+    if (cfg.op && !(def.key === "subject" || def.key === "classCli")) rule.op = cfg.op;
     if (cfg.extKey) rule.extKey = cfg.extKey;
     rule.source = "configurazione Touch";
   }
@@ -97,7 +120,7 @@ export function ruleFor(def, calib = {}) {
   if (learned) {
     rule.property = learned.property;
     rule.op = learned.op;
-    rule.extKey = learned.extKey ?? undefined;
+    rule.extKey = learned.extKey ?? rule.extKey;
     rule.sample = learned.value;
     rule.source = "appreso da Touch";
   }

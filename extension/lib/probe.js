@@ -27,8 +27,19 @@ export async function runProbe(hda, { onStep = () => {}, sampleTicketId = null, 
   let ticketId = sampleTicketId;
   let sampleSubject = "";
 
+  await step("Stati (GetStaticList)", async () => {
+    const rows = await hda.staticList("TicketStatuses");
+    return `${rows.length} stati`;
+  });
+
   await step("Ticket di prova (Projection rapida)", async () => {
-    const rows = await hda.projection("Incident", ticketId ? [{ property: "ID", op: "eq", value: ticketId }] : [], TICKET_COLUMNS, 1);
+    let rows = await hda.projection(
+      "Incident",
+      ticketId ? [{ property: "ID", op: "eq", value: ticketId }] : [{ property: "TicketStatusID", op: "eq", value: "S1" }],
+      TICKET_COLUMNS,
+      1
+    );
+    if (!rows[0] && !ticketId) rows = await hda.projection("Incident", [], TICKET_COLUMNS, 1);
     if (!rows[0]) throw new Error("nessuna riga");
     if (!ticketId) ticketId = rows[0].ID;
     sampleSubject = rows[0].Subject || "";
@@ -36,7 +47,9 @@ export async function runProbe(hda, { onStep = () => {}, sampleTicketId = null, 
   });
 
   await step("Elenco ticket (ListData su 1 ticket)", async () => {
-    const conds = ticketId ? [DOMAIN_CONDITION, { property: "ID", op: "eq", value: ticketId, id: "ID" }] : [DOMAIN_CONDITION];
+    const conds = ticketId
+      ? [DOMAIN_CONDITION, { property: "ID", op: "eq", value: ticketId, id: "ID" }]
+      : [DOMAIN_CONDITION, { property: "TicketStatusID", op: "in", value: "S1|S2|S3|S4|S5|S6|S7", id: "StatusFilter" }];
     const { rows, total } = await hda.listData("Incidents", { conditions: conds, limit: 1, sort: [{ property: "c20", direction: "DESC" }] });
     if (!rows.length) throw new Error("nessuna riga");
     return `${total} riga, ${Object.keys(rows[0]).length} colonne`;
@@ -124,11 +137,6 @@ export async function runProbe(hda, { onStep = () => {}, sampleTicketId = null, 
     });
     if (s.ok && !workingContains) workingContains = { op, wildcard };
   }
-
-  await step("Stati (GetStaticList)", async () => {
-    const rows = await hda.staticList("TicketStatuses");
-    return `${rows.length} stati`;
-  });
 
   const report = {
     version: typeof chrome !== "undefined" && chrome.runtime && chrome.runtime.getManifest ? chrome.runtime.getManifest().version : "dev",

@@ -6,7 +6,7 @@ import assert from "node:assert/strict";
 import { parseMsDate, ticketIdFrom, ticketNumber, tokens, norm, csvCell, fmtDate } from "../lib/util.js";
 import { parseListConfig } from "../lib/listconfig.js";
 import { makeRowReader } from "../lib/rows.js";
-import { buildConditions, emptyFilters, formatDateValue, learnFromConditions, ruleFor, DEF, describeFilters, filterPayload, pickCalibrationSample } from "../lib/filters.js";
+import { buildConditions, emptyFilters, formatDateValue, learnFromConditions, ruleFor, DEF, describeFilters, filterPayload, pickCalibrationSample, isUnconstrained, hasNarrowingFilter } from "../lib/filters.js";
 import { htmlToText, splitQuoted, linkifyParts, decodeEntities, unescapeIfEscapedHtml, cleanText } from "../lib/richtext.js";
 import { makeTransport, AuthError, HdaError, formBody } from "../lib/transport.js";
 import { makeHda } from "../lib/hda.js";
@@ -51,10 +51,11 @@ const CFG_SRC = [
   'items:[{id:"App_UC_defaultFilter_Default_filterText",itemId:"filterText","isFilter":true,"isDefaultFilter":true,hidden:true,"filterOperator":"sw",xtype:"textfield",emptyText:"Detail",name:"Text"},',
   '{id:"App_UC_filter_Default_filterText",itemId:"filterText","isFilter":true,"filterOperator":"sw",xtype:"textfield",fieldLabel:"Detail",name:"Text",listeners:{change:function(){const s=`{}`;if(a){b()}}},"filterExtensionKey":"FT_EXT"},',
   '{id:"App_UC_filter_Default_ModifiedBy",itemId:"ModifiedBy","isFilter":true,"filterOperator":"eq",xtype:"objectlink",fieldLabel:"Modified by",triggers:{"clear":{hidden:true}},listeners:{change:{fn:function(){}}},valueHiddenName:"id","filterExtensionKey":"MOD_EXT"},',
+  '{id:"App_UC_filter_Default_AssignedUserOrGroupFilter",itemId:"AssignedUserOrGroupFilter",bin:[{id:"App_UC_filter_Default_AssignedUserOrGroupFilter_settingTriggerMenu",itemId:"settingTriggerMenu"}],"isFilter":true,"filterOperator":"eq",xtype:"objectlink",fieldLabel:"Assigned to",valueHiddenName:"AssignedUserOrGroupID"},',
   '{id:"App_UC_filter_Default_filterUserID",itemId:"filterUserID","isFilter":true,"filterOperator":"eq",xtype:"combo",fieldLabel:"User",name:"UserID",hidden:true}]});',
 ].join("");
 
-test("parseListConfig: mappa colonne, colonne, filtri con filterExtensionKey e valueHiddenName", () => {
+test("parseListConfig: mappa colonne, colonne, filtri con filterExtensionKey, valueHiddenName e menu annidato", () => {
   const cfg = parseListConfig(CFG_SRC);
   assert.deepEqual(cfg.mapping, { c0: "Account.CompanyName", c1: "ID", c2: "Text", c3: "User.FullName" });
   assert.equal(cfg.reverse.ID, "c1");
@@ -62,6 +63,9 @@ test("parseListConfig: mappa colonne, colonne, filtri con filterExtensionKey e v
   assert.equal(cfg.viewId, "Default");
   assert.equal(cfg.storeUrl, "/HDAPortal/WSCView/ListData/TicketConversationItems?_pl=en");
   const byId = Object.fromEntries(cfg.filters.map((f) => [f.itemId, f]));
+  assert.equal(byId.settingTriggerMenu, undefined);
+  assert.equal(byId.AssignedUserOrGroupFilter.name, "AssignedUserOrGroupID");
+  assert.equal(byId.AssignedUserOrGroupFilter.op, "eq");
   assert.equal(byId.filterText.op, "sw");
   assert.equal(byId.filterText.name, "Text");
   assert.equal(byId.filterText.label, "Detail");
@@ -118,20 +122,29 @@ test("buildConditions: più gruppi → in; numero ticket → ID eq senza testo",
   assert.equal(c.some((x) => x.id === "FullText"), false);
 });
 
-test("ruleFor: appreso > overrides/containsText > configurazione > predefinito", () => {
-  assert.equal(ruleFor(DEF.text, {}).source, "predefinito");
-  const cfg = { config: [{ itemId: "FullText", op: "ct", name: "FullTextField" }, { itemId: "Subject", op: "sw", name: "Subject" }] };
+test("ruleFor, isUnconstrained, hasNarrowingFilter: regole verificate sul portale", () => {
+  const defText = ruleFor(DEF.text, {});
+  assert.equal(defText.source, "verificato");
+  assert.equal(defText.op, "eq");
+  assert.equal(defText.extKey, "INCLUDECONVERSATIONITEM");
+  const cfg = { config: [{ itemId: "FullText", op: "ct", name: "FullTextField" }, { itemId: "Subject", op: "in", name: "Subject" }] };
   const r1 = ruleFor(DEF.text, cfg);
   assert.equal(r1.op, "ct");
   assert.equal(r1.property, "FullTextField");
   assert.equal(r1.source, "configurazione Touch");
-  // Subject non viene degradato a "sw" dalla configurazione di Touch
-  assert.equal(ruleFor(DEF.subject, cfg).op, "like");
-  // e se calibrato con wildcard "%…%" aggiunge i jolly
-  const cSub = buildConditions({ ...emptyFilters(), subject: "ricalcolo detassazione" }, { ...cfg, containsText: { op: "sw", wildcard: true } });
-  assert.deepEqual(cSub.find((x) => x.id === "Subject"), { property: "Subject", value: "%ricalcolo%detassazione%", op: "sw", id: "Subject" });
+  // Subject conserva "like" con "%…%" anche se la configurazione di Touch espone "in" o "sw"
+  const rSub = ruleFor(DEF.subject, cfg);
+  assert.equal(rSub.op, "like");
+  assert.equal(rSub.wildcard, true);
+  const cSub = buildConditions({ ...emptyFilters(), subject: "ricalcolo detassazione" }, cfg);
+  assert.deepEqual(cSub.find((x) => x.id === "Subject"), { property: "Subject", value: "%ricalcolo%detassazione%", op: "like", id: "Subject" });
   const r2 = ruleFor(DEF.text, { ...cfg, learned: { FullText: { property: "FT", op: "like", value: "x" } } });
   assert.deepEqual([r2.property, r2.op, r2.source], ["FT", "like", "appreso da Touch"]);
+
+  assert.equal(isUnconstrained(emptyFilters()), true);
+  assert.equal(isUnconstrained({ ...emptyFilters(), text: "detassazione" }), false);
+  assert.equal(hasNarrowingFilter({ ...emptyFilters(), text: "detassazione" }), false);
+  assert.equal(hasNarrowingFilter({ ...emptyFilters(), text: "detassazione", ownerGroups: [{ id: "G1" }] }), true);
 });
 
 test("pickCalibrationSample estrae una parola non iniziale dall'oggetto", () => {

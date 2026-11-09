@@ -94,8 +94,13 @@ export function parseFilters(src) {
     const idx = src.indexOf('"isFilter":true', from);
     if (idx < 0) break;
     from = idx + 15;
-    const start = src.lastIndexOf("{id:", idx);
-    if (start < 0 || idx - start > 2500) continue;
+    let start = src.lastIndexOf("{id:", idx);
+    while (start >= 0 && idx - start < 40000) {
+      const b = findBalanced(src, start);
+      if (b > idx || b < 0) break;
+      start = src.lastIndexOf("{id:", start - 1);
+    }
+    if (start < 0 || idx - start > 40000) continue;
     const bal = findBalanced(src, start);
     const win = bal > start && bal - start < 80000 ? src.slice(start, bal + 1) : src.slice(start, Math.min(src.length, idx + 8000));
     const top = stripNested(win);
@@ -120,7 +125,7 @@ export function parseFilters(src) {
     }
     const prop = str(top, "filterProperty") || str(top, "property") || str(top, "dataField");
     if (prop) f.property = prop;
-    if (!f.itemId) continue;
+    if (!f.itemId || f.itemId === "settingTriggerMenu") continue;
     const prev = byId.get(f.itemId);
     if (!prev) {
       byId.set(f.itemId, f);
@@ -154,6 +159,7 @@ export function parseListConfig(src) {
     reverse: Object.fromEntries(Object.entries(mapping).map(([a, e]) => [e, a])),
     columns: parseColumns(src),
     filters: parseFilters(src),
+    moduleFilter: parseModuleFilter(src),
     storeUrl: (/url:"(\/HDAPortal\/WSCView\/ListData\/[^"]+)"/.exec(src) || [])[1] || null,
     viewId: (/"ViewID":"([^"]+)"/.exec(src) || [])[1] || null,
   };

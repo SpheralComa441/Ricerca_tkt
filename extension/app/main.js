@@ -10,7 +10,7 @@ import { openDiag } from "./diag.js";
 import { makeTransport, AuthError, PORTAL_BASE } from "../lib/transport.js";
 import { makeHda } from "../lib/hda.js";
 import { makeRowReader } from "../lib/rows.js";
-import { emptyFilters, buildConditions, describeFilters, ruleFor, DEF, DOMAIN_CONDITION, pickCalibrationSample } from "../lib/filters.js";
+import { emptyFilters, buildConditions, describeFilters, ruleFor, DEF, DOMAIN_CONDITION, OPEN_STATUS_IDS, isUnconstrained, hasNarrowingFilter } from "../lib/filters.js";
 import { statusInfo, mergePortalStatuses } from "../lib/statuses.js";
 import { loadTicket } from "../lib/ticket.js";
 import { saveTicket, getTicket, searchArchive, archivedMap, archiveInfo, kvGet, kvSet, onKvChange, reviveRow } from "../lib/store.js";
@@ -38,6 +38,7 @@ function log(msg) {
 // ---------------------------------------------------------------- stato
 const S = {
   filters: emptyFilters(),
+  activeEffectiveFilters: null,
   sort: { key: "date", dir: "DESC" },
   results: [],
   total: 0,
@@ -136,18 +137,30 @@ function setConn(state, text) {
   el.title = state === false ? "Apri HDA TOUCH ed esegui l'accesso, poi torna qui" : "Stato della connessione a HDA TOUCH";
 }
 
+let statusesLoaded = false;
+
 async function checkConnection() {
   setConn(null);
   try {
-    try {
-      const rows = await hda.projection("Incident", [], ["ID", "Subject"], 1);
-      if (rows && rows[0] && rows[0].ID) S.sampleTicket = { id: rows[0].ID, subject: rows[0].Subject || "" };
-    } catch (e) {
-      if (e instanceof AuthError) throw e;
-      await hda.listData("Incidents", { conditions: [{ ...DOMAIN_CONDITION }], limit: 1, sort: [{ property: "c20", direction: "DESC" }] });
-    }
+    // GetStaticList risponde in ~150 ms (contro i 7-15 s di una query su Incident senza filtri),
+    // verifica la sessione, estrae l'ID dell'operatore dal requestToken e carica gli stati del portale.
+    const st = await hda.staticList("TicketStatuses");
+    mergePortalStatuses(st);
+    statusesLoaded = true;
     setConn(true, `Connesso a Touch${transport.mode === "proxy" ? " (tramite scheda)" : ""}`);
-    log(`connessione ok: utente ${hda.currentUserId || "?"}${S.sampleTicket ? ", ticket campione " + S.sampleTicket.id : ""}`);
+    log(`connessione ok: utente ${hda.currentUserId || "?"}, ${st.length} stati`);
+    if (hda.currentUserId && !S.caps.defaultGroupId) {
+      hda.projection("User", [{ property: "ID", op: "eq", value: hda.currentUserId }], ["ID", "FullName", "DefaultUserGroupID"], 1)
+        .then((rows) => {
+          const u = rows && rows[0];
+          if (u && (u.DefaultUserGroupID || u.FullName)) {
+            if (u.DefaultUserGroupID) S.caps.defaultGroupId = u.DefaultUserGroupID;
+            if (u.FullName) S.caps.userFullName = u.FullName;
+            kvSet("caps", S.caps);
+          }
+        })
+        .catch(() => {});
+    }
     return true;
   } catch (e) {
     log("connessione: " + e.message);
@@ -159,7 +172,7 @@ async function checkConnection() {
 // ---------------------------------------------------------------- calibrazione (colonne e filtri di Touch)
 
 async function reloadCalibration(force = false) {
-  const cached = await kvGet("listCfg_v2", null);
+  const cached = await kvGet("listCfg_v3", null);
   if (!force && cached && Date.now() - cached.at < DAY && cached.mapping && Object.keys(cached.mapping).length) {
     applyListConfig(cached);
   } else {
@@ -168,7 +181,7 @@ async function reloadCalibration(force = false) {
       const cfg = await hda.listConfig("Incidents", params);
       if (Object.keys(cfg.mapping || {}).length) {
         const keep = { at: Date.now(), mapping: cfg.mapping, filters: cfg.filters, viewId: cfg.viewId || null };
-        await kvSet("listCfg_v2", keep);
+        await kvSet("listCfg_v3", keep);
         applyListConfig(keep);
         log(`configurazione elenco: ${Object.keys(cfg.mapping).length} colonne, ${cfg.filters.length} filtri`);
         log("filtri Touch: " + cfg.filters.map((f) => `${f.itemId}=${f.property || f.name || "?"}/${f.op || "?"}${f.extKey ? "[" + f.extKey + "]" : ""}`).join(", "));
@@ -179,92 +192,19 @@ async function reloadCalibration(force = false) {
       log("configurazione elenco: " + e.message + " (uso la mappa di riserva)");
     }
   }
-  try {
-    mergePortalStatuses(await hda.staticList("TicketStatuses"));
-  } catch (e) {
-    log("stati: " + e.message);
+  if (force || !statusesLoaded) {
+    try {
+      mergePortalStatuses(await hda.staticList("TicketStatuses"));
+      statusesLoaded = true;
+    } catch (e) {
+      log("stati: " + e.message);
+    }
   }
-  if (S.sampleTicket) calibrateTextFilters(S.sampleTicket, force).catch(() => {});
 }
 
 function applyListConfig(cfg) {
   rowReader = makeRowReader(cfg.mapping);
   S.calib.config = cfg.filters || [];
-}
-
-let calibratingText = null;
-async function calibrateTextFilters(sample = S.sampleTicket, force = false) {
-  if (!sample || !sample.id || !sample.subject || !hda) return;
-  if (calibratingText) return calibratingText;
-  calibratingText = (async () => {
-    try {
-      const { word, mid } = pickCalibrationSample(sample.subject);
-      const idCond = { property: "ID", op: "eq", value: sample.id, id: "ID" };
-      let changed = false;
-
-      if ((force || !S.caps.containsText) && (mid || word)) {
-        const q = mid || word;
-        for (const [op, wildcard] of [["ct", false], ["like", true], ["sw", true], ["like", false]]) {
-          try {
-            const val = wildcard ? `%${q}%` : q;
-            const { total } = await hda.listData("Incidents", {
-              conditions: [DOMAIN_CONDITION, idCond, { property: "Subject", op, value: val, id: "Subject" }],
-              limit: 1,
-            });
-            if (total > 0) {
-              S.caps.containsText = { op, wildcard };
-              S.calib.containsText = { op, wildcard };
-              log(`calibrazione Oggetto: op=${op}${wildcard ? ' con "%…%"' : ""}`);
-              changed = true;
-              break;
-            }
-          } catch {
-            /* operatore non supportato */
-          }
-        }
-      }
-
-      const tr = ruleFor(DEF.text, S.calib);
-      const sig = `${tr.property}|${tr.op}|${tr.extKey || ""}`;
-      if ((force || (S.caps.fullTextBroken !== sig && !S.caps.fullTextRule)) && word && tr.source !== "appreso da Touch") {
-        let ok = false;
-        for (const cand of [
-          { property: tr.property, op: tr.op, extKey: tr.extKey },
-          { property: tr.property, op: "in", extKey: tr.extKey },
-        ]) {
-          try {
-            const c = { property: cand.property, op: cand.op, value: word, id: "FullText" };
-            if (cand.extKey) c.extKey = cand.extKey;
-            const { total } = await hda.listData("Incidents", { conditions: [DOMAIN_CONDITION, idCond, c], limit: 1 });
-            if (total > 0) {
-              S.caps.fullTextRule = cand;
-              S.caps.fullTextBroken = null;
-              S.calib.overrides.text = { ...cand, source: "calibrato" };
-              log(`calibrazione FullText: ok (${cand.property}/${cand.op}${cand.extKey ? "[" + cand.extKey + "]" : ""})`);
-              ok = true;
-              changed = true;
-              break;
-            }
-          } catch {
-            /* FullText rifiutato con questo formato */
-          }
-        }
-        if (!ok) {
-          S.caps.fullTextBroken = sig;
-          log("calibrazione FullText: non supportato direttamente, uso Oggetto + Archivio locale");
-          changed = true;
-        }
-      }
-
-      if (changed) {
-        await kvSet("caps", S.caps);
-        refreshSidebar();
-      }
-    } finally {
-      calibratingText = null;
-    }
-  })();
-  return calibratingText;
 }
 
 /** Se la mappa delle colonne non torna con i dati veri, si torna a quella di riserva */
@@ -390,18 +330,48 @@ function fallbackToSubject(f) {
   return { ...f, text: "", subject: [f.subject, f.text].filter(Boolean).join(" ") };
 }
 
-async function search({ more = false } = {}) {
+function isTimeoutError(e) {
+  return /timeout|scaduto|tempo limite/i.test(String((e && e.message) || ""));
+}
+
+function userGroupOrAssignedFallback(f) {
+  const gId =
+    S.caps.defaultGroupId ||
+    (S.calib.learned.OwnerUserGroupID && String(S.calib.learned.OwnerUserGroupID.value || "").split("|")[0]);
+  if (gId) return { ...f, statuses: OPEN_STATUS_IDS, ownerGroups: [{ id: gId, label: gId }] };
+  if (hda && hda.currentUserId) {
+    return { ...f, statuses: OPEN_STATUS_IDS, assigned: [{ id: hda.currentUserId, label: S.caps.userFullName || hda.currentUserId }] };
+  }
+  return null;
+}
+
+async function search({ more = false, forceFullText = false } = {}) {
   if (!hda) return;
   if (searchAbort) searchAbort.abort();
   const ac = new AbortController();
   searchAbort = ac;
+
+  // Se l'utente ha scritto nella casella #q senza premere Invio e ha cliccato Riprova / Aggiorna, sincronizziamo subito il testo.
+  const qEl = $("#q");
+  if (qEl && !more && qEl.value.trim() !== S.filters.text) {
+    S.filters.text = qEl.value.trim();
+    kvSet("lastFilters", S.filters);
+    refreshSidebar();
+  }
+
   const f = S.filters;
   const size = Number(S.settings.pageSize) || 50;
   const tid = ticketIdFrom(f.text);
+  const prevResults = S.results;
+  const prevTotal = S.total;
+  const prevEff = S.activeEffectiveFilters;
+
   if (!more) {
     S.page = 1;
-    S.results = [];
-    S.total = 0;
+    if (!forceFullText) {
+      S.results = [];
+      S.total = 0;
+    }
     S.cursor = -1;
     S.notices = [];
     runArchiveSearch(f.text);
@@ -413,28 +383,113 @@ async function search({ more = false } = {}) {
   renderResults();
 
   const run = (filters) =>
-    hda.listData("Incidents", { conditions: buildConditions(filters, S.calib), page: S.page, start: (S.page - 1) * size, limit: size, sort: sortSpec(), signal: ac.signal });
+    hda.listData("Incidents", {
+      conditions: buildConditions(filters, S.calib),
+      page: S.page,
+      start: (S.page - 1) * size,
+      limit: size,
+      sort: sortSpec(),
+      signal: ac.signal,
+    });
 
   try {
     let res;
-    const textRule = f.text && !tid ? ruleFor(DEF.text, S.calib) : null;
-    const textSig = textRule ? `${textRule.property}|${textRule.op}|${textRule.extKey || ""}` : null;
-    if (textRule && S.caps.fullTextBroken === textSig && textRule.source !== "appreso da Touch") {
-      if (!S.calib.containsText && S.sampleTicket) await calibrateTextFilters(S.sampleTicket);
-      res = await run(fallbackToSubject(f));
-      if (!more) S.notices.push("Ricerca eseguita nell'oggetto del ticket (e nella scheda «Archivio locale» per il testo dei messaggi).");
+    if (more && S.activeEffectiveFilters) {
+      res = await run(S.activeEffectiveFilters);
+    } else if (isUnconstrained(f)) {
+      // Un'interrogazione senza alcun filtro su 10+ anni di storico scade a 25s su SQL Server nelle ore di punta:
+      // mostriamo i ticket negli stati aperti (come fa Touch all'avvio) e, se anche quello andasse in timeout, restringiamo al gruppo dell'operatore.
+      const openF = { ...f, statuses: OPEN_STATUS_IDS };
+      try {
+        res = await run(openF);
+        S.activeEffectiveFilters = openF;
+        S.notices.push(
+          "Vista iniziale: mostro i ticket aperti per evitare il timeout del portale (25 s). Scrivi nella casella di ricerca o scegli un filtro a sinistra per cercare automaticamente anche in tutti i ticket chiusi."
+        );
+      } catch (e) {
+        const fb = isTimeoutError(e) && userGroupOrAssignedFallback(f);
+        if (!fb) throw e;
+        log("timeout anche sugli aperti di tutti i gruppi: restringo al gruppo/operatore");
+        res = await run(fb);
+        S.activeEffectiveFilters = fb;
+        S.notices.push(
+          "Vista iniziale: il portale era sovraccarico su tutti i gruppi, mostro i ticket aperti del tuo gruppo. Usa la ricerca o i filtri a sinistra per cercare su tutti i gruppi e nei ticket chiusi."
+        );
+      }
+    } else if (f.text && !tid) {
+      if (hasNarrowingFilter(f) || forceFullText) {
+        // C'è già un filtro (es. Gruppo, Cliente, Stato, Data) oppure l'utente ha chiesto esplicitamente di cercare nei messaggi sul portale:
+        // usiamo FullText/eq[INCLUDECONVERSATIONITEM] che cerca anche dentro i messaggi delle conversazioni.
+        try {
+          res = await run(f);
+          S.activeEffectiveFilters = f;
+          if (forceFullText) {
+            S.notices.push(`Ricerca di «${f.text}» completata anche dentro i messaggi delle conversazioni sul portale.`);
+          }
+        } catch (e) {
+          if (e instanceof AuthError || e.name === "AbortError") throw e;
+          log(`ricerca FullText (${e.message}): ripiego sull'oggetto`);
+          if (forceFullText && prevResults.length) {
+            S.results = prevResults;
+            S.total = prevTotal;
+            S.activeEffectiveFilters = prevEff;
+            S.notices.push(
+              "La ricerca dentro tutti i messaggi di tutti gli anni ha superato il limite di 25 secondi del portale. Scegli almeno un filtro a sinistra (es. Gruppo, Cliente o Aperto dal) per cercare nei messaggi in meno di un secondo."
+            );
+            return;
+          }
+          const subF = fallbackToSubject(f);
+          try {
+            res = await run(subF);
+            S.activeEffectiveFilters = subF;
+            S.notices.push(
+              `La ricerca nei messaggi sul portale ha impiegato troppo tempo: ho cercato «${f.text}» nell'oggetto dei ticket (e nell'Archivio locale).`
+            );
+          } catch (e2) {
+            if (!isTimeoutError(e2) || subF.statuses.length) throw e2;
+            const subOpen = { ...subF, statuses: OPEN_STATUS_IDS };
+            res = await run(subOpen);
+            S.activeEffectiveFilters = subOpen;
+            S.notices.push(
+              `Il portale ha superato i 25 secondi sullo storico completo: mostro i ticket aperti con «${f.text}». Aggiungi un filtro (Gruppo, Cliente o Data) per cercare anche nei chiusi.`
+            );
+          }
+        }
+      } else {
+        // Solo testo libero senza altri filtri: cerchiamo subito nell'Oggetto su TUTTI i ticket (aperti e chiusi) per rispondere in pochi secondi senza incorrere nel timeout di 25s sulle conversazioni storiche.
+        const subF = fallbackToSubject(f);
+        try {
+          res = await run(subF);
+          S.activeEffectiveFilters = subF;
+          S.notices.push({
+            text: `Ho cercato «${f.text}» nell'oggetto di tutti i ticket (aperti e chiusi) e nei messaggi dell'archivio locale. Se scegli un Gruppo, Cliente o Data a sinistra cerco automaticamente anche dentro i messaggi sul portale.`,
+            actionLabel: "Cerca anche nei messaggi sul portale",
+            action: () => search({ forceFullText: true }),
+          });
+        } catch (e) {
+          if (!isTimeoutError(e) || subF.statuses.length) throw e;
+          log("timeout sull'oggetto su tutto lo storico: riprovo sui ticket aperti");
+          const subOpen = { ...subF, statuses: OPEN_STATUS_IDS };
+          res = await run(subOpen);
+          S.activeEffectiveFilters = subOpen;
+          S.notices.push(
+            `Il portale ha superato i 25 secondi sullo storico completo: mostro i ticket aperti con «${f.text}». Scegli un Gruppo, Cliente o periodo a sinistra per cercare anche in tutti i ticket chiusi.`
+          );
+        }
+      }
     } else {
       try {
         res = await run(f);
+        S.activeEffectiveFilters = f;
       } catch (e) {
-        if (e instanceof AuthError || e.name === "AbortError" || !textRule) throw e;
-        log(`ricerca nel testo (${textSig}) rifiutata (${e.message}): riprovo sull'oggetto`);
-        S.caps.fullTextBroken = textSig;
-        delete S.calib.overrides.text;
-        kvSet("caps", S.caps);
-        if (!S.calib.containsText && S.sampleTicket) await calibrateTextFilters(S.sampleTicket);
-        res = await run(fallbackToSubject(f));
-        if (!more) S.notices.push("Il portale non accetta il filtro «Testo completo» diretto: ho cercato le parole nell'oggetto del ticket (e nell'«Archivio locale» per i messaggi).");
+        if (!isTimeoutError(e) || f.statuses.length) throw e;
+        log("timeout sullo storico completo: riprovo sui ticket aperti");
+        const openF = { ...f, statuses: OPEN_STATUS_IDS };
+        res = await run(openF);
+        S.activeEffectiveFilters = openF;
+        S.notices.push(
+          "La ricerca su tutto lo storico ha superato il limite di 25 secondi del portale: mostro prima i ticket aperti. Aggiungi un filtro più specifico (es. Gruppo, Cliente o Data) per includere i ticket chiusi."
+        );
       }
     }
     if (ac.signal.aborted) return;
@@ -444,13 +499,10 @@ async function search({ more = false } = {}) {
     S.total = res.total;
     if (!S.sampleTicket && rows[0] && rows[0].id && rows[0].subject) {
       S.sampleTicket = { id: rows[0].id, subject: rows[0].subject };
-      if (!S.caps.containsText) calibrateTextFilters(S.sampleTicket).catch(() => {});
     }
     lookups.harvest(rows);
     harvestTypes(rows);
     if (S.connected !== true) setConn(true);
-    if (!more && textRule && textRule.source === "predefinito" && !res.total)
-      S.notices.push("Nessun risultato. La ricerca nel testo completo usa un formato ancora da confermare: prova anche il campo «L'oggetto contiene» o l'archivio locale.");
     if (!more && tid && rows.length === 1) openTicket(rows[0].id, rows[0]);
     if (!more && tid && !rows.length) S.notices.push(`Il ticket ${ticketNumber(tid)} non risulta tra quelli che puoi vedere in Touch (o il numero è errato).`);
     archivedMap(rows.map((r) => r.id))
@@ -591,7 +643,17 @@ function renderResults() {
   // avvisi, lavori in corso, errori
   if (S.job) el.appendChild(jobBox());
   if (S.tab === "results") {
-    for (const n of S.notices) el.appendChild(h("div", { class: "notice" }, n));
+    for (const n of S.notices) {
+      if (n && typeof n === "object" && n.text) {
+        el.appendChild(
+          h("div", { class: "notice", style: { display: "flex", gap: "8px", alignItems: "center", justifyContent: "space-between", flexWrap: "wrap" } },
+            h("span", { style: { flex: "1", minWidth: "200px" } }, n.text),
+            n.action ? h("button", { class: "btn btn-small", onclick: n.action }, n.actionLabel || "Riprova") : null)
+        );
+      } else {
+        el.appendChild(h("div", { class: "notice" }, n));
+      }
+    }
     if (S.error) {
       const auth = S.error instanceof AuthError;
       el.appendChild(h("div", { class: "err-box" },
@@ -756,12 +818,8 @@ function updateJob() {
 /** Tutte le righe della ricerca corrente (a pagine), fino a max */
 async function fetchAllRows(max, job) {
   const out = [];
-  const f = S.filters;
-  const tid = ticketIdFrom(f.text);
-  const tr = f.text && !tid ? ruleFor(DEF.text, S.calib) : null;
-  const sig = tr ? `${tr.property}|${tr.op}|${tr.extKey || ""}` : null;
-  const eff = tr && S.caps.fullTextBroken === sig && tr.source !== "appreso da Touch" ? fallbackToSubject(f) : f;
-  const conditions = buildConditions(eff, S.calib);
+  const f = S.activeEffectiveFilters || (isUnconstrained(S.filters) ? { ...S.filters, statuses: OPEN_STATUS_IDS } : S.filters);
+  const conditions = buildConditions(f, S.calib);
   const size = 200;
   for (let page = 1; out.length < max; page++) {
     if (job && job.cancelled) break;
@@ -914,6 +972,15 @@ async function init() {
   renderSidebar(ctx);
   renderResults();
 
+  const onSearchInput = debounce(() => {
+    const v = $("#q").value.trim();
+    if (v !== S.filters.text) {
+      S.filters.text = v;
+      if (S.tab !== "results" && S.tab !== "archive") S.tab = "results";
+      filtersChanged(true);
+    }
+  }, 550);
+  $("#q").addEventListener("input", onSearchInput);
   $("#searchForm").addEventListener("submit", (e) => {
     e.preventDefault();
     S.filters.text = $("#q").value.trim();

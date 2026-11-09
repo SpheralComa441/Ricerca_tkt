@@ -101,18 +101,24 @@ def matches(t, c):
     p, op, v = c.get("property"), c.get("op"), str(c.get("value", ""))
     if c.get("id") == "Domain":
         return True
+    if c.get("extKey") == "MODIFIEDTICKET":
+        return str(t.get("OwnerUserID") or "") in v.split("|")
     if p == "FullText":
         hay = (t["Subject"] + " " + t["Problem"]).lower()
         return all(w in hay for w in v.lower().split())
+    if p == "CLASSCLI.TranslatedDescription":
+        p = "CLASSCLI"
     if p not in t and p != "AssignedUserOrGroupID":
         raise ValueError(f"Proprietà sconosciuta: {p}")
     cur = t.get(p if p != "AssignedUserOrGroupID" else "AssignedUserID")
     if isinstance(cur, datetime):
         m = re.search(r"Date\((\d+)\)", v)
         dv = datetime.fromtimestamp(int(m.group(1)) / 1000) if m else datetime.fromisoformat(v[:19])
-        return cur >= dv if op == "ge" else cur <= dv
+        return cur >= dv if op in ("ge", "gt") else cur <= dv
     if op == "in":
-        return str(cur) in v.split("|")
+        if "|" in v or p in ("TicketStatusID", "TicketTypeID", "TicketPriorityID", "OwnerUserGroupID", "AssignedUserOrGroupID", "OwnerUserID", "AccountID", "ContactID", "CTITM"):
+            return str(cur) in v.split("|")
+        return v.lower() in str(cur).lower()
     if op == "eq":
         return str(cur) == v
     if op in ("like", "ct"):
@@ -132,8 +138,8 @@ LIST_CFG = (
     'Ext.define("Mock.Incidents",{store:{proxy:{url:"/HDAPortal/WSCView/ListData/Incidents"},aliasExpressionMapping:'
     + json.dumps(INC_MAP)
     + ',"ViewID":"Default"},items:['
-    '{id:"X_UC_filter_Default_Subject",itemId:"Subject","isFilter":true,"filterOperator":"like",xtype:"textfield",fieldLabel:"Subject",name:"Subject"},'
-    '{id:"X_UC_filter_Default_FullText",itemId:"FullText","isFilter":true,"filterOperator":"like",xtype:"textfield",fieldLabel:"Full text",name:"FullText"}'
+    '{id:"X_UC_filter_Default_Subject",itemId:"Subject","isFilter":true,"filterOperator":"in",xtype:"textfield",fieldLabel:"Subject",name:"Subject"},'
+    '{id:"X_UC_filter_Default_FullText",itemId:"FullText","isFilter":true,"filterOperator":"eq","filterExtensionKey":"INCLUDECONVERSATIONITEM",xtype:"textfield",fieldLabel:"Full text",name:"FullText"}'
     "]});"
 )
 
