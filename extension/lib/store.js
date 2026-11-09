@@ -63,11 +63,27 @@ export function reviveRow(o) {
 
 export async function saveTicket(full) {
   const row = slimRow(full.row) || { id: full.id };
-  const text = timelineText(full.timeline, `${full.id} ${row.subject || ""} ${row.account || ""} ${row.contact || ""} ${row.ownerGroup || ""} ${row.assigned || ""} ${row.catalog || ""}`);
+  const attachments = (full.attachments || []).map((a) => ({
+    ...a,
+    date: a.date instanceof Date ? a.date.getTime() : a.date || null,
+  }));
+  const attNames = attachments.map((a) => `${a.fileName || ""} ${a.description || ""}`).join(" ");
+  const text = timelineText(
+    full.timeline,
+    `${full.id} ${row.subject || ""} ${row.account || ""} ${row.contact || ""} ${row.ownerGroup || ""} ${row.assigned || ""} ${row.catalog || ""} ${attNames}`,
+  );
   const rec = {
     id: full.id,
     row,
-    timeline: full.timeline.map((e) => ({ ...e, date: e.date ? e.date.getTime() : null })),
+    attachments,
+    timeline: full.timeline.map((e) => ({
+      ...e,
+      date: e.date ? e.date.getTime() : null,
+      attachmentItems: (e.attachmentItems || []).map((a) => ({
+        ...a,
+        date: a.date instanceof Date ? a.date.getTime() : a.date || null,
+      })),
+    })),
     text: norm(text),
     savedAt: Date.now(),
     lastChange: row.lastChange || null,
@@ -79,7 +95,17 @@ export async function saveTicket(full) {
 export async function getTicket(id) {
   const rec = await tx("tickets", "readonly", (s) => reqP(s.get(id)));
   if (!rec) return null;
-  return { ...rec, row: reviveRow(rec.row), timeline: rec.timeline.map((e) => ({ ...e, date: e.date ? new Date(e.date) : null })) };
+  const reviveAtt = (a) => ({ ...a, date: typeof a.date === "number" ? new Date(a.date) : a.date || null });
+  return {
+    ...rec,
+    row: reviveRow(rec.row),
+    attachments: (rec.attachments || []).map(reviveAtt),
+    timeline: rec.timeline.map((e) => ({
+      ...e,
+      date: e.date ? new Date(e.date) : null,
+      attachmentItems: (e.attachmentItems || []).map(reviveAtt),
+    })),
+  };
 }
 
 export async function archiveInfo() {

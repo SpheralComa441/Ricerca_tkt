@@ -459,6 +459,7 @@ export function buildArTicket({ id, row = null, detail = null } = {}) {
   }
 
   const notes = ["Ticket storico dal Vecchio Cruscotto (Area Riservata Zucchetti)."];
+  const attachments = Array.isArray(detail && detail.attachments) ? detail.attachments : [];
   return {
     id: cleanId,
     source: "ar",
@@ -466,6 +467,7 @@ export function buildArTicket({ id, row = null, detail = null } = {}) {
     row: r,
     ticket: null,
     items: [],
+    attachments,
     timeline,
     notes,
     extraFacts,

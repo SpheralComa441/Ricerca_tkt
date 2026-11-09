@@ -238,6 +238,30 @@
       }
     }
 
+    const attachments = [];
+    const seenAtt = new Set();
+    for (const d of allDocs) {
+      for (const a of d.querySelectorAll("a[href]")) {
+        const href = (a.getAttribute("href") || "").trim();
+        if (!href || /^javascript:|^#/i.test(href)) continue;
+        const text = (a.textContent || a.getAttribute("title") || "").trim();
+        if (
+          /\.(pdf|zip|7z|rar|xlsx?|csv|docx?|txt|log|xml|json|png|jpe?g|gif|bmp|tif|eml|msg|p7m)(\b|$)/i.test(href) ||
+          /\.(pdf|zip|7z|rar|xlsx?|csv|docx?|txt|log|xml|json|png|jpe?g|gif|bmp|tif|eml|msg|p7m)(\b|$)/i.test(text) ||
+          /download|allegat|attach/i.test(href)
+        ) {
+          const fullHref = a.href || href;
+          if (seenAtt.has(fullHref)) continue;
+          seenAtt.add(fullHref);
+          attachments.push({
+            id: `ar-att-${attachments.length + 1}`,
+            fileName: text || href.split("/").pop() || `Allegato ${attachments.length + 1}`,
+            url: fullHref,
+          });
+        }
+      }
+    }
+
     const bodyText = allDocs
       .map((d) => (d.body ? d.body.innerText || d.body.textContent || "" : ""))
       .join("\n")
@@ -251,6 +275,7 @@
       fields,
       texts,
       tables,
+      attachments,
       bodyText,
     };
   }

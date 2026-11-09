@@ -1008,7 +1008,7 @@ async function openTicket(id, row, { force = false } = {}) {
       /* archivio non disponibile */
     }
     if (my !== openSeq) return;
-    if (rec) renderReader(ctx, { id: rec.id, row: rec.row, ticket: null, items: [], timeline: rec.timeline, notes: [] }, { fromArchive: rec.savedAt });
+    if (rec) renderReader(ctx, { id: rec.id, row: rec.row, ticket: null, items: [], attachments: rec.attachments || [], timeline: rec.timeline, notes: [] }, { fromArchive: rec.savedAt });
     else renderReaderError(ctx, id, row, e);
   }
 }

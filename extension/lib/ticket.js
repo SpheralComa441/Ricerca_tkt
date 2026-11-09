@@ -1,16 +1,44 @@
-// Ticket completo: dati, richiesta, conversazione, soluzione → una sola timeline ordinata.
+// Ticket completo: dati, richiesta, conversazione, soluzione, allegati → una sola timeline ordinata.
 
 import { parseMsDate, norm, ticketNumber, ticketIdVariants, isLegacyTicketNumber } from "./util.js";
 import { htmlToText, cleanText, isProbablyHtml, unescapeIfEscapedHtml } from "./richtext.js";
+import { guessMimeFromName } from "./hda.js";
 
 // Colonne della conversazione (nomi verificati dalla configurazione "Storico conversazioni" + TextHTML verificato via Projection)
 export const CONV_COLUMNS = ["ID", "Text", "TextHTML", "FirstUpdate", "UserID", "User.FullName", "ContactID", "Contact.FirstName", "Contact.LastName", "Account.CompanyName", "SiteVisible", "MSGDIR", "TicketConversationItemStat.AttachmentCount"];
 // Alias della vista ConversationHistory di ListData (verificati)
 export const CONV_ALIAS = { c0: "Account.CompanyName", c1: "AccountID", c2: "Contact.FirstName", c3: "Contact.LastName", c4: "ContactID", c5: "FirstUpdate", c6: "FROMMAJINC", c7: "ID", c8: "MSGDIR", c9: "OTHERDEPT", c10: "REMOTETKT", c11: "SiteVisible", c12: "Text", c13: "TicketConversationItemStat.AttachmentCount", c14: "User.FullName", c15: "UserID" };
+// Alias della vista Default di ListData/Attachments (verificati da List_Attachments_Default)
+export const ATTACH_ALIAS = { c0: "ContentType", c1: "Description", c2: "FileName", c3: "FirstUpdateUser.FullName", c4: "ID", c5: "LastUpdate", c6: "ParentObject", c7: "ParentObjectID" };
 // Campi del ticket (nomi verificati nei dati del dettaglio)
 export const TICKET_COLUMNS = ["ID", "Subject", "ProblemHTML", "Problem", "SolutionHTML", "Solution", "Date", "ClosureDate", "LastChange", "TicketStatusID", "TicketTypeID", "TicketPriorityID", "AccountID", "ContactID", "OwnerUserGroupID", "OwnerUserID", "AssignedUserID", "AssignedUserGroupID", "CTITMDESC", "CLASSCLI", "TKMAILTO", "TicketSourceID", "ParentTicketID", "Tag"];
 
 const LIST_TRUNC = 500; // l'elenco della conversazione tronca il testo a 500 caratteri
+
+/** Riga grezza di ListData/Attachments → allegato normalizzato */
+export function normalizeAttachment(r, ticketId = "") {
+  if (!r) return null;
+  const id = String(r.ID || r.c4 || r.id || "").trim();
+  if (!id) return null;
+  const fileName = String(r.FileName || r.c2 || r.fileName || r.Description || r.c1 || id).trim();
+  const desc = String(r.Description || r.c1 || r.description || "").trim();
+  const contentType = String(r.ContentType || r.c0 || r.contentType || guessMimeFromName(fileName)).trim();
+  const author = String(r["FirstUpdateUser.FullName"] || r.c3 || r.author || "").trim();
+  const date = parseMsDate(r.LastUpdate || r.c5 || r.date);
+  const parentObject = String(r.ParentObject || r.c6 || r.parentObject || "Incident").trim();
+  const parentObjectId = String(r.ParentObjectID || r.c7 || r.parentObjectId || ticketId || "").trim();
+  return {
+    id,
+    fileName,
+    description: desc && desc !== fileName ? desc : "",
+    contentType,
+    author,
+    date,
+    parentObject,
+    parentObjectId,
+    url: r.url || "",
+  };
+}
 
 /** Riga grezza della conversazione (Projection o ListData) → messaggio normalizzato */
 export function normalizeItem(r) {
@@ -54,14 +82,27 @@ function head(s, n = 160) {
 /**
  * Costruisce la timeline: richiesta iniziale → messaggi in ordine di data → soluzione.
  * - toglie il messaggio di creazione automatico se ripete la richiesta;
- * - toglie i messaggi identici ripetuti.
+ * - toglie i messaggi identici ripetuti;
+ * - collega gli allegati ai singoli messaggi (`attachmentItems`) e alla richiesta iniziale.
  */
-export function buildTimeline({ ticket = {}, row = {}, items = [] }) {
+export function buildTimeline({ ticket = {}, row = {}, items = [], attachments = [] }) {
   const out = [];
+  const normAtts = (attachments || []).map((a) => (a && a.fileName ? a : normalizeAttachment(a, ticket.ID || row.id))).filter(Boolean);
+  const byParentId = new Map();
+  const incidentAtts = [];
+  for (const a of normAtts) {
+    if (a.parentObject === "TicketConversationItem" && a.parentObjectId) {
+      if (!byParentId.has(a.parentObjectId)) byParentId.set(a.parentObjectId, []);
+      byParentId.get(a.parentObjectId).push(a);
+    } else {
+      incidentAtts.push(a);
+    }
+  }
+
   const problemHtml = ticket.ProblemHTML || "";
   const problemText = problemHtml ? htmlToText(problemHtml) : cleanText(ticket.Problem || row.problem || "");
   const reqDate = parseMsDate(ticket.Date) || row.date || null;
-  if (problemText) {
+  if (problemText || incidentAtts.length) {
     out.push({
       kind: "request",
       date: reqDate,
@@ -70,6 +111,8 @@ export function buildTimeline({ ticket = {}, row = {}, items = [] }) {
       account: row.account || "",
       html: problemHtml || null,
       text: problemText,
+      attachments: incidentAtts.length,
+      attachmentItems: incidentAtts,
       truncated: !problemHtml && !ticket.Problem && String(row.problem || "").length >= LIST_TRUNC,
     });
   }
@@ -77,15 +120,21 @@ export function buildTimeline({ ticket = {}, row = {}, items = [] }) {
   const ph = head(problemText);
   const msgs = items
     .map((it) => (it && it.role ? it : normalizeItem(it)))
-    .filter((m) => m.text || m.attachments)
+    .filter((m) => m.text || m.attachments || (m.id && byParentId.has(m.id)))
     .sort((a, b) => (a.date ? a.date.getTime() : 0) - (b.date ? b.date.getTime() : 0));
   for (const m of msgs) {
     const h = head(m.text);
-    if (ph && h && (m.creation || m.role === "system") && (ph.startsWith(h.slice(0, 120)) || h.startsWith(ph.slice(0, 120)))) continue;
+    const msgAtts = (m.id && byParentId.get(m.id)) || m.attachmentItems || [];
+    if (ph && h && !msgAtts.length && (m.creation || m.role === "system") && (ph.startsWith(h.slice(0, 120)) || h.startsWith(ph.slice(0, 120)))) continue;
     const key = h + "|" + (m.date ? Math.round(m.date.getTime() / 60000) : "");
-    if (seen.has(key)) continue;
+    if (seen.has(key) && !msgAtts.length) continue;
     seen.add(key);
-    out.push({ kind: "message", ...m });
+    out.push({
+      kind: "message",
+      ...m,
+      attachments: Math.max(Number(m.attachments) || 0, msgAtts.length),
+      attachmentItems: msgAtts,
+    });
   }
   const solHtml = ticket.SolutionHTML || "";
   const solText = solHtml ? htmlToText(solHtml) : cleanText(ticket.Solution || "");
@@ -195,24 +244,56 @@ export async function loadTicket(hda, id, { row = null, rowReader, conditionsFor
   }
   if (!ticket) notes.push("Testo completo della richiesta non disponibile: mostro l'anteprima dell'elenco.");
 
-  // 3. conversazione completa usando l'ID effettivo risolto su HDA TOUCH
-  let items = null;
+  // 3. conversazione completa e allegati in parallelo usando l'ID effettivo risolto su HDA TOUCH
   const cond = [{ property: "TicketID", op: "eq", value: resolvedId }];
-  if (caps.convVia !== "list") {
-    try {
-      const rows = await hda.projection("TicketConversationItem", cond, CONV_COLUMNS, 1000);
-      items = rows.map(normalizeItem);
-      caps.convVia = "projection";
-    } catch (e) {
-      log("conversazione via Projection: " + e.message);
+  const attPromise =
+    typeof hda.listAttachments === "function"
+      ? hda
+          .listAttachments(resolvedId)
+          .then((rawAtts) => (rawAtts || []).map((r) => normalizeAttachment(r, resolvedId)).filter(Boolean))
+          .catch((e) => {
+            log("allegati: " + e.message);
+            return [];
+          })
+      : Promise.resolve([]);
+
+  const convPromise = (async () => {
+    let convItems = null;
+    if (caps.convVia !== "list") {
+      try {
+        const rows = await hda.projection("TicketConversationItem", cond, CONV_COLUMNS, 1000);
+        convItems = rows.map(normalizeItem);
+        caps.convVia = "projection";
+      } catch (e) {
+        log("conversazione via Projection: " + e.message);
+      }
     }
-  }
-  if (!items) {
-    const { rows } = await hda.listData("TicketConversationItems", { viewId: "ConversationHistory", conditions: cond, limit: 500, sort: [{ property: "c5", direction: "ASC" }] });
-    items = rows.map((r) => normalizeItem({ ...Object.fromEntries(Object.entries(CONV_ALIAS).map(([a, e]) => [e, r[a]])), _fromList: true }));
-    caps.convVia = "list";
-    if (items.some((m) => m.truncated)) notes.push("Alcuni messaggi lunghi sono troncati a 500 caratteri (limite dell'elenco di Touch).");
-  }
-  const timeline = buildTimeline({ ticket: ticket || {}, row: row || {}, items });
-  return { id: resolvedId, row, ticket, items, timeline, notes, arUrl: (row && row.arUrl) || (arRowSeed && arRowSeed.arUrl) || "" };
+    if (!convItems) {
+      const { rows } = await hda.listData("TicketConversationItems", {
+        viewId: "ConversationHistory",
+        conditions: cond,
+        limit: 500,
+        sort: [{ property: "c5", direction: "ASC" }],
+      });
+      convItems = rows.map((r) =>
+        normalizeItem({ ...Object.fromEntries(Object.entries(CONV_ALIAS).map(([a, e]) => [e, r[a]])), _fromList: true }),
+      );
+      caps.convVia = "list";
+      if (convItems.some((m) => m.truncated)) notes.push("Alcuni messaggi lunghi sono troncati a 500 caratteri (limite dell'elenco di Touch).");
+    }
+    return convItems;
+  })();
+
+  const [items, attachments] = await Promise.all([convPromise, attPromise]);
+  const timeline = buildTimeline({ ticket: ticket || {}, row: row || {}, items, attachments });
+  return {
+    id: resolvedId,
+    row,
+    ticket,
+    items,
+    attachments,
+    timeline,
+    notes,
+    arUrl: (row && row.arUrl) || (arRowSeed && arRowSeed.arUrl) || "",
+  };
 }

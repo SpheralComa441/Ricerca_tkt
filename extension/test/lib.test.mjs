@@ -9,9 +9,9 @@ import { makeRowReader } from "../lib/rows.js";
 import { buildConditions, emptyFilters, formatDateValue, learnFromConditions, ruleFor, DEF, describeFilters, filterPayload, pickCalibrationSample, isUnconstrained, hasNarrowingFilter, primaryTerm } from "../lib/filters.js";
 import { htmlToText, splitQuoted, linkifyParts, decodeEntities, unescapeIfEscapedHtml, cleanText } from "../lib/richtext.js";
 import { makeTransport, AuthError, HdaError, formBody } from "../lib/transport.js";
-import { makeHda } from "../lib/hda.js";
+import { makeHda, parsePreviewAttachmentResponse, guessMimeFromName } from "../lib/hda.js";
 import { buildArQuery, parseArResponse, buildArTicket, extractMcidFromHtml, splitArTesti } from "../lib/ar.js";
-import { loadTicket } from "../lib/ticket.js";
+import { loadTicket, normalizeAttachment } from "../lib/ticket.js";
 
 // ---------------------------------------------------------------- util
 
@@ -420,4 +420,60 @@ test("loadTicket: risolve i ticket a 7 cifre senza Z su HDA TOUCH (es. 9042633) 
   assert.equal(full.timeline.length, 3);
 });
 
+test("allegati: normalizeAttachment, parsePreviewAttachmentResponse e hda.listAttachments / previewAttachment", async () => {
+  const rawRow = {
+    c7: "11944440Z",
+    c3: "Customer Portal",
+    c4: "A7593422Z",
+    c0: "application/pdf",
+    c5: "/Date(1794228998220)/",
+    c1: "retribuzione lavoratore a chiamata.pdf",
+    c6: "Incident",
+    c2: "retribuzione lavoratore a chiamata.pdf",
+  };
+  const att = normalizeAttachment(rawRow, "11944440Z");
+  assert.equal(att.id, "A7593422Z");
+  assert.equal(att.fileName, "retribuzione lavoratore a chiamata.pdf");
+  assert.equal(att.contentType, "application/pdf");
+  assert.equal(att.author, "Customer Portal");
+  assert.equal(att.parentObject, "Incident");
+  assert.equal(att.parentObjectId, "11944440Z");
+  assert.equal(att.date.getTime(), 1794228998220);
+  assert.equal(guessMimeFromName("stampa.csv"), "text/csv");
 
+  // Risposta reale Ext.NET di /WSCView/PreviewAttachment
+  const extNetScript =
+    'Ext.ComponentManager.onAvailable("window-3813",function(){Ext.getCmp("window-3813").add({bin:[{"ConfigurationHolder":true,"model":"{\\"contentType\\":\\"application/pdf\\",\\"content\\":\\"JVBERi0xLjQK\\",\\"fileName\\":\\"retribuzione lavoratore a chiamata.pdf\\"}"}]});});';
+  const parsed = parsePreviewAttachmentResponse(extNetScript);
+  assert.deepEqual(parsed, {
+    contentType: "application/pdf",
+    content: "JVBERi0xLjQK",
+    fileName: "retribuzione lavoratore a chiamata.pdf",
+  });
+
+  const f = fakeFetch((url) => {
+    if (url.includes("/WSCView/ListData/Attachments")) {
+      return { body: JSON.stringify({ success: true, data: [rawRow], total: 1 }) };
+    }
+    if (url.includes("/WSCView/PreviewAttachment")) {
+      return { type: "application/javascript", body: extNetScript };
+    }
+    return { body: JSON.stringify({ success: true, data: [] }) };
+  });
+  const hda = makeHda(makeTransport({ base: "https://x/HDAPortal", fetch: f }));
+  const list = await hda.listAttachments("11944440Z");
+  assert.equal(list.length, 1);
+  const filterSent = JSON.parse(new URLSearchParams(f.calls[0].init.body).get("filter"));
+  assert.equal(filterSent.conditions[0].property, "ParentObjectID");
+  assert.equal(filterSent.conditions[0].value, "11944440Z");
+  assert.equal(filterSent.conditions[0].extKey, "EXTEND_TICKET_ATTACHMENT");
+
+  const prev = await hda.previewAttachment("A7593422Z", {
+    parentObject: "Incident",
+    parentObjectId: "11944440Z",
+    contentType: "application/pdf",
+    fileName: "retribuzione lavoratore a chiamata.pdf",
+  });
+  assert.equal(prev.content, "JVBERi0xLjQK");
+  assert.equal(prev.fileName, "retribuzione lavoratore a chiamata.pdf");
+});

@@ -1,12 +1,441 @@
-// Lettore del ticket: intestazione, scheda dei dati, timeline unica della conversazione.
+// Lettore del ticket: intestazione, scheda dei dati, allegati (anteprima e scarico), timeline unica della conversazione.
 
 import { h, clear, icon, highlight, toast } from "./dom.js";
-import { fmtDateTime, fmtDate, ticketNumber, tokens, isLegacyTicketNumber } from "../lib/util.js";
+import { fmtDateTime, fmtDate, ticketNumber, tokens, isLegacyTicketNumber, sleep } from "../lib/util.js";
 import { statusInfo } from "../lib/statuses.js";
 import { sanitizeHtml, textToFragment, splitQuoted, htmlToText } from "../lib/richtext.js";
 import { timelineText } from "../lib/ticket.js";
+import { guessMimeFromName } from "../lib/hda.js";
 
 const ROLE_LABEL = { customer: "Cliente", operator: "Operatore", system: "Sistema" };
+
+// Cache in memoria degli allegati già scaricati nella sessione (evita di riscaricare se si fa prima Visualizza e poi Scarica)
+const attCache = new Map();
+let activePreviewUrl = null;
+
+function revokePreviewUrl() {
+  if (activePreviewUrl) {
+    try {
+      URL.revokeObjectURL(activePreviewUrl);
+    } catch {
+      /* */
+    }
+    activePreviewUrl = null;
+  }
+}
+
+function b64ToBytes(b64) {
+  const clean = String(b64 || "").replace(/\s+/g, "");
+  const bin = atob(clean);
+  const bytes = new Uint8Array(bin.length);
+  for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
+  return bytes;
+}
+
+function fmtBytes(n) {
+  const b = Number(n) || 0;
+  if (b < 1024) return `${b} B`;
+  if (b < 1024 * 1024) return `${(b / 1024).toFixed(1).replace(".", ",")} KB`;
+  return `${(b / (1024 * 1024)).toFixed(2).replace(".", ",")} MB`;
+}
+
+function fileExtLabel(att) {
+  const name = String((att && att.fileName) || "").trim();
+  const m = /\.([A-Za-z0-9]{1,6})$/.exec(name);
+  if (m) return m[1].toUpperCase();
+  const ct = String((att && att.contentType) || "").toLowerCase();
+  if (ct.includes("pdf")) return "PDF";
+  if (ct.includes("image/")) return "IMG";
+  if (ct.includes("csv")) return "CSV";
+  if (ct.includes("excel") || ct.includes("spreadsheet")) return "XLS";
+  if (ct.includes("word")) return "DOC";
+  if (ct.includes("text/")) return "TXT";
+  return "FILE";
+}
+
+function fileExtClass(ext) {
+  const e = String(ext || "").toLowerCase();
+  if (e === "pdf") return "ext-pdf";
+  if (["png", "jpg", "jpeg", "gif", "webp", "bmp", "svg", "tif", "tiff", "img"].includes(e)) return "ext-img";
+  if (["xls", "xlsx", "xlsm", "csv"].includes(e)) return "ext-xls";
+  if (["zip", "rar", "7z", "tar", "gz", "tgz"].includes(e)) return "ext-zip";
+  if (["doc", "docx", "odt", "rtf"].includes(e)) return "ext-doc";
+  return "ext-gen";
+}
+
+async function fetchAttachmentData(ctx, att, ticketId) {
+  const cacheKey = `${ticketId || ""}:${att.id}`;
+  if (attCache.has(cacheKey)) return attCache.get(cacheKey);
+  if (!ctx || !ctx.hda || typeof ctx.hda.previewAttachment !== "function") {
+    throw new Error("Connessione a HDA TOUCH non disponibile per scaricare l'allegato");
+  }
+  const res = await ctx.hda.previewAttachment(att.id, {
+    parentObject: att.parentObject || "Incident",
+    parentObjectId: att.parentObjectId || ticketId || "",
+    contentType: att.contentType || "",
+    fileName: att.fileName || "",
+  });
+  const bytes = b64ToBytes(res.content);
+  const fileName = res.fileName || att.fileName || `${att.id}.bin`;
+  const contentType = res.contentType || att.contentType || guessMimeFromName(fileName);
+  const item = { bytes, fileName, contentType };
+  if (attCache.size >= 12) {
+    const oldest = attCache.keys().next().value;
+    if (oldest) attCache.delete(oldest);
+  }
+  attCache.set(cacheKey, item);
+  return item;
+}
+
+function triggerBlobDownload(bytes, fileName, contentType) {
+  const blob = new Blob([bytes], { type: contentType || "application/octet-stream" });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement("a");
+  a.href = url;
+  a.download = fileName || "allegato";
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
+  setTimeout(() => {
+    try {
+      URL.revokeObjectURL(url);
+    } catch {
+      /* */
+    }
+  }, 45000);
+}
+
+async function downloadAttachment(ctx, att, ticketId, btn = null) {
+  if (!att) return;
+  if (att.url) {
+    window.open(att.url, "_blank", "noopener");
+    return;
+  }
+  const origDisabled = btn ? btn.disabled : false;
+  if (btn) btn.disabled = true;
+  try {
+    const data = await fetchAttachmentData(ctx, att, ticketId);
+    triggerBlobDownload(data.bytes, data.fileName, data.contentType);
+    toast(`Scaricato: ${data.fileName}`, "ok", 2200);
+  } catch (e) {
+    ctx.log && ctx.log(`allegato ${att.id}: ${e.message}`);
+    toast(`Errore scaricamento allegato: ${e.message}`, "err", 4000);
+  } finally {
+    if (btn) btn.disabled = origDisabled;
+  }
+}
+
+async function downloadAllAttachments(ctx, attachments, ticketId, btn = null) {
+  if (!attachments || !attachments.length) return;
+  if (btn) btn.disabled = true;
+  try {
+    for (let i = 0; i < attachments.length; i++) {
+      await downloadAttachment(ctx, attachments[i], ticketId);
+      if (i + 1 < attachments.length) await sleep(180);
+    }
+  } finally {
+    if (btn) btn.disabled = false;
+  }
+}
+
+function parseCsvPreview(text, maxRows = 250) {
+  const lines = String(text || "").split(/\r?\n/).filter((l) => l.trim().length > 0);
+  if (!lines.length) return null;
+  const first = lines[0];
+  const sep = (first.match(/;/g) || []).length >= (first.match(/,/g) || []).length ? ";" : ",";
+  const rows = [];
+  for (let i = 0; i < Math.min(lines.length, maxRows); i++) {
+    const line = lines[i];
+    const cells = [];
+    let cur = "";
+    let inQ = false;
+    for (let c = 0; c < line.length; c++) {
+      const ch = line[c];
+      if (ch === '"') {
+        if (inQ && line[c + 1] === '"') {
+          cur += '"';
+          c++;
+        } else {
+          inQ = !inQ;
+        }
+      } else if (ch === sep && !inQ) {
+        cells.push(cur.trim());
+        cur = "";
+      } else {
+        cur += ch;
+      }
+    }
+    cells.push(cur.trim());
+    rows.push(cells);
+  }
+  return { rows, totalLines: lines.length };
+}
+
+async function openAttachmentPreview(ctx, att, ticketId) {
+  if (!att) return;
+  if (att.url && !ctx.hda) {
+    window.open(att.url, "_blank", "noopener");
+    return;
+  }
+  const dlg = document.getElementById("attDlg");
+  if (!dlg) {
+    await downloadAttachment(ctx, att, ticketId);
+    return;
+  }
+  revokePreviewUrl();
+  clear(dlg);
+
+  const ext = fileExtLabel(att);
+  const sizeSpan = h("span", { class: "hint" });
+  const openTabBtn = h(
+    "button",
+    { class: "btn btn-small", hidden: true, title: "Apri il file a schermo intero in una nuova scheda" },
+    icon("external"),
+    "Apri in scheda",
+  );
+  const dlBtn = h(
+    "button",
+    { class: "btn btn-small btn-primary", onclick: () => downloadAttachment(ctx, att, ticketId, dlBtn) },
+    icon("download"),
+    "Scarica",
+  );
+  const closeBtn = h(
+    "button",
+    {
+      class: "btn btn-icon",
+      title: "Chiudi (Esc)",
+      onclick: () => {
+        revokePreviewUrl();
+        dlg.close();
+      },
+    },
+    icon("close"),
+  );
+
+  const viewer = h(
+    "div",
+    { class: "dlg-b att-viewer" },
+    h("div", { class: "loading" }, h("span", { class: "spinner" }), `Carico ${att.fileName || "allegato"}…`),
+  );
+
+  dlg.appendChild(
+    h(
+      "div",
+      { class: "dlg-h att-dlg-h" },
+      h("span", { class: `att-ext ${fileExtClass(ext)}` }, ext),
+      h("h2", { class: "att-dlg-title", title: att.fileName || "" }, att.fileName || att.id),
+      sizeSpan,
+      h("div", { class: "att-dlg-actions" }, openTabBtn, dlBtn, closeBtn),
+    ),
+  );
+  dlg.appendChild(viewer);
+  dlg.onclose = () => revokePreviewUrl();
+  if (!dlg.open) dlg.showModal();
+
+  try {
+    const data = await fetchAttachmentData(ctx, att, ticketId);
+    sizeSpan.textContent = fmtBytes(data.bytes.byteLength);
+    clear(viewer);
+
+    const mime = String(data.contentType || guessMimeFromName(data.fileName)).toLowerCase();
+    const fname = String(data.fileName || "").toLowerCase();
+    const isPdf = mime === "application/pdf" || fname.endsWith(".pdf");
+    const isImage = mime.startsWith("image/") || /\.(png|jpe?g|gif|webp|bmp|svg)$/.test(fname);
+    const isCsv = mime === "text/csv" || fname.endsWith(".csv");
+    const isHtml = mime === "text/html" || /\.html?$/.test(fname);
+    const isText =
+      mime.startsWith("text/") ||
+      /json|xml|yaml|yml/.test(mime) ||
+      /\.(txt|log|xml|json|sql|ini|cfg|md|properties|inf|rpt)$/.test(fname);
+    const isVideo = ["video/mp4", "video/webm", "video/ogg"].includes(mime) || /\.(mp4|webm|ogg)$/.test(fname);
+
+    const blobType = isPdf ? "application/pdf" : data.contentType || "application/octet-stream";
+    activePreviewUrl = URL.createObjectURL(new Blob([data.bytes], { type: blobType }));
+    openTabBtn.hidden = false;
+    openTabBtn.onclick = () => window.open(activePreviewUrl, "_blank", "noopener");
+
+    if (isPdf) {
+      viewer.appendChild(
+        h("iframe", {
+          class: "att-frame",
+          src: activePreviewUrl,
+          title: data.fileName || "Anteprima PDF",
+        }),
+      );
+    } else if (isImage) {
+      viewer.appendChild(
+        h(
+          "div",
+          { class: "att-img-wrap" },
+          h("img", { class: "att-img", src: activePreviewUrl, alt: data.fileName || "Immagine allegata" }),
+        ),
+      );
+    } else if (isCsv) {
+      const text = new TextDecoder("utf-8", { fatal: false }).decode(data.bytes);
+      const parsed = parseCsvPreview(text, 250);
+      if (parsed && parsed.rows.length) {
+        const [headRow, ...bodyRows] = parsed.rows;
+        viewer.appendChild(
+          h(
+            "div",
+            { class: "att-table-wrap" },
+            h(
+              "table",
+              { class: "att-table" },
+              h("thead", null, h("tr", null, headRow.map((c) => h("th", null, c)))),
+              h("tbody", null, bodyRows.map((r) => h("tr", null, r.map((c) => h("td", null, c))))),
+            ),
+            parsed.totalLines > parsed.rows.length
+              ? h("div", { class: "hint", style: { padding: "8px 0" } }, `Mostrate le prime ${parsed.rows.length} righe su ${parsed.totalLines}. Scarica il file per aprirlo completo in Excel.`)
+              : null,
+          ),
+        );
+      } else {
+        viewer.appendChild(h("pre", { class: "att-pre" }, text));
+      }
+    } else if (isHtml) {
+      const html = new TextDecoder("utf-8", { fatal: false }).decode(data.bytes);
+      viewer.appendChild(h("div", { class: "att-html" }, sanitizeHtml(html)));
+    } else if (isText) {
+      const text = new TextDecoder("utf-8", { fatal: false }).decode(data.bytes);
+      const copyBtn = h(
+        "button",
+        {
+          class: "btn btn-small",
+          style: { justifySelf: "start" },
+          onclick: () => {
+            navigator.clipboard.writeText(text);
+            toast("Testo dell'allegato copiato", "ok", 1800);
+          },
+        },
+        icon("copy"),
+        "Copia testo",
+      );
+      viewer.appendChild(h("div", { class: "att-text-wrap" }, copyBtn, h("pre", { class: "att-pre" }, text)));
+    } else if (isVideo) {
+      viewer.appendChild(
+        h("video", { class: "att-video", controls: true, preload: "metadata", src: activePreviewUrl }),
+      );
+    } else {
+      viewer.appendChild(
+        h(
+          "div",
+          { class: "att-binary" },
+          h("span", { class: `att-ext ${fileExtClass(ext)}`, style: { fontSize: "15px", padding: "6px 12px" } }, ext),
+          h("h3", null, data.fileName),
+          h("div", { class: "hint" }, `Formato ${data.contentType || "binario"} · ${fmtBytes(data.bytes.byteLength)}`),
+          h(
+            "button",
+            {
+              class: "btn btn-primary",
+              style: { marginTop: "10px" },
+              onclick: () => triggerBlobDownload(data.bytes, data.fileName, data.contentType),
+            },
+            icon("download"),
+            "Scarica sul computer",
+          ),
+        ),
+      );
+    }
+  } catch (e) {
+    ctx.log && ctx.log(`anteprima allegato ${att.id}: ${e.message}`);
+    clear(viewer);
+    viewer.appendChild(
+      h(
+        "div",
+        { class: "err-box" },
+        "Impossibile caricare l'anteprima dell'allegato: " + e.message,
+        h(
+          "div",
+          { style: { display: "flex", gap: "8px", marginTop: "8px" } },
+          h("button", { class: "btn", onclick: () => openAttachmentPreview(ctx, att, ticketId) }, "Riprova"),
+          h("button", { class: "btn", onclick: () => ctx.openInTouch && ctx.openInTouch(ticketId) }, icon("external"), "Apri ticket in Touch"),
+        ),
+      ),
+    );
+  }
+}
+
+function attachmentsSection(ctx, attachments, ticketId) {
+  if (!attachments || !attachments.length) return null;
+  const dlAllBtn =
+    attachments.length > 1
+      ? h(
+          "button",
+          {
+            class: "btn btn-small",
+            title: "Scarica tutti gli allegati di questo ticket",
+            onclick: () => downloadAllAttachments(ctx, attachments, ticketId, dlAllBtn),
+          },
+          icon("download"),
+          `Scarica tutti (${attachments.length})`,
+        )
+      : null;
+
+  return h(
+    "section",
+    { class: "att-box", "aria-label": "Allegati del ticket" },
+    h(
+      "div",
+      { class: "att-head" },
+      h("span", { class: "att-head-title" }, icon("clip"), `Allegati (${attachments.length})`),
+      dlAllBtn,
+    ),
+    h(
+      "div",
+      { class: "att-list" },
+      attachments.map((att) => {
+        const ext = fileExtLabel(att);
+        const meta = [att.author, att.date ? fmtDateTime(att.date) : ""].filter(Boolean).join(" · ");
+        const dlBtn = h(
+          "button",
+          {
+            class: "btn btn-small",
+            title: "Scarica il file sul computer",
+            onclick: (ev) => {
+              ev.stopPropagation();
+              downloadAttachment(ctx, att, ticketId, dlBtn);
+            },
+          },
+          icon("download"),
+          "Scarica",
+        );
+        return h(
+          "div",
+          { class: "att-item" },
+          h("span", { class: `att-ext ${fileExtClass(ext)}` }, ext),
+          h(
+            "div",
+            {
+              class: "att-info",
+              title: "Clicca per visualizzare l'anteprima",
+              onclick: () => openAttachmentPreview(ctx, att, ticketId),
+            },
+            h("div", { class: "att-name" }, att.fileName || att.id),
+            meta || att.description
+              ? h("div", { class: "att-meta" }, [att.description, meta].filter(Boolean).join(" — "))
+              : null,
+          ),
+          h(
+            "div",
+            { class: "att-actions" },
+            h(
+              "button",
+              {
+                class: "btn btn-small",
+                title: "Visualizza l'allegato",
+                onclick: () => openAttachmentPreview(ctx, att, ticketId),
+              },
+              icon("eye"),
+              "Visualizza",
+            ),
+            dlBtn,
+          ),
+        );
+      }),
+    ),
+  );
+}
 
 function pill(statusId, text) {
   const s = statusInfo(statusId, text);
@@ -101,7 +530,57 @@ function bodyOf(entry) {
   return box;
 }
 
-function entryEl(e) {
+function messageAttachmentsEl(ctx, e, ticketId, allAttachments) {
+  const items =
+    (e.attachmentItems && e.attachmentItems.length ? e.attachmentItems : null) ||
+    (e.attachments && allAttachments && allAttachments.length === e.attachments ? allAttachments : null);
+  if (items && items.length) {
+    return h(
+      "div",
+      { class: "msg-f msg-atts" },
+      items.map((att) => {
+        const dlBtn = h(
+          "button",
+          {
+            class: "att-chip-btn",
+            title: `Scarica ${att.fileName || "allegato"}`,
+            onclick: (ev) => {
+              ev.stopPropagation();
+              downloadAttachment(ctx, att, ticketId, dlBtn);
+            },
+          },
+          icon("download"),
+        );
+        return h(
+          "div",
+          { class: "att-chip" },
+          h(
+            "button",
+            {
+              class: "att-chip-main",
+              title: `Visualizza ${att.fileName || "allegato"}`,
+              onclick: () => openAttachmentPreview(ctx, att, ticketId),
+            },
+            icon("clip"),
+            h("span", { class: "att-chip-name" }, att.fileName || att.id),
+          ),
+          dlBtn,
+        );
+      }),
+    );
+  }
+  if (e.attachments) {
+    return h(
+      "div",
+      { class: "msg-f" },
+      icon("clip"),
+      `${e.attachments} allegat${e.attachments === 1 ? "o" : "i"} (vedi riquadro Allegati in alto)`,
+    );
+  }
+  return null;
+}
+
+function entryEl(ctx, e, ticketId, allAttachments) {
   let cls = "msg " + (e.role || "operator");
   let role = ROLE_LABEL[e.role] || "Operatore";
   if (e.kind === "request") { cls += " request customer"; role = "Richiesta iniziale"; }
@@ -118,7 +597,7 @@ function entryEl(e) {
         h("span", { class: "at", title: e.date ? e.date.toLocaleString("it-IT") : "" }, fmtDateTime(e.date))),
       bodyOf(e),
       e.truncated ? h("div", { class: "trunc" }, "Testo troncato dal portale: aprilo in Touch per leggerlo tutto.") : null,
-      e.attachments ? h("div", { class: "msg-f" }, icon("clip"), `${e.attachments} allegat${e.attachments === 1 ? "o" : "i"} (si scaricano da Touch)`) : null));
+      messageAttachmentsEl(ctx, e, ticketId, allAttachments)));
 }
 
 export function renderReader(ctx, full, { fromArchive = null } = {}) {
@@ -128,11 +607,14 @@ export function renderReader(ctx, full, { fromArchive = null } = {}) {
   el.dataset.id = full.id;
   clear(el);
   const row = full.row || { id: full.id };
+  const attachments = full.attachments || [];
   el.appendChild(header(ctx, full.id, row, full));
 
   const body = h("div", { class: "rd-body" });
   el.appendChild(body);
   body.appendChild(facts(row, full.ticket, full.extraFacts));
+  const attBox = attachmentsSection(ctx, attachments, full.id);
+  if (attBox) body.appendChild(attBox);
   if (fromArchive) body.appendChild(h("div", { class: "rd-note" }, `Copia salvata nell'archivio locale il ${fmtDate(fromArchive)}: il portale non ha risposto.`));
   for (const n of full.notes || []) body.appendChild(h("div", { class: "rd-note" }, n));
 
@@ -148,7 +630,7 @@ export function renderReader(ctx, full, { fromArchive = null } = {}) {
     let list = entries.filter((e) => ui.showInternal || !e.internal);
     if (ui.newestFirst) list = list.slice().reverse();
     if (!list.length) tl.appendChild(h("div", { class: "empty-state" }, "Nessun messaggio."));
-    for (const e of list) tl.appendChild(entryEl(e));
+    for (const e of list) tl.appendChild(entryEl(ctx, e, full.id, attachments));
     const words = tokens(search.value);
     const hits = highlight(tl, words.length ? words : tokens(ctx.S.filters.text));
     if (search.value.trim()) search.title = hits ? `${hits} occorrenze` : "Nessuna occorrenza";

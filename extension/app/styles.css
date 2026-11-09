@@ -217,18 +217,66 @@ select.input { height: 30px; width: auto; padding: 0 6px; }
 .rt-ticket { font-weight: 600; text-decoration: none; border-bottom: 1px dashed currentColor; }
 .quoted-toggle { margin-top: 8px; }
 .quoted { margin-top: 6px; padding: 8px 10px; border-left: 3px solid var(--line-strong); color: var(--muted); font-size: 13px; background: rgba(255, 255, 255, .5); }
-.msg-f { padding: 0 14px 10px; font-size: 12px; color: var(--muted); display: flex; gap: 10px; align-items: center; }
+.msg-f { padding: 0 14px 10px; font-size: 12px; color: var(--muted); display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
 .trunc { color: var(--waiting); font-size: 12px; padding: 0 14px 10px; }
-.attachments { margin-top: 18px; }
+
+/* ---------------------------------------------------------------- allegati */
+.att-box { margin-top: 12px; border: 1px solid var(--line); border-radius: var(--radius); background: #f8faff; overflow: hidden; }
+.att-head { display: flex; align-items: center; justify-content: space-between; gap: 8px; padding: 8px 12px; border-bottom: 1px solid var(--line); background: #eef3ff; }
+.att-head-title { display: inline-flex; align-items: center; gap: 6px; font-weight: 700; font-size: 13px; color: #1e3a8a; }
+.att-list { display: grid; divide-y: 1px solid var(--line); }
+.att-item { display: flex; align-items: center; gap: 10px; padding: 8px 12px; border-top: 1px solid var(--line); background: #fff; }
+.att-item:first-child { border-top: 0; }
+.att-item:hover { background: #f6f9ff; }
+.att-ext { display: inline-flex; align-items: center; justify-content: center; min-width: 38px; height: 24px; padding: 0 6px; border-radius: 5px; font-size: 11px; font-weight: 750; letter-spacing: .03em; flex-shrink: 0; }
+.att-ext.ext-pdf { background: #fee2e2; color: #b91c1c; }
+.att-ext.ext-img { background: #e0f2fe; color: #0369a1; }
+.att-ext.ext-xls { background: #dcfce7; color: #15803d; }
+.att-ext.ext-doc { background: #dbeafe; color: #1d4ed8; }
+.att-ext.ext-zip { background: #fef3c7; color: #b45309; }
+.att-ext.ext-gen { background: #e2e8f0; color: #334155; }
+.att-info { flex: 1; min-width: 0; cursor: pointer; }
+.att-name { font-weight: 650; font-size: 13px; color: var(--text); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.att-info:hover .att-name { color: var(--accent); text-decoration: underline; }
+.att-meta { font-size: 11.5px; color: var(--muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.att-actions { display: flex; gap: 6px; flex-shrink: 0; }
+
+.msg-atts { padding-top: 4px; }
+.att-chip { display: inline-flex; align-items: center; border: 1px solid var(--line-strong); border-radius: 7px; background: rgba(255, 255, 255, .85); overflow: hidden; max-width: 100%; }
+.att-chip-main { display: inline-flex; align-items: center; gap: 5px; border: 0; background: transparent; padding: 4px 8px; font: inherit; font-size: 12px; font-weight: 600; color: var(--text); cursor: pointer; min-width: 0; }
+.att-chip-main:hover { background: #eef4ff; color: var(--accent); }
+.att-chip-name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 260px; }
+.att-chip-btn { display: inline-flex; align-items: center; justify-content: center; border: 0; border-left: 1px solid var(--line); background: transparent; padding: 4px 7px; color: var(--muted); cursor: pointer; }
+.att-chip-btn:hover { background: #eef4ff; color: var(--accent); }
 
 /* ---------------------------------------------------------------- finestre */
 .dialog { border: 0; border-radius: 14px; padding: 0; width: min(820px, 94vw); max-height: 88vh; box-shadow: 0 20px 60px rgba(16, 24, 40, .3); }
 .dialog::backdrop { background: rgba(16, 24, 40, .45); }
 .dialog-small { width: min(440px, 94vw); }
+.dialog-att { width: min(1120px, 96vw); height: min(860px, 92vh); max-height: 92vh; }
 .dlg-h { display: flex; align-items: center; padding: 14px 18px; border-bottom: 1px solid var(--line); }
 .dlg-h h2 { margin: 0; font-size: 16px; }
 .dlg-h .btn { margin-left: auto; }
+.att-dlg-h { gap: 10px; }
+.att-dlg-title { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.att-dlg-actions { margin-left: auto; display: flex; align-items: center; gap: 6px; }
+.att-dlg-actions .btn { margin-left: 0; }
 .dlg-b { padding: 14px 18px 18px; overflow: auto; max-height: calc(88vh - 60px); display: grid; gap: 14px; }
+.att-viewer { padding: 0; height: calc(min(860px, 92vh) - 58px); max-height: calc(92vh - 58px); display: flex; flex-direction: column; background: #f1f5f9; }
+.att-frame { width: 100%; height: 100%; border: 0; flex: 1; background: #fff; }
+.att-img-wrap { width: 100%; height: 100%; overflow: auto; display: flex; align-items: center; justify-content: center; padding: 16px; }
+.att-img { max-width: 100%; max-height: 100%; object-fit: contain; border-radius: 6px; box-shadow: 0 4px 20px rgba(0, 0, 0, .12); background: #fff; }
+.att-text-wrap { padding: 14px 18px; display: grid; gap: 10px; overflow: auto; height: 100%; background: #fff; align-content: start; }
+.att-pre { margin: 0; font: 12.5px/1.5 ui-monospace, Consolas, monospace; white-space: pre-wrap; word-break: break-word; background: #f8fafc; border: 1px solid var(--line); border-radius: 8px; padding: 12px; overflow: auto; }
+.att-html { padding: 18px; overflow: auto; height: 100%; background: #fff; font-size: 14px; line-height: 1.55; }
+.att-table-wrap { padding: 12px 16px; overflow: auto; height: 100%; background: #fff; }
+.att-table { border-collapse: collapse; width: 100%; font-size: 12.5px; }
+.att-table th, .att-table td { border: 1px solid var(--line-strong); padding: 5px 8px; text-align: left; vertical-align: top; }
+.att-table th { background: #f1f5f9; font-weight: 700; position: sticky; top: 0; }
+.att-table tr:nth-child(even) td { background: #f8fafc; }
+.att-video { width: 100%; height: 100%; background: #000; }
+.att-binary { margin: auto; text-align: center; padding: 40px 24px; background: #fff; border: 1px solid var(--line); border-radius: 12px; display: grid; gap: 6px; justify-items: center; max-width: 420px; }
+.att-binary h3 { margin: 6px 0 0; font-size: 15px; word-break: break-all; }
 .dlg-b h3 { margin: 4px 0 0; font-size: 14px; }
 .steps { display: grid; gap: 4px; font-size: 13px; }
 .steps .st { display: grid; grid-template-columns: 22px 1fr; gap: 4px; }

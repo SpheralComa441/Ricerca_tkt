@@ -110,5 +110,154 @@ export function makeHda(transport, opts = {}) {
       const data = await post(`/WSC/RunAnalysis?_pl=${pl}`, { analysisID, parameters });
       return Array.isArray(data.data) ? data.data : [];
     },
+
+    /**
+     * Elenco di tutti gli allegati di un ticket (sia su Incident sia sui messaggi TicketConversationItem,
+     * grazie a extKey="EXTEND_TICKET_ATTACHMENT" verificato sulle richieste reali di Touch).
+     */
+    async listAttachments(ticketId, signal) {
+      if (!ticketId) return [];
+      const conditions = [
+        {
+          property: "ParentObjectID",
+          value: String(ticketId),
+          op: "eq",
+          lock: false,
+          extKey: "EXTEND_TICKET_ATTACHMENT",
+          description: null,
+          parameterControlId: null,
+        },
+      ];
+      const { rows } = await this.listData("Attachments", {
+        viewId: "Default",
+        conditions,
+        page: 1,
+        start: 0,
+        limit: 100,
+        sort: [{ property: "c5", direction: "DESC" }],
+        signal,
+      });
+      return rows;
+    },
+
+    /** Legge il ContentType di un allegato (GET /WSCView/GetAttachmentContentType/<id>). */
+    async getAttachmentContentType(id, { parentObject = "Incident", parentObjectId = "", signal } = {}) {
+      const qs = query({
+        _pl: pl,
+        ParentObjectEntity: parentObject || "Incident",
+        ParentObjectID: parentObjectId || "",
+        UniqueID: "",
+        _dc: Date.now(),
+      });
+      const data = await get(`/WSCView/GetAttachmentContentType/${encodeURIComponent(id)}${qs}`, signal);
+      return (data && data.data && data.data.contentType) || "";
+    },
+
+    /**
+     * Scarica il contenuto (in Base64) e i metadati di un allegato tramite POST /WSCView/PreviewAttachment
+     * (lo stesso endpoint usato da HDA TOUCH sia per l'anteprima sia per il pulsante Download).
+     */
+    async previewAttachment(id, { parentObject = "Incident", parentObjectId = "", contentType = "", fileName = "", signal } = {}) {
+      let mime = contentType || "";
+      if (!mime) {
+        try {
+          mime = await this.getAttachmentContentType(id, { parentObject, parentObjectId, signal });
+        } catch {
+          mime = guessMimeFromName(fileName);
+        }
+      }
+      const raw = await post(
+        `/WSCView/PreviewAttachment?_pl=${pl}`,
+        {
+          ID: id,
+          ParentObjectEntity: parentObject || "Incident",
+          ParentObjectID: parentObjectId || "",
+          UniqueID: "",
+          ContentType: mime || "application/octet-stream",
+          containerId: "window-3813",
+          openingMode: "window",
+          detailMode: "window",
+        },
+        "text",
+        signal,
+      );
+      return parsePreviewAttachmentResponse(raw, { contentType: mime, fileName });
+    },
   };
+}
+
+export function guessMimeFromName(name = "") {
+  const lower = String(name || "").toLowerCase().trim();
+  if (/\.pdf$/.test(lower)) return "application/pdf";
+  if (/\.(xlsx|xlsm)$/.test(lower)) return "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet";
+  if (/\.xls$/.test(lower)) return "application/vnd.ms-excel";
+  if (/\.csv$/.test(lower)) return "text/csv";
+  if (/\.docx$/.test(lower)) return "application/vnd.openxmlformats-officedocument.wordprocessingml.document";
+  if (/\.doc$/.test(lower)) return "application/msword";
+  if (/\.(png|jpg|jpeg|gif|webp|bmp|svg|tif|tiff)$/.test(lower)) {
+    const ext = lower.split(".").pop();
+    if (ext === "svg") return "image/svg+xml";
+    if (ext === "jpg") return "image/jpeg";
+    if (ext === "tif") return "image/tiff";
+    return `image/${ext}`;
+  }
+  if (/\.html?$/.test(lower)) return "text/html";
+  if (/\.json$/.test(lower)) return "application/json";
+  if (/\.xml$/.test(lower)) return "application/xml";
+  if (/\.(txt|log|md|yaml|yml|ini|cfg|sql|properties|inf|rpt)$/.test(lower)) return "text/plain";
+  if (/\.(mp4|webm|ogg)$/.test(lower)) return `video/${lower.split(".").pop()}`;
+  if (/\.avi$/.test(lower)) return "video/x-msvideo";
+  if (/\.zip$/.test(lower)) return "application/zip";
+  return "application/octet-stream";
+}
+
+/**
+ * Estrae `{ content, contentType, fileName }` dalla risposta JS Ext.NET di `/WSCView/PreviewAttachment`
+ * (`{"ConfigurationHolder":true,"model":"{\"contentType\":\"...\",\"content\":\"<base64>\",\"fileName\":\"...\"}"}`).
+ */
+export function parsePreviewAttachmentResponse(raw, fallback = {}) {
+  if (!raw) throw new HdaError("Risposta vuota dal portale per l'allegato");
+  if (typeof raw === "object" && raw.content) {
+    const fn = raw.fileName || fallback.fileName || "allegato";
+    return {
+      content: String(raw.content),
+      contentType: raw.contentType || fallback.contentType || guessMimeFromName(fn),
+      fileName: fn,
+    };
+  }
+  const s = String(raw);
+  const m = /"model"\s*:\s*("(?:\\.|[^"\\])*")/.exec(s);
+  if (m) {
+    try {
+      const inner = JSON.parse(m[1]);
+      const obj = typeof inner === "string" ? JSON.parse(inner) : inner;
+      if (obj && obj.content) {
+        const fn = obj.fileName || fallback.fileName || "allegato";
+        return {
+          content: String(obj.content),
+          contentType: obj.contentType || fallback.contentType || guessMimeFromName(fn),
+          fileName: fn,
+        };
+      }
+    } catch {
+      /* continua */
+    }
+  }
+  if (s.trim().startsWith("{")) {
+    try {
+      const j = JSON.parse(s);
+      const d = j.data || j;
+      if (d && d.content) {
+        const fn = d.fileName || fallback.fileName || "allegato";
+        return {
+          content: String(d.content),
+          contentType: d.contentType || fallback.contentType || guessMimeFromName(fn),
+          fileName: fn,
+        };
+      }
+    } catch {
+      /* continua */
+    }
+  }
+  throw new HdaError("Contenuto dell'allegato non disponibile nella risposta del portale");
 }
