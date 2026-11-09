@@ -1,6 +1,6 @@
 // Ticket completo: dati, richiesta, conversazione, soluzione → una sola timeline ordinata.
 
-import { parseMsDate, norm } from "./util.js";
+import { parseMsDate, norm, ticketNumber, isLegacyTicketNumber } from "./util.js";
 import { htmlToText, cleanText, isProbablyHtml, unescapeIfEscapedHtml } from "./richtext.js";
 
 // Colonne della conversazione (nomi verificati dalla configurazione "Storico conversazioni" + TextHTML verificato via Projection)
@@ -112,7 +112,10 @@ export function timelineText(entries, header = "") {
  * hda = client; rowReader = lettore delle righe di Incidents; row = riga già nota (dall'elenco)
  * caps = capacità scoperte (si aggiornano qui: quale metodo ha funzionato)
  */
-export async function loadTicket(hda, id, { row = null, rowReader, conditionsFor, caps = {}, log = () => {} } = {}) {
+export async function loadTicket(hda, id, { row = null, rowReader, conditionsFor, caps = {}, ar = null, log = () => {} } = {}) {
+  if (row && row.source === "ar" && ar) {
+    return await ar.loadTicket(id, { row });
+  }
   const notes = [];
   // 1. riga con le descrizioni (cliente, gruppo, stato…) se non già nota
   if (!row && rowReader) {
@@ -136,6 +139,25 @@ export async function loadTicket(hda, id, { row = null, rowReader, conditionsFor
     } catch (e) {
       log(`ticket via ${name}: ${e.message}`);
     }
+  }
+  // Se il ticket non esiste su HDA TOUCH, proviamo sul Vecchio Cruscotto (Area Riservata)
+  if (!row && !ticket) {
+    if (ar) {
+      try {
+        return await ar.loadTicket(ticketNumber(id), { row: null });
+      } catch (arErr) {
+        log(`ticket vecchio cruscotto #${ticketNumber(id)}: ${arErr.message}`);
+      }
+    }
+    if (isLegacyTicketNumber(id)) {
+      const err = new Error(
+        `Il ticket #${ticketNumber(id)} appartiene al Vecchio Cruscotto (Area Riservata Zucchetti). Apri e collega il Vecchio Cruscotto per leggerlo qui, oppure cerca i ticket Touch che lo richiamano.`
+      );
+      err.isLegacyTicket = true;
+      err.ticketNum = ticketNumber(id);
+      throw err;
+    }
+    throw new Error("ticket non trovato o non visibile con il tuo utente");
   }
   if (!ticket) notes.push("Testo completo della richiesta non disponibile: mostro l'anteprima dell'elenco.");
   // 3. conversazione completa

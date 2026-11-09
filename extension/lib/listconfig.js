@@ -125,7 +125,7 @@ export function parseFilters(src) {
     }
     const prop = str(top, "filterProperty") || str(top, "property") || str(top, "dataField");
     if (prop) f.property = prop;
-    if (!f.itemId || f.itemId === "settingTriggerMenu") continue;
+    if (!f.itemId || f.itemId === "settingTriggerMenu" || /^section_/i.test(f.itemId) || (!f.op && !f.name && !f.property)) continue;
     const prev = byId.get(f.itemId);
     if (!prev) {
       byId.set(f.itemId, f);

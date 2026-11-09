@@ -7,6 +7,7 @@ import { h, clear, icon, toast } from "./dom.js";
 import { runProbe } from "../lib/probe.js";
 import { FILTER_DEFS, ruleFor } from "../lib/filters.js";
 import { clearArchive, kvSet } from "../lib/store.js";
+import { isLegacyTicketNumber } from "../lib/util.js";
 
 export function openDiag(ctx) {
   const dlg = document.getElementById("diag");
@@ -45,8 +46,12 @@ function probeSection(ctx, onDone) {
     runBtn.disabled = true;
     copyBtn.disabled = true;
     try {
-      const res = await runProbe(ctx.hda, { onStep: draw, sampleTicketId: ctx.S.current, learned: ctx.S.calib.learned, captures: ctx.S.captures, log: ctx.log });
-      if (res.workingContains) {
+      const sampleTicketId =
+        (ctx.S.current && !isLegacyTicketNumber(ctx.S.current) ? ctx.S.current : null) ||
+        (ctx.S.sampleTicket && ctx.S.sampleTicket.id) ||
+        null;
+      const res = await runProbe(ctx.hda, { onStep: draw, sampleTicketId, learned: ctx.S.calib.learned, captures: ctx.S.captures, log: ctx.log });
+      if (res.workingContains && res.workingContains.wildcard) {
         ctx.S.caps.containsText = res.workingContains;
         ctx.S.calib.containsText = res.workingContains;
       }

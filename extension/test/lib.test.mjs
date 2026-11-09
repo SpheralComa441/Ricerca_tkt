@@ -3,13 +3,14 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 
-import { parseMsDate, ticketIdFrom, ticketNumber, tokens, norm, csvCell, fmtDate } from "../lib/util.js";
+import { parseMsDate, ticketIdFrom, ticketNumber, isLegacyTicketNumber, tokens, queryTerms, matchesAllTokens, norm, csvCell, fmtDate } from "../lib/util.js";
 import { parseListConfig } from "../lib/listconfig.js";
 import { makeRowReader } from "../lib/rows.js";
 import { buildConditions, emptyFilters, formatDateValue, learnFromConditions, ruleFor, DEF, describeFilters, filterPayload, pickCalibrationSample, isUnconstrained, hasNarrowingFilter } from "../lib/filters.js";
 import { htmlToText, splitQuoted, linkifyParts, decodeEntities, unescapeIfEscapedHtml, cleanText } from "../lib/richtext.js";
 import { makeTransport, AuthError, HdaError, formBody } from "../lib/transport.js";
 import { makeHda } from "../lib/hda.js";
+import { buildArQuery, parseArResponse, buildArTicket, extractMcidFromHtml } from "../lib/ar.js";
 
 // ---------------------------------------------------------------- util
 
@@ -22,17 +23,25 @@ test("parseMsDate: formato /Date(ms)/, data nulla HDA, ISO", () => {
   assert.equal(fmtDate(new Date(2026, 10, 6)), "06/11/2026");
 });
 
-test("numero ticket ↔ ID HDA", () => {
+test("numero ticket ↔ ID HDA e riconoscimento ticket del vecchio cruscotto (5-7 cifre)", () => {
   assert.equal(ticketIdFrom("10500123"), "10500123Z");
   assert.equal(ticketIdFrom(" #10500123 "), "10500123Z");
   assert.equal(ticketIdFrom("10500123z"), "10500123Z");
+  assert.equal(ticketIdFrom("9018200"), "9018200Z");
   assert.equal(ticketIdFrom("cedolino"), null);
   assert.equal(ticketIdFrom("12 34"), null);
   assert.equal(ticketNumber("10500123Z"), "10500123");
+  assert.equal(isLegacyTicketNumber("9018200"), true);
+  assert.equal(isLegacyTicketNumber("9018200Z"), true);
+  assert.equal(isLegacyTicketNumber("#8907717"), true);
+  assert.equal(isLegacyTicketNumber("11935498Z"), false);
 });
 
-test("tokens e norm: frasi tra virgolette, accenti", () => {
+test("tokens, queryTerms, matchesAllTokens e norm: frasi tra virgolette, accenti", () => {
   assert.deepEqual(tokens('Perché "cedolino errato" TFR'), ["perche", "cedolino errato", "tfr"]);
+  assert.deepEqual(queryTerms('Perché "cedolino errato" TFR'), ["Perché", "cedolino errato", "TFR"]);
+  assert.equal(matchesAllTokens("Calcolo detassazione su cedolino", "cedolino detassazione"), true);
+  assert.equal(matchesAllTokens("Calcolo detassazione su cedolino", "cedolino ferie"), false);
   assert.equal(norm("  Città   Più "), "citta piu");
 });
 
@@ -122,22 +131,47 @@ test("buildConditions: più gruppi → in; numero ticket → ID eq senza testo",
   assert.equal(c.some((x) => x.id === "FullText"), false);
 });
 
-test("ruleFor, isUnconstrained, hasNarrowingFilter: regole verificate sul portale", () => {
+test("ruleFor, isUnconstrained, hasNarrowingFilter e condizioni AND per ogni parola cercata", () => {
   const defText = ruleFor(DEF.text, {});
   assert.equal(defText.source, "verificato");
   assert.equal(defText.op, "eq");
   assert.equal(defText.extKey, "INCLUDECONVERSATIONITEM");
-  const cfg = { config: [{ itemId: "FullText", op: "ct", name: "FullTextField" }, { itemId: "Subject", op: "in", name: "Subject" }] };
+  const cfg = {
+    config: [{ itemId: "FullText", op: "ct", name: "FullTextField" }, { itemId: "Subject", op: "in", name: "Subject" }],
+    // una calibrazione errata senza wildcard (es. ct senza %) viene ignorata per non rompere la ricerca nell'oggetto
+    containsText: { op: "ct", wildcard: false },
+  };
   const r1 = ruleFor(DEF.text, cfg);
   assert.equal(r1.op, "ct");
   assert.equal(r1.property, "FullTextField");
   assert.equal(r1.source, "configurazione Touch");
-  // Subject conserva "like" con "%…%" anche se la configurazione di Touch espone "in" o "sw"
+  // Subject conserva "like" con "%…%" e genera una condizione AND per ciascuna parola
   const rSub = ruleFor(DEF.subject, cfg);
   assert.equal(rSub.op, "like");
   assert.equal(rSub.wildcard, true);
   const cSub = buildConditions({ ...emptyFilters(), subject: "ricalcolo detassazione" }, cfg);
-  assert.deepEqual(cSub.find((x) => x.id === "Subject"), { property: "Subject", value: "%ricalcolo%detassazione%", op: "like", id: "Subject" });
+  assert.deepEqual(
+    cSub.filter((x) => x.id === "Subject"),
+    [
+      { property: "Subject", value: "%ricalcolo%", op: "like", id: "Subject" },
+      { property: "Subject", value: "%detassazione%", op: "like", id: "Subject" },
+    ]
+  );
+  // FullText con più parole genera una condizione per ciascuna parola in AND (o una sola con singleFullText)
+  const cFt = buildConditions({ ...emptyFilters(), text: "ricalcolo detassazione" }, {});
+  assert.deepEqual(
+    cFt.filter((x) => x.id === "FullText"),
+    [
+      { property: "FullText", value: "ricalcolo", op: "eq", extKey: "INCLUDECONVERSATIONITEM", id: "FullText" },
+      { property: "FullText", value: "detassazione", op: "eq", extKey: "INCLUDECONVERSATIONITEM", id: "FullText" },
+    ]
+  );
+  const cFtSingle = buildConditions({ ...emptyFilters(), text: "ricalcolo detassazione" }, { singleFullText: true });
+  assert.deepEqual(
+    cFtSingle.filter((x) => x.id === "FullText"),
+    [{ property: "FullText", value: "ricalcolo detassazione", op: "eq", extKey: "INCLUDECONVERSATIONITEM", id: "FullText" }]
+  );
+
   const r2 = ruleFor(DEF.text, { ...cfg, learned: { FullText: { property: "FT", op: "like", value: "x" } } });
   assert.deepEqual([r2.property, r2.op, r2.source], ["FT", "like", "appreso da Touch"]);
 
@@ -276,3 +310,62 @@ test("hda: projection rimappa le colonne sulle espressioni", async () => {
   assert.deepEqual(JSON.parse(body.get("columnNames")), ["ID", "User_FullName"]);
   assert.deepEqual(JSON.parse(body.get("columnExpressions")), ["ID", "User.FullName"]);
 });
+
+// ---------------------------------------------------------------- vecchio cruscotto (Area Riservata)
+
+test("ar: extractMcidFromHtml, buildArQuery (AND tra tutte le parole), parseArResponse e buildArTicket", () => {
+  const info = extractMcidFromHtml('var w_IdCenSer="PAOW"; var w_pArea="TICKOPEXXX"; splResults.m_cID = "a1b2c3d4e5f60718293a";');
+  assert.deepEqual(info, { mcid: "a1b2c3d4e5f60718293a", idCenSer: "PAOW", pArea: "TICKOPEXXX" });
+
+  // Ricerca per più parole concatenate in AND
+  const qWords = buildArQuery({ text: "ricalcolo detassazione", idCenSer: "PAOW" });
+  assert.equal(qWords, '( Testi:("ricalcolo") or Oggetto:("ricalcolo") ) and ( Testi:("detassazione") or Oggetto:("detassazione") ) and (IdCenSer:PAOW)');
+
+  // Ricerca per numero ticket a 7 cifre (senza filtro IdCenSer per trovare il ticket su qualsiasi centro)
+  const qTid = buildArQuery({ ticketId: "9018200Z", idCenSer: "PAOW" });
+  assert.equal(qTid, '( Testi:("9018200") or Oggetto:("9018200") )');
+
+  const sampleJson = JSON.stringify({
+    fields: ["id", "type", "description", "altdescription", "url1"],
+    data: [
+      [
+        "TK9018200",
+        "Ticket",
+        "[#9018200] [PAGHE WEB] [14-05-2024] Ricalcolo detassazione su premi",
+        "<p>Buongiorno, chiediamo verifica del ricalcolo detassazione.</p>",
+        "../jsp/gsTK_view.jsp?TicketID=9018200",
+      ],
+    ],
+  });
+  const rows = parseArResponse(sampleJson);
+  assert.equal(rows.length, 1);
+  assert.equal(rows[0].id, "9018200");
+  assert.equal(rows[0].source, "ar");
+  assert.equal(rows[0].catalog, "PAGHE WEB");
+  assert.equal(rows[0].subject, "Ricalcolo detassazione su premi");
+  assert.equal(rows[0].problem, "Buongiorno, chiediamo verifica del ricalcolo detassazione.");
+  assert.equal(rows[0].arUrl, "https://www.zucchetti.it/areariservata/jsp/gsTK_view.jsp?TicketID=9018200");
+
+  const full = buildArTicket({
+    id: "9018200",
+    row: rows[0],
+    detail: {
+      title: "Dettaglio ticket 9018200",
+      fields: [["Ragione sociale", "Rossi Srl"], ["Stato", "Chiuso"], ["Priorità", "Normale"]],
+      texts: [
+        ["Descrizione richiesta", "Buongiorno, chiediamo verifica del ricalcolo detassazione."],
+        ["Soluzione", "Occorre impostare la voce nel tabellone detassazione."],
+      ],
+      tables: [],
+      url: rows[0].arUrl,
+    },
+  });
+  assert.equal(full.id, "9018200");
+  assert.equal(full.source, "ar");
+  assert.equal(full.row.account, "Rossi Srl");
+  assert.equal(full.row.statusText, "Chiuso");
+  assert.equal(full.timeline.length, 2);
+  assert.equal(full.timeline[0].kind, "request");
+  assert.equal(full.timeline[1].kind, "solution");
+});
+

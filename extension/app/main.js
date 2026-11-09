@@ -9,14 +9,15 @@ import { renderReader, renderReaderLoading, renderReaderError } from "./reader.j
 import { openDiag } from "./diag.js";
 import { makeTransport, AuthError, PORTAL_BASE } from "../lib/transport.js";
 import { makeHda } from "../lib/hda.js";
+import { makeAr } from "../lib/ar.js";
 import { makeRowReader } from "../lib/rows.js";
 import { emptyFilters, buildConditions, describeFilters, ruleFor, DEF, DOMAIN_CONDITION, OPEN_STATUS_IDS, isUnconstrained, hasNarrowingFilter } from "../lib/filters.js";
 import { statusInfo, mergePortalStatuses } from "../lib/statuses.js";
-import { loadTicket } from "../lib/ticket.js";
+import { loadTicket, TICKET_COLUMNS } from "../lib/ticket.js";
 import { saveTicket, getTicket, searchArchive, archivedMap, archiveInfo, kvGet, kvSet, onKvChange, reviveRow } from "../lib/store.js";
 import { makeLookups } from "../lib/lookups.js";
 import { htmlToText, cleanText, isProbablyHtml, unescapeIfEscapedHtml } from "../lib/richtext.js";
-import { ticketIdFrom, ticketNumber, fmtRelative, fmtDateTime, tokens, pool, sleep, csvCell, debounce } from "../lib/util.js";
+import { ticketIdFrom, ticketNumber, isLegacyTicketNumber, fmtRelative, fmtDateTime, tokens, matchesAllTokens, pool, sleep, csvCell, debounce } from "../lib/util.js";
 
 const inExtension = typeof chrome !== "undefined" && !!(chrome.runtime && chrome.runtime.id);
 const DAY = 86400000;
@@ -61,12 +62,13 @@ const S = {
   current: null,
   cursor: -1,
   connected: null,
+  arConnected: null,
   job: null,
   settings: { ...DEFAULT_SETTINGS },
 };
 const ui = { openSections: {}, statusDetail: false, showInternal: true, newestFirst: false, readerSearch: "", showFilters: true };
 
-let transport, hda, lookups;
+let transport, hda, ar, lookups;
 let rowReader = makeRowReader(null);
 let searchAbort = null;
 let openSeq = 0;
@@ -75,6 +77,7 @@ const ctx = {
   S,
   ui,
   get hda() { return hda; },
+  get ar() { return ar; },
   get lookups() { return lookups; },
   log,
   LOG,
@@ -86,6 +89,8 @@ const ctx = {
   openTicket,
   closeReader,
   openInTouch,
+  openArHome,
+  searchLegacyRefInTouch,
   isFavorite,
   toggleFavorite,
   saveUi,
@@ -126,6 +131,19 @@ function openTouchHome() {
   else window.open(PORTAL_BASE + "/", "_blank");
 }
 
+function openArHome(url) {
+  if (ar) ar.openHome(url);
+}
+
+function searchLegacyRefInTouch(num) {
+  const clean = ticketNumber(num);
+  if (!clean) return;
+  closeReader();
+  S.filters.text = "";
+  S.filters.subject = clean;
+  filtersChanged(true);
+}
+
 // ---------------------------------------------------------------- connessione
 
 function setConn(state, text) {
@@ -137,10 +155,37 @@ function setConn(state, text) {
   el.title = state === false ? "Apri HDA TOUCH ed esegui l'accesso, poi torna qui" : "Stato della connessione a HDA TOUCH";
 }
 
+function setArConn(state, text) {
+  S.arConnected = state;
+  const el = $("#arConn");
+  if (!el) return;
+  el.classList.toggle("ok", state === true);
+  el.classList.toggle("err", false);
+  $(".conn-text", el).textContent = text || (state === true ? "Vecchio cruscotto attivo" : "Collega vecchio cruscotto");
+  el.title =
+    state === true
+      ? "Vecchio Cruscotto (Area Riservata Zucchetti) collegato: cerca e apre anche i ticket storici a 7 cifre"
+      : "Clicca per aprire il Vecchio Cruscotto (Area Riservata Zucchetti) ed eseguire l'accesso: potrai cercare e leggere qui i ticket storici a 7 cifre";
+}
+
+async function checkArConnection() {
+  if (!ar) return false;
+  try {
+    const st = await ar.checkStatus();
+    setArConn(st.connected === true);
+    if (st.connected) log(`vecchio cruscotto collegato (${st.mode}${st.idCenSer ? ", centro " + st.idCenSer : ""})`);
+    return st.connected === true;
+  } catch {
+    setArConn(false);
+    return false;
+  }
+}
+
 let statusesLoaded = false;
 
 async function checkConnection() {
   setConn(null);
+  checkArConnection();
   try {
     // GetStaticList risponde in ~150 ms (contro i 7-15 s di una query su Incident senza filtri),
     // verifica la sessione, estrae l'ID dell'operatore dal requestToken e carica gli stati del portale.
@@ -708,24 +753,29 @@ function toggleFilters() {
 // ---------------------------------------------------------------- lettura del ticket
 
 async function openTicket(id, row, { force = false } = {}) {
-  id = ticketIdFrom(id) || String(id || "");
+  const isArRow = row && row.source === "ar";
+  id = isArRow ? String(row.id || id || "") : ticketIdFrom(id) || String(id || "");
   if (!id) return;
   if (!force && S.current === id && !$("#reader").hidden) return;
   const my = ++openSeq;
   S.current = id;
-  if (!row) row = S.results.find((r) => r.id === id) || null;
+  if (!row) row = S.results.find((r) => r.id === id || ticketNumber(r.id) === ticketNumber(id)) || null;
   $("#layout").classList.add("reading");
-  for (const n of document.querySelectorAll("#results .item")) n.classList.toggle("sel", n.dataset.id === id);
+  for (const n of document.querySelectorAll("#results .item")) n.classList.toggle("sel", n.dataset.id === id || ticketNumber(n.dataset.id) === ticketNumber(id));
   ui.readerSearch = "";
   renderReaderLoading(ctx, id, row);
   try {
-    const full = await loadTicket(hda, id, { row, rowReader, conditionsFor: conditionsForId, caps: S.caps, log });
+    const full = await loadTicket(hda, id, { row, rowReader, conditionsFor: conditionsForId, caps: S.caps, ar, log });
+    if (full.source === "ar") setArConn(true);
+    S.current = full.id || id;
     kvSet("caps", S.caps);
-    if (!full.row && !full.ticket && !full.items.length) throw new Error("ticket non trovato o non visibile con il tuo utente");
-    addRecent(id, full.row);
+    if (!full.row && !full.ticket && !full.items.length && !(full.timeline && full.timeline.length)) {
+      throw new Error("ticket non trovato o non visibile con il tuo utente");
+    }
+    addRecent(full.id, full.row);
     if (S.settings.archiveOnRead) {
       saveTicket(full)
-        .then(() => { S.archived.set(id, { savedAt: Date.now(), lastChange: full.row && full.row.lastChange ? +full.row.lastChange : null }); refreshArchiveCount(); })
+        .then(() => { S.archived.set(full.id, { savedAt: Date.now(), lastChange: full.row && full.row.lastChange ? +full.row.lastChange : null }); refreshArchiveCount(); })
         .catch((e) => log("archivio: " + e.message));
     }
     if (my !== openSeq) return;
@@ -736,12 +786,12 @@ async function openTicket(id, row, { force = false } = {}) {
     if (my !== openSeq) return;
     let rec = null;
     try {
-      rec = await getTicket(id);
+      rec = (await getTicket(id)) || (await getTicket(ticketNumber(id)));
     } catch {
       /* archivio non disponibile */
     }
     if (my !== openSeq) return;
-    if (rec) renderReader(ctx, { id, row: rec.row, ticket: null, items: [], timeline: rec.timeline, notes: [] }, { fromArchive: rec.savedAt });
+    if (rec) renderReader(ctx, { id: rec.id, row: rec.row, ticket: null, items: [], timeline: rec.timeline, notes: [] }, { fromArchive: rec.savedAt });
     else renderReaderError(ctx, id, row, e);
   }
 }
@@ -881,7 +931,7 @@ async function archiveResults() {
     await pool(todo, 2, async (row) => {
       if (job.cancelled) return;
       try {
-        const full = await loadTicket(hda, row.id, { row, rowReader, conditionsFor: conditionsForId, caps: S.caps, log });
+        const full = await loadTicket(hda, row.id, { row, rowReader, conditionsFor: conditionsForId, caps: S.caps, ar, log });
         await saveTicket(full);
         S.archived.set(row.id, { savedAt: Date.now(), lastChange: row.lastChange ? row.lastChange.getTime() : null });
       } catch (e) {
@@ -952,11 +1002,17 @@ async function init() {
   if (sort && SORTS[sort.key]) S.sort = sort;
   Object.assign(S, { saved: saved || [], favorites: favorites || [], recent: recent || [], captures: captures || [], caps: caps || {}, typesSeen: typesSeen || {} });
   S.calib.learned = learned || {};
-  if (S.caps.containsText) S.calib.containsText = S.caps.containsText;
+  if (S.caps.containsText && S.caps.containsText.wildcard) {
+    S.calib.containsText = S.caps.containsText;
+  } else if (S.caps.containsText) {
+    delete S.caps.containsText;
+    kvSet("caps", S.caps);
+  }
   if (S.caps.fullTextRule) S.calib.overrides.text = { ...S.caps.fullTextRule, source: "calibrato" };
 
   transport = makeTransport({ log });
   hda = makeHda(transport, { lang: S.settings.lang });
+  ar = makeAr({ log });
   lookups = makeLookups(hda, { kvGet, kvSet, log });
   await lookups.restore();
   refreshArchiveCount();
@@ -988,12 +1044,14 @@ async function init() {
     filtersChanged(true);
   });
   $("#conn").addEventListener("click", () => { if (S.connected === false) openTouchHome(); });
+  const arConnEl = $("#arConn");
+  if (arConnEl) arConnEl.addEventListener("click", () => openArHome());
   $("#diagBtn").addEventListener("click", () => openDiag(ctx));
   $("#sidebar").addEventListener("focusout", (e) => {
     if (pendingSidebar && !(e.relatedTarget && $("#sidebar").contains(e.relatedTarget))) setTimeout(refreshSidebar, 0);
   });
   document.addEventListener("keydown", onKey);
-  // tornando sulla scheda dopo aver fatto l'accesso a Touch si riprova da soli
+  // tornando sulla scheda dopo aver fatto l'accesso a Touch o al Vecchio Cruscotto si riprova da soli
   let calibrated = false;
   const start = async () => {
     if (!calibrated) {
@@ -1009,6 +1067,10 @@ async function init() {
   };
   window.addEventListener("focus", async () => {
     if (S.connected === false && (await checkConnection())) start();
+    else if (S.arConnected !== true && (await checkArConnection())) {
+      if (S.current && isLegacyTicketNumber(S.current)) openTicket(S.current, null, { force: true });
+      else if (S.filters.text || S.filters.subject) search();
+    }
   });
 
   if (await checkConnection()) {

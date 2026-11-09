@@ -33,15 +33,17 @@ export async function runProbe(hda, { onStep = () => {}, sampleTicketId = null, 
   });
 
   await step("Ticket di prova (Projection rapida)", async () => {
-    let rows = await hda.projection(
-      "Incident",
-      ticketId ? [{ property: "ID", op: "eq", value: ticketId }] : [{ property: "TicketStatusID", op: "eq", value: "S1" }],
-      TICKET_COLUMNS,
-      1
-    );
-    if (!rows[0] && !ticketId) rows = await hda.projection("Incident", [], TICKET_COLUMNS, 1);
+    let rows = [];
+    if (ticketId) {
+      rows = await hda.projection("Incident", [{ property: "ID", op: "eq", value: ticketId }], TICKET_COLUMNS, 1).catch(() => []);
+      if (!rows[0]) ticketId = null;
+    }
+    if (!rows[0]) {
+      rows = await hda.projection("Incident", [{ property: "TicketStatusID", op: "eq", value: "S1" }], TICKET_COLUMNS, 1);
+    }
+    if (!rows[0]) rows = await hda.projection("Incident", [], TICKET_COLUMNS, 1);
     if (!rows[0]) throw new Error("nessuna riga");
-    if (!ticketId) ticketId = rows[0].ID;
+    ticketId = rows[0].ID;
     sampleSubject = rows[0].Subject || "";
     return `ID ${ticketId}, richiesta: ${String(rows[0].ProblemHTML || rows[0].Problem || "").length} caratteri`;
   });
@@ -115,7 +117,7 @@ export async function runProbe(hda, { onStep = () => {}, sampleTicketId = null, 
       if (cand.extKey) c.extKey = cand.extKey;
       const conds = idCond ? [DOMAIN_CONDITION, idCond, c] : [DOMAIN_CONDITION, c];
       const { total } = await hda.listData("Incidents", { conditions: conds, limit: 1 });
-      if (idCond && word && !total) throw new Error("0 righe (non trova la parola)");
+      if (!total) throw new Error("0 righe (non trova la parola)");
       return `${total} righe`;
     });
     if (s.ok && !workingFullText) workingFullText = { property: ftProp, op: cand.op, extKey: cand.extKey };
@@ -132,7 +134,7 @@ export async function runProbe(hda, { onStep = () => {}, sampleTicketId = null, 
       const val = wildcard ? `%${q}%` : q;
       const conds = idCond ? [DOMAIN_CONDITION, idCond, { property: "Subject", op, value: val, id: "Subject" }] : [DOMAIN_CONDITION, { property: "Subject", op, value: val, id: "Subject" }];
       const { total } = await hda.listData("Incidents", { conditions: conds, limit: 1 });
-      if (idCond && (mid || word) && !total) throw new Error("0 righe (non trova a metà oggetto)");
+      if (!total) throw new Error("0 righe (non trova a metà oggetto)");
       return `trova sottostringa (${total} righe)`;
     });
     if (s.ok && !workingContains) workingContains = { op, wildcard };

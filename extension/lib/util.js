@@ -60,7 +60,7 @@ export function norm(s) {
     .trim();
 }
 
-/** parole di una ricerca: "frase tra virgolette" resta intera */
+/** parole di una ricerca: "frase tra virgolette" resta intera (normalizzata senza accenti) */
 export function tokens(q) {
   const out = [];
   for (const m of String(q || "").matchAll(/"([^"]+)"|(\S+)/g)) {
@@ -68,6 +68,24 @@ export function tokens(q) {
     if (w) out.push(w);
   }
   return out;
+}
+
+/** Parole o "frasi tra virgolette" di una ricerca, mantenendo gli accenti originali per le query al server. */
+export function queryTerms(q) {
+  const out = [];
+  for (const m of String(q || "").matchAll(/"([^"]+)"|(\S+)/g)) {
+    const w = String(m[1] || m[2] || "").replace(/\s+/g, " ").trim();
+    if (w) out.push(w);
+  }
+  return out;
+}
+
+/** Vero se tutte le parole di `qOrWords` compaiono in `haystack` (senza distinzione di maiuscole/accenti). */
+export function matchesAllTokens(haystack, qOrWords) {
+  const words = Array.isArray(qOrWords) ? qOrWords.map(norm).filter(Boolean) : tokens(qOrWords);
+  if (!words.length) return true;
+  const h = norm(haystack);
+  return words.every((w) => h.includes(w));
 }
 
 export function escapeHtml(s) {
@@ -85,6 +103,13 @@ export function ticketIdFrom(q) {
 /** "10500123Z" → "10500123" (come lo scrivono le persone) */
 export function ticketNumber(id) {
   return String(id || "").replace(/Z$/i, "");
+}
+
+/** Vero se il numero di ticket ha 5-7 cifre (tipico del vecchio cruscotto / Area Riservata). */
+export function isLegacyTicketNumber(idOrQuery) {
+  const s = String(idOrQuery || "").trim().replace(/^#/, "");
+  const m = /^(\d{5,7})([Zz]?)$/.exec(s);
+  return !!m;
 }
 
 export function debounce(fn, ms) {

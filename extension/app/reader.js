@@ -1,7 +1,7 @@
 // Lettore del ticket: intestazione, scheda dei dati, timeline unica della conversazione.
 
 import { h, clear, icon, highlight, toast } from "./dom.js";
-import { fmtDateTime, fmtDate, ticketNumber, tokens } from "../lib/util.js";
+import { fmtDateTime, fmtDate, ticketNumber, tokens, isLegacyTicketNumber } from "../lib/util.js";
 import { statusInfo } from "../lib/statuses.js";
 import { sanitizeHtml, textToFragment, splitQuoted, htmlToText } from "../lib/richtext.js";
 import { timelineText } from "../lib/ticket.js";
@@ -28,12 +28,26 @@ export function renderReaderError(ctx, id, row, err) {
   const body = el.querySelector(".rd-body") || el.appendChild(h("div", { class: "rd-body" }));
   const ld = body.querySelector(".loading");
   if (ld) ld.remove();
-  body.appendChild(h("div", { class: "err-box" }, "Non riesco a leggere il ticket: " + err.message,
-    h("div", null, h("button", { class: "btn", onclick: () => ctx.openTicket(id, row, { force: true }) }, "Riprova"))));
+  const isLegacy = (err && err.isLegacyTicket) || isLegacyTicketNumber(id) || (row && row.source === "ar");
+  const num = ticketNumber(id);
+  body.appendChild(
+    h("div", { class: "err-box" },
+      "Non riesco a leggere il ticket: " + err.message,
+      h("div", { style: { display: "flex", gap: "8px", flexWrap: "wrap", marginTop: "8px" } },
+        isLegacy && ctx.openArHome
+          ? h("button", { class: "btn btn-primary", onclick: () => ctx.openArHome(row && row.arUrl) }, icon("external"), "Apri e collega Vecchio Cruscotto")
+          : null,
+        isLegacy && ctx.searchLegacyRefInTouch
+          ? h("button", { class: "btn", onclick: () => ctx.searchLegacyRefInTouch(num) }, `Cerca #${num} nei ticket Touch`)
+          : null,
+        h("button", { class: "btn", onclick: () => ctx.openTicket(id, row, { force: true }) }, "Riprova")))
+  );
 }
 
 function header(ctx, id, row, full) {
   const fav = ctx.isFavorite(id);
+  const isAr = (row && row.source === "ar") || (full && full.source === "ar");
+  const arUrl = (full && full.arUrl) || (row && row.arUrl) || "";
   const favBtn = h("button", { class: "btn btn-icon" + (fav ? " star-on" : ""), title: fav ? "Togli dai preferiti" : "Aggiungi ai preferiti", onclick: () => { ctx.toggleFavorite(id, row); favBtn.classList.toggle("star-on"); } }, icon("star"));
   return h("div", { class: "rd-head" },
     h("div", { class: "rd-top" },
@@ -43,12 +57,14 @@ function header(ctx, id, row, full) {
       h("div", { class: "rd-actions" },
         favBtn,
         full ? h("button", { class: "btn", title: "Copia tutto il ticket come testo", onclick: () => { navigator.clipboard.writeText(timelineText(full.timeline, `Ticket ${ticketNumber(id)} — ${row ? row.subject : ""}`)); toast("Ticket copiato negli appunti", "ok", 1800); } }, icon("copy"), "Copia") : null,
-        h("button", { class: "btn", title: "Apri questo ticket in HDA TOUCH", onclick: () => ctx.openInTouch(id) }, icon("external"), "Apri in Touch"),
+        isAr
+          ? h("button", { class: "btn", title: "Apri questo ticket nel Vecchio Cruscotto (Area Riservata)", onclick: () => ctx.openArHome && ctx.openArHome(arUrl) }, icon("external"), "Apri nel vecchio cruscotto")
+          : h("button", { class: "btn", title: "Apri questo ticket in HDA TOUCH", onclick: () => ctx.openInTouch(id) }, icon("external"), "Apri in Touch"),
         h("button", { class: "btn btn-icon", title: "Chiudi (Esc)", onclick: () => ctx.closeReader() }, icon("close")))),
     h("h1", { class: "rd-title" }, (row && row.subject) || (full && full.ticket && full.ticket.Subject) || "Ticket " + ticketNumber(id)));
 }
 
-function facts(row, ticket) {
+function facts(row, ticket, extraFacts = []) {
   const t = ticket || {};
   const F = [
     ["Cliente", [row.account, row.customerCode ? `(cod. ${row.customerCode})` : ""].filter(Boolean).join(" ")],
@@ -63,6 +79,7 @@ function facts(row, ticket) {
     ["Ultimo aggiornamento", fmtDateTime(row.lastChange || t.LastChange)],
     ["Chiuso il", fmtDateTime(t.ClosureDate || row.closureDate)],
     ["Scadenza SLA", row.nextExpiration && statusInfo(row.statusId).group !== "closed" ? `${fmtDateTime(row.nextExpiration)}${row.sla ? " · " + row.sla : ""}` : ""],
+    ...(extraFacts || []),
   ].filter(([, v]) => v && String(v).trim());
   return h("dl", { class: "facts" }, F.map(([k, v]) => h("div", { class: "fact" }, h("dt", null, k), h("dd", null, v))));
 }
@@ -115,7 +132,7 @@ export function renderReader(ctx, full, { fromArchive = null } = {}) {
 
   const body = h("div", { class: "rd-body" });
   el.appendChild(body);
-  body.appendChild(facts(row, full.ticket));
+  body.appendChild(facts(row, full.ticket, full.extraFacts));
   if (fromArchive) body.appendChild(h("div", { class: "rd-note" }, `Copia salvata nell'archivio locale il ${fmtDate(fromArchive)}: il portale non ha risposto.`));
   for (const n of full.notes || []) body.appendChild(h("div", { class: "rd-note" }, n));
 

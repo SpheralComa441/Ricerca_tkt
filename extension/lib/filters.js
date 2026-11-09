@@ -8,7 +8,7 @@
 //   2. la configurazione dell'elenco (campi "isFilter" con "filterOperator");
 //   3. i valori predefiniti qui sotto.
 
-import { ticketIdFrom } from "./util.js";
+import { ticketIdFrom, queryTerms } from "./util.js";
 import { statusInfo, STATUS_GROUPS, statusesOfGroup } from "./statuses.js";
 
 export const DOMAIN_CONDITION = { property: "id", value: "1", op: "eq", extKey: "TICKETDOMAIN", id: "Domain" };
@@ -89,6 +89,7 @@ export function ruleFor(def, calib = {}) {
   const learned = calib.learned && calib.learned[def.touchId];
   const cfg = (calib.config || []).find((f) => f.itemId === def.touchId);
   const ov = calib.overrides && calib.overrides[def.key];
+  const isWildcardText = def.key === "subject" || def.key === "classCli";
   const rule = {
     property: def.property,
     op: def.op,
@@ -101,13 +102,13 @@ export function ruleFor(def, calib = {}) {
     if (cfg.property) rule.property = cfg.property;
     else if (cfg.name && !/filter$/i.test(cfg.name)) rule.property = cfg.name;
     // Per Oggetto e Classificazione cliente, l'operatore "like" con "%…%" è stato verificato sul server per cercare anche a metà testo (mentre Touch espone "in" o "sw").
-    if (cfg.op && !(def.key === "subject" || def.key === "classCli")) rule.op = cfg.op;
+    if (cfg.op && !isWildcardText) rule.op = cfg.op;
     if (cfg.extKey) rule.extKey = cfg.extKey;
     rule.source = "configurazione Touch";
   }
-  if ((def.key === "subject" || def.key === "classCli") && calib.containsText && calib.containsText.op) {
+  if (isWildcardText && calib.containsText && calib.containsText.op && calib.containsText.wildcard) {
     rule.op = calib.containsText.op;
-    rule.wildcard = !!calib.containsText.wildcard;
+    rule.wildcard = true;
     rule.source = "calibrato";
   }
   if (ov) {
@@ -119,7 +120,7 @@ export function ruleFor(def, calib = {}) {
   }
   if (learned) {
     rule.property = learned.property;
-    rule.op = learned.op;
+    if (!isWildcardText) rule.op = learned.op;
     rule.extKey = learned.extKey ?? rule.extKey;
     rule.sample = learned.value;
     rule.source = "appreso da Touch";
@@ -133,7 +134,7 @@ function cond(def, rule, value) {
   return c;
 }
 
-/** Stato dei filtri → elenco di condizioni */
+/** Stato dei filtri → elenco di condizioni (in AND tra loro) */
 export function buildConditions(f, calib = {}) {
   const out = [{ ...DOMAIN_CONDITION }];
   const text = String(f.text || "").trim();
@@ -151,11 +152,25 @@ export function buildConditions(f, calib = {}) {
     } else if (def.kind === "date") {
       out.push(cond(def, rule, formatDateValue(v, rule.sample, def.endOfDay)));
     } else {
-      let s = String(v).trim();
-      if (rule.wildcard && !s.includes("%")) {
-        s = "%" + s.split(/\s+/).filter(Boolean).join("%") + "%";
+      const s = String(v).trim();
+      const terms = queryTerms(s);
+      if (rule.wildcard) {
+        if (s.includes("%")) {
+          out.push(cond(def, rule, s));
+        } else {
+          // Una condizione LIKE "%parola%" per ogni parola/frase: in AND trovano solo i ticket che contengono TUTTE le parole in qualsiasi ordine.
+          for (const t of terms.length ? terms : [s]) {
+            out.push(cond(def, rule, `%${t}%`));
+          }
+        }
+      } else if (def.key === "text" && !calib.singleFullText && terms.length > 1) {
+        // Più parole su FullText: una condizione per ogni parola in AND.
+        for (const t of terms) {
+          out.push(cond(def, rule, t));
+        }
+      } else {
+        out.push(cond(def, rule, s));
       }
-      out.push(cond(def, rule, s));
     }
   }
   if (tid) out.push({ property: "ID", value: tid, op: "eq", id: "ID" });

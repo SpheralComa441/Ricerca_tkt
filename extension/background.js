@@ -10,6 +10,7 @@ import { learnFromConditions } from "./lib/filters.js";
 const APP_URL = chrome.runtime.getURL("app/index.html");
 const TOUCH_MATCH = "https://zucchetti.support/HDAPortal/*";
 const TOUCH_HOME = "https://zucchetti.support/HDAPortal/";
+const AR_MATCH = "https://*.zucchetti.it/areariservata/*";
 
 async function openApp() {
   const tabs = await chrome.tabs.query({ url: APP_URL + "*" });
@@ -29,6 +30,12 @@ async function touchTab() {
   return tabs[0] || null;
 }
 
+async function arTab() {
+  const tabs = await chrome.tabs.query({ url: AR_MATCH });
+  tabs.sort((a, b) => (b.active - a.active) || ((b.lastAccessed || 0) - (a.lastAccessed || 0)));
+  return tabs[0] || null;
+}
+
 async function proxyFetch(req) {
   const tab = await touchTab();
   if (!tab) return { error: "no-tab" };
@@ -38,6 +45,59 @@ async function proxyFetch(req) {
   } catch {
     // scheda aperta prima dell'installazione: si inietta il ponte e si riprova
     await chrome.scripting.executeScript({ target: { tabId: tab.id }, files: ["content/bridge.js"] });
+    return await send();
+  }
+}
+
+function readArVarsInMainWorld() {
+  let mcid = null;
+  let idCenSer = "";
+  let pArea = "";
+  try {
+    if (window.splResults && window.splResults.m_cID) mcid = String(window.splResults.m_cID);
+    if (!mcid) {
+      for (const k of Object.keys(window)) {
+        const v = window[k];
+        if (v && typeof v === "object" && typeof v.m_cID === "string" && /^[0-9a-fA-F]{16,64}$/.test(v.m_cID)) {
+          mcid = v.m_cID;
+          break;
+        }
+      }
+    }
+    if (typeof window.w_IdCenSer === "string" && window.w_IdCenSer) idCenSer = window.w_IdCenSer;
+    if (typeof window.w_pArea === "string" && window.w_pArea) pArea = window.w_pArea;
+  } catch {
+    /* */
+  }
+  return { mcid, idCenSer, pArea };
+}
+
+async function arProxy(msg) {
+  const tab = await arTab();
+  if (!tab) return { error: "no-tab" };
+  let hint = {};
+  try {
+    const frames = await chrome.scripting.executeScript({
+      target: { tabId: tab.id, allFrames: true },
+      world: "MAIN",
+      func: readArVarsInMainWorld,
+    });
+    for (const f of frames || []) {
+      const r = f && f.result;
+      if (!r) continue;
+      if (r.mcid && !hint.mcid) hint.mcid = r.mcid;
+      if (r.idCenSer && !hint.idCenSer) hint.idCenSer = r.idCenSer;
+      if (r.pArea && !hint.pArea) hint.pArea = r.pArea;
+    }
+  } catch {
+    /* */
+  }
+  const payload = { ...msg, type: "ar-cmd", hint };
+  const send = () => chrome.tabs.sendMessage(tab.id, payload);
+  try {
+    return await send();
+  } catch {
+    await chrome.scripting.executeScript({ target: { tabId: tab.id }, files: ["content/ar_bridge.js"] });
     return await send();
   }
 }
@@ -84,6 +144,10 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
   if (!msg) return;
   if (msg.type === "hda-proxy") {
     proxyFetch(msg.req).then(sendResponse, (e) => sendResponse({ error: String(e && e.message) }));
+    return true;
+  }
+  if (msg.type === "ar-proxy") {
+    arProxy(msg).then(sendResponse, (e) => sendResponse({ error: String(e && e.message) }));
     return true;
   }
   if (msg.type === "open-in-touch") {
