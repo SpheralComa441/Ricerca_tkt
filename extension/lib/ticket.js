@@ -1,6 +1,6 @@
 // Ticket completo: dati, richiesta, conversazione, soluzione → una sola timeline ordinata.
 
-import { parseMsDate, norm, ticketNumber, isLegacyTicketNumber } from "./util.js";
+import { parseMsDate, norm, ticketNumber, ticketIdVariants, isLegacyTicketNumber } from "./util.js";
 import { htmlToText, cleanText, isProbablyHtml, unescapeIfEscapedHtml } from "./richtext.js";
 
 // Colonne della conversazione (nomi verificati dalla configurazione "Storico conversazioni" + TextHTML verificato via Projection)
@@ -109,46 +109,76 @@ export function timelineText(entries, header = "") {
 
 /**
  * Carica tutto ciò che serve per leggere un ticket.
- * hda = client; rowReader = lettore delle righe di Incidents; row = riga già nota (dall'elenco)
- * caps = capacità scoperte (si aggiornano qui: quale metodo ha funzionato)
+ * Prova entrambe le varianti dell'ID su HDA TOUCH (es. "9042633" senza Z per i 7 cifre e "11943209Z" con Z per gli 8 cifre)
+ * e, se il dettaglio completo non è disponibile su HDA TOUCH, interroga automaticamente il Vecchio Cruscotto.
  */
 export async function loadTicket(hda, id, { row = null, rowReader, conditionsFor, caps = {}, ar = null, log = () => {} } = {}) {
-  if (row && row.source === "ar" && ar) {
+  const arRowSeed = (row && row.source === "ar" ? row : row && row.arRow) || null;
+  if (row && row.source === "ar" && ar && !hda) {
     return await ar.loadTicket(id, { row });
   }
-  const notes = [];
-  // 1. riga con le descrizioni (cliente, gruppo, stato…) se non già nota
-  if (!row && rowReader) {
-    const { rows } = await hda.listData("Incidents", { conditions: conditionsFor(id), limit: 1 });
-    if (rows[0]) row = rowReader.read(rows[0]);
-  }
-  // 2. dati completi del ticket (richiesta e soluzione intere)
-  let ticket = null;
-  const tryProjection = async () => {
-    const rows = await hda.projection("Incident", [{ property: "ID", op: "eq", value: id }], TICKET_COLUMNS, 1);
-    if (!rows[0]) throw new Error("ticket non trovato");
-    return rows[0];
+
+  // Costruisce la lista ordinata di ID da provare su HDA TOUCH: prima l'ID esatto della riga (se proviene da Touch), poi le varianti senza/con Z.
+  const idCandidates = [];
+  const pushCand = (c) => {
+    const s = String(c || "").trim();
+    if (s && !idCandidates.includes(s)) idCandidates.push(s);
   };
-  const tryGet = () => hda.wscGet("Incident", id);
-  const order = caps.ticketVia === "get" ? [["get", tryGet], ["projection", tryProjection]] : [["projection", tryProjection], ["get", tryGet]];
-  for (const [name, fn] of order) {
-    try {
-      ticket = await fn();
-      caps.ticketVia = name;
-      break;
-    } catch (e) {
-      log(`ticket via ${name}: ${e.message}`);
-    }
-  }
-  // Se il ticket non esiste su HDA TOUCH, proviamo sul Vecchio Cruscotto (Area Riservata)
-  if (!row && !ticket) {
-    if (ar) {
+  if (row && row.id && row.source !== "ar") pushCand(row.id);
+  for (const v of ticketIdVariants(id)) pushCand(v);
+  pushCand(id);
+
+  const notes = [];
+  // 1. riga con le descrizioni (cliente, gruppo, stato…) se non già nota da HDA TOUCH
+  if ((!row || row.source === "ar") && rowReader && conditionsFor) {
+    for (const candId of idCandidates) {
       try {
-        return await ar.loadTicket(ticketNumber(id), { row: null });
-      } catch (arErr) {
-        log(`ticket vecchio cruscotto #${ticketNumber(id)}: ${arErr.message}`);
+        const { rows } = await hda.listData("Incidents", { conditions: conditionsFor(candId), limit: 1 });
+        if (rows[0]) {
+          const touchRow = rowReader.read(rows[0]);
+          row = arRowSeed ? { ...touchRow, arRow: arRowSeed, arUrl: arRowSeed.arUrl } : touchRow;
+          break;
+        }
+      } catch {
+        /* */
       }
     }
+  }
+
+  // 2. dati completi del ticket (richiesta e soluzione intere) provando le varianti dell'ID (es. "9042633" e "9042633Z")
+  let ticket = null;
+  let resolvedId = (row && row.source !== "ar" && row.id) || idCandidates[0] || id;
+  for (const candId of idCandidates) {
+    const tryProjection = async () => {
+      const rows = await hda.projection("Incident", [{ property: "ID", op: "eq", value: candId }], TICKET_COLUMNS, 1);
+      if (!rows[0]) throw new Error("ticket non trovato");
+      return rows[0];
+    };
+    const tryGet = () => hda.wscGet("Incident", candId);
+    const order = caps.ticketVia === "get" ? [["get", tryGet], ["projection", tryProjection]] : [["projection", tryProjection], ["get", tryGet]];
+    for (const [name, fn] of order) {
+      try {
+        ticket = await fn();
+        caps.ticketVia = name;
+        resolvedId = (ticket && ticket.ID) || candId;
+        break;
+      } catch (e) {
+        log(`ticket ${candId} via ${name}: ${e.message}`);
+      }
+    }
+    if (ticket) break;
+  }
+
+  // Se il dettaglio completo del ticket non è disponibile su HDA TOUCH, carichiamo dal Vecchio Cruscotto (Area Riservata)
+  if (!ticket && ar) {
+    try {
+      return await ar.loadTicket(ticketNumber(id), { row: arRowSeed });
+    } catch (arErr) {
+      log(`ticket vecchio cruscotto #${ticketNumber(id)}: ${arErr.message}`);
+    }
+  }
+
+  if (!row && !ticket) {
     if (isLegacyTicketNumber(id)) {
       const err = new Error(
         `Il ticket #${ticketNumber(id)} appartiene al Vecchio Cruscotto (Area Riservata Zucchetti). Apri e collega il Vecchio Cruscotto per leggerlo qui, oppure cerca i ticket Touch che lo richiamano.`
@@ -159,10 +189,15 @@ export async function loadTicket(hda, id, { row = null, rowReader, conditionsFor
     }
     throw new Error("ticket non trovato o non visibile con il tuo utente");
   }
+
+  if (row && resolvedId && row.source !== "ar") {
+    row = { ...row, id: resolvedId };
+  }
   if (!ticket) notes.push("Testo completo della richiesta non disponibile: mostro l'anteprima dell'elenco.");
-  // 3. conversazione completa
+
+  // 3. conversazione completa usando l'ID effettivo risolto su HDA TOUCH
   let items = null;
-  const cond = [{ property: "TicketID", op: "eq", value: id }];
+  const cond = [{ property: "TicketID", op: "eq", value: resolvedId }];
   if (caps.convVia !== "list") {
     try {
       const rows = await hda.projection("TicketConversationItem", cond, CONV_COLUMNS, 1000);
@@ -179,5 +214,5 @@ export async function loadTicket(hda, id, { row = null, rowReader, conditionsFor
     if (items.some((m) => m.truncated)) notes.push("Alcuni messaggi lunghi sono troncati a 500 caratteri (limite dell'elenco di Touch).");
   }
   const timeline = buildTimeline({ ticket: ticket || {}, row: row || {}, items });
-  return { id, row, ticket, items, timeline, notes };
+  return { id: resolvedId, row, ticket, items, timeline, notes, arUrl: (row && row.arUrl) || (arRowSeed && arRowSeed.arUrl) || "" };
 }

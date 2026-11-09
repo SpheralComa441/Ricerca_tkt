@@ -95,7 +95,7 @@ export function linkifyParts(s) {
   for (const m of String(s ?? "").matchAll(re)) {
     if (m.index > last) out.push({ t: "text", v: s.slice(last, m.index) });
     if (m[1]) out.push({ t: "url", v: m[1] });
-    else out.push({ t: "ticket", v: m[0], id: m[2] + "Z" });
+    else out.push({ t: "ticket", v: m[0], id: m[3] || m[2].length >= 8 ? m[2] + "Z" : m[2] });
     last = m.index + m[0].length;
   }
   if (last < String(s ?? "").length) out.push({ t: "text", v: s.slice(last) });

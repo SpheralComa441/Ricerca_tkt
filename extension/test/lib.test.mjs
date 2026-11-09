@@ -3,7 +3,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 
-import { parseMsDate, ticketIdFrom, ticketNumber, isLegacyTicketNumber, tokens, queryTerms, matchesAllTokens, norm, csvCell, fmtDate } from "../lib/util.js";
+import { parseMsDate, ticketIdFrom, ticketIdVariants, ticketNumber, isLegacyTicketNumber, tokens, queryTerms, matchesAllTokens, norm, csvCell, fmtDate } from "../lib/util.js";
 import { parseListConfig } from "../lib/listconfig.js";
 import { makeRowReader } from "../lib/rows.js";
 import { buildConditions, emptyFilters, formatDateValue, learnFromConditions, ruleFor, DEF, describeFilters, filterPayload, pickCalibrationSample, isUnconstrained, hasNarrowingFilter, primaryTerm } from "../lib/filters.js";
@@ -11,6 +11,7 @@ import { htmlToText, splitQuoted, linkifyParts, decodeEntities, unescapeIfEscape
 import { makeTransport, AuthError, HdaError, formBody } from "../lib/transport.js";
 import { makeHda } from "../lib/hda.js";
 import { buildArQuery, parseArResponse, buildArTicket, extractMcidFromHtml, splitArTesti } from "../lib/ar.js";
+import { loadTicket } from "../lib/ticket.js";
 
 // ---------------------------------------------------------------- util
 
@@ -23,14 +24,19 @@ test("parseMsDate: formato /Date(ms)/, data nulla HDA, ISO", () => {
   assert.equal(fmtDate(new Date(2026, 10, 6)), "06/11/2026");
 });
 
-test("numero ticket ↔ ID HDA e riconoscimento ticket del vecchio cruscotto (5-7 cifre)", () => {
+test("numero ticket ↔ ID HDA (8 cifre con Z, 5-7 cifre senza Z) e varianti ID", () => {
   assert.equal(ticketIdFrom("10500123"), "10500123Z");
   assert.equal(ticketIdFrom(" #10500123 "), "10500123Z");
   assert.equal(ticketIdFrom("10500123z"), "10500123Z");
-  assert.equal(ticketIdFrom("9018200"), "9018200Z");
+  assert.equal(ticketIdFrom("9018200"), "9018200");
+  assert.equal(ticketIdFrom("9042633"), "9042633");
+  assert.equal(ticketIdFrom("9042633Z"), "9042633");
+  assert.deepEqual(ticketIdVariants("9042633"), ["9042633", "9042633Z"]);
+  assert.deepEqual(ticketIdVariants("10500123"), ["10500123Z", "10500123"]);
   assert.equal(ticketIdFrom("cedolino"), null);
   assert.equal(ticketIdFrom("12 34"), null);
   assert.equal(ticketNumber("10500123Z"), "10500123");
+  assert.equal(ticketNumber("9042633"), "9042633");
   assert.equal(isLegacyTicketNumber("9018200"), true);
   assert.equal(isLegacyTicketNumber("9018200Z"), true);
   assert.equal(isLegacyTicketNumber("#8907717"), true);
@@ -237,12 +243,13 @@ test("splitQuoted: risposte citate in italiano e inglese", () => {
   assert.equal(splitQuoted(t3).quoted, "");
 });
 
-test("linkifyParts: URL e numeri di ticket", () => {
-  const p = linkifyParts("vedi tk 10500123 e https://example.com/x?y=1 non 2026 né 12345");
-  assert.deepEqual(p.filter((x) => x.t !== "text").map((x) => x.t), ["ticket", "url"]);
-  assert.equal(p.find((x) => x.t === "ticket").id, "10500123Z");
+test("linkifyParts: URL e numeri di ticket (8 cifre con Z, 7 cifre senza Z)", () => {
+  const p = linkifyParts("vedi tk 10500123, #9042633 e https://example.com/x?y=1 non 2026 né 12345");
+  assert.deepEqual(p.filter((x) => x.t !== "text").map((x) => x.t), ["ticket", "ticket", "url"]);
+  assert.equal(p.filter((x) => x.t === "ticket")[0].id, "10500123Z");
+  assert.equal(p.filter((x) => x.t === "ticket")[1].id, "9042633");
   assert.ok(p.find((x) => x.t === "url").v.startsWith("https://example.com/x?y=1"));
-  assert.equal(p.filter((x) => x.t === "ticket").length, 1);
+  assert.equal(p.filter((x) => x.t === "ticket").length, 2);
 });
 
 // ---------------------------------------------------------------- trasporto
@@ -315,13 +322,16 @@ test("hda: projection rimappa le colonne sulle espressioni", async () => {
 
 // ---------------------------------------------------------------- vecchio cruscotto (Area Riservata)
 
-test("ar: extractMcidFromHtml, buildArQuery (NumTic e AND tra parole), parseArResponse (HTML comment) e splitArTesti", () => {
+test("ar: extractMcidFromHtml, buildArQuery (NumTic, prefissi * e AND tra parole), parseArResponse (HTML comment) e splitArTesti", () => {
   const info = extractMcidFromHtml('var w_IdCenSer="PAOW"; var w_pArea="TICKOPEXXX"; this.splResults.m_cID = "869b6b5acf5d583993b21322b693202a";');
   assert.deepEqual(info, { mcid: "869b6b5acf5d583993b21322b693202a", idCenSer: "PAOW", pArea: "TICKOPEXXX" });
 
-  // Ricerca per più parole concatenate in AND (formato reale di spsl_fquery_mc)
-  const qWords = buildArQuery({ text: "ricalcolo detassazione", idCenSer: "PAOW" });
-  assert.equal(qWords, "IdCenSer:PAOW and ( Testi:(ricalcolo) or Oggetto:(ricalcolo) ) and ( Testi:(detassazione) or Oggetto:(detassazione) )");
+  // Ricerca per più parole/radici concatenate in AND (formato reale di spsl_fquery_mc con prefisso parola*)
+  const qWords = buildArQuery({ text: "voc retributiv", idCenSer: "PAOW" });
+  assert.equal(
+    qWords,
+    "IdCenSer:PAOW and ( Testi:(voc or voc*) or Oggetto:(voc or voc*) ) and ( Testi:(retributiv or retributiv*) or Oggetto:(retributiv or retributiv*) )"
+  );
 
   // Ricerca per numero ticket a 7 cifre tramite il campo Solr NumTic
   const qTid = buildArQuery({ ticketId: "9018200Z", idCenSer: "PAOW" });
@@ -373,6 +383,41 @@ test("ar: extractMcidFromHtml, buildArQuery (NumTic e AND tra parole), parseArRe
   assert.equal(full.timeline[1].internal, true);
   assert.equal(full.timeline[4].kind, "solution");
   assert.equal(full.timeline[5].internal, true);
+});
+
+test("loadTicket: risolve i ticket a 7 cifre senza Z su HDA TOUCH (es. 9042633) anche se aperti dalla ricerca per parole", async () => {
+  const fakeHda = {
+    async projection(entity, conditions) {
+      const idVal = conditions && conditions[0] && conditions[0].value;
+      if (entity === "Incident") {
+        // Su HDA TOUCH i ticket a 7 cifre hanno ID = "9042633" (senza Z)
+        if (idVal === "9042633") {
+          return [{ ID: "9042633", Subject: "Allineamento voci retributive", Problem: "Richiesta completa del cliente", Solution: "Soluzione applicata" }];
+        }
+        return [];
+      }
+      if (entity === "TicketConversationItem") {
+        if (idVal === "9042633") {
+          return [{ ID: "C1", CreationDate: "/Date(1700000000000)/", Text: "Risposta completa operatore", Type: 4, Visibility: true, "User.FullName": "Mario Rossi" }];
+        }
+        return [];
+      }
+      return [];
+    },
+    async get() {
+      throw new Error("Object Not Found");
+    },
+    async listData() {
+      return { rows: [], total: 0 };
+    },
+  };
+  const rowFromList = { id: "9042633", subject: "Allineamento voci retributive", problem: "Anteprima" };
+  const full = await loadTicket(fakeHda, "9042633", { row: rowFromList });
+  assert.equal(full.id, "9042633");
+  assert.ok(full.ticket);
+  assert.equal(full.ticket.Problem, "Richiesta completa del cliente");
+  assert.equal(full.notes.length, 0);
+  assert.equal(full.timeline.length, 3);
 });
 
 

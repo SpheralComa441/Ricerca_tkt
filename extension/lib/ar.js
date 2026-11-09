@@ -37,12 +37,16 @@ export function extractMcidFromHtml(html) {
 function fmtSolrTerm(w) {
   const clean = String(w || "").replace(/[()"\\:]/g, " ").trim();
   if (!clean) return "";
-  return /\s/.test(clean) ? `"${clean}"` : clean;
+  if (/\s/.test(clean)) return `"${clean}"`;
+  if (/^[A-Za-z0-9\u00C0-\u017F]{3,}$/.test(clean)) return `${clean} or ${clean}*`;
+  return clean;
 }
 
 /**
  * Costruisce la query Solr per servlet/spsl_fquery_mc (sintassi verificata dal portale Zucchetti).
  * Tutte le parole inserite sono concatenate con `and` così vengono trovati solo i ticket che le contengono tutte.
+ * Per le parole singole di almeno 3 caratteri include anche il prefisso `parola*` (es. `voc` → `voc or voc*`),
+ * così radici o parole troncate (es. "voc retributiv") trovano anche "voce", "voci", "retributiva", ecc.
  */
 export function buildArQuery({
   text = "",
@@ -600,12 +604,12 @@ export function makeAr({ log = () => {}, fetch: fetchImpl = globalThis.fetch } =
       dateFrom,
       dateTo,
       idCenSer: state.idCenSer,
-      defaultYears: !ticketId && !dateFrom && !dateTo,
+      defaultYears: false,
     });
     if (!q1) return [];
     let rows = await rawQuery(q1);
-    if (!rows.length) {
-      // Riprova senza vincolo di centro di servizio / triennio per trovare anche ticket più vecchi o di altri centri
+    if (!rows.length && (state.idCenSer || ticketId)) {
+      // Riprova senza vincolo di centro di servizio o cercando il numero anche nel testo dei messaggi
       const q2 = buildArQuery({
         text,
         subject,

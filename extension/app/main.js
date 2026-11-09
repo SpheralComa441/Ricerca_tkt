@@ -17,7 +17,7 @@ import { loadTicket, TICKET_COLUMNS } from "../lib/ticket.js";
 import { saveTicket, getTicket, searchArchive, archivedMap, archiveInfo, kvGet, kvSet, onKvChange, reviveRow } from "../lib/store.js";
 import { makeLookups } from "../lib/lookups.js";
 import { htmlToText, cleanText, isProbablyHtml, unescapeIfEscapedHtml } from "../lib/richtext.js";
-import { ticketIdFrom, ticketNumber, isLegacyTicketNumber, fmtRelative, fmtDateTime, tokens, queryTerms, matchesAllTokens, pool, sleep, csvCell, debounce } from "../lib/util.js";
+import { ticketIdFrom, ticketIdVariants, ticketNumber, isLegacyTicketNumber, fmtRelative, fmtDateTime, tokens, queryTerms, matchesAllTokens, pool, sleep, csvCell, debounce } from "../lib/util.js";
 
 const inExtension = typeof chrome !== "undefined" && !!(chrome.runtime && chrome.runtime.id);
 const DAY = 86400000;
@@ -397,19 +397,69 @@ function userGroupOrAssignedFallback(f) {
   return null;
 }
 
+/**
+ * Unisce in un unico elenco i risultati di HDA TOUCH e del Vecchio Cruscotto deduplicandoli per numero ticket.
+ * Se lo stesso ticket (es. 9042633) compare in entrambi i cruscotti, mantiene la riga HDA TOUCH come principale
+ * arricchendola con i campi del Vecchio Cruscotto (testo completo indicizzato da Solr, URL diretto, anteprima).
+ */
 function mergeRowLists(...lists) {
-  const seen = new Set();
+  const byNum = new Map();
   const out = [];
   for (const list of lists) {
     for (const r of list || []) {
       if (!r || !r.id) continue;
-      const key = `${r.source || "hda"}:${r.id}`;
-      if (seen.has(key)) continue;
-      seen.add(key);
-      out.push(r);
+      const key = ticketNumber(r.id) || String(r.id);
+      const existingIdx = byNum.get(key);
+      if (existingIdx === undefined) {
+        byNum.set(key, out.length);
+        out.push({ ...r });
+      } else {
+        const prev = out[existingIdx];
+        if (prev.source === "ar" && r.source !== "ar") {
+          out[existingIdx] = {
+            ...r,
+            arUrl: r.arUrl || prev.arUrl,
+            fullText: r.fullText || prev.fullText,
+            problem: r.problem || prev.problem,
+            catalog: r.catalog || prev.catalog,
+          };
+        } else if (prev.source !== "ar" && r.source === "ar") {
+          out[existingIdx] = {
+            ...prev,
+            arUrl: prev.arUrl || r.arUrl,
+            fullText: prev.fullText || r.fullText,
+            problem: prev.problem || r.problem,
+            catalog: prev.catalog || r.catalog,
+          };
+        }
+      }
     }
   }
   return out;
+}
+
+function sortUnifiedRows(rows, exactNum = "") {
+  if (!rows || rows.length <= 1) return rows || [];
+  const key = S.sort && S.sort.key ? S.sort.key : "date";
+  const desc = !S.sort || S.sort.dir !== "ASC";
+  const dir = desc ? -1 : 1;
+  return [...rows].sort((a, b) => {
+    if (exactNum) {
+      const aEx = ticketNumber(a.id) === exactNum ? 1 : 0;
+      const bEx = ticketNumber(b.id) === exactNum ? 1 : 0;
+      if (aEx !== bEx) return bEx - aEx;
+    }
+    if (key === "id") {
+      const na = Number(ticketNumber(a.id)) || 0;
+      const nb = Number(ticketNumber(b.id)) || 0;
+      if (na !== nb) return (na - nb) * dir;
+    } else {
+      const da = a[key] instanceof Date ? a[key].getTime() : a.date instanceof Date ? a.date.getTime() : 0;
+      const db = b[key] instanceof Date ? b[key].getTime() : b.date instanceof Date ? b.date.getTime() : 0;
+      if (da !== db) return (da - db) * dir;
+    }
+    return 0;
+  });
 }
 
 /**
@@ -617,7 +667,7 @@ async function search({ more = false } = {}) {
       // Appena rispondono la ricerca veloce sull'Oggetto e il Vecchio Cruscotto (~350 ms), mostriamo subito i primi risultati
       const [subRows, arRows] = await Promise.all([subPromise, arPromise]);
       if (ac.signal.aborted) return;
-      const fastMerged = mergeRowLists(subRows, arRows);
+      const fastMerged = sortUnifiedRows(mergeRowLists(subRows, arRows));
       if (fastMerged.length) {
         S.results = fastMerged;
         S.total = fastMerged.length;
@@ -626,13 +676,30 @@ async function search({ more = false } = {}) {
 
       const ftRes = await ftPromise;
       if (ac.signal.aborted) return;
-      rows = mergeRowLists(ftRes.rows, subRows, arRows);
+      rows = sortUnifiedRows(mergeRowLists(ftRes.rows, subRows, arRows));
       total = multiWord ? rows.length : Math.max(ftRes.total || 0, rows.length);
     } else if (tid) {
-      // Ricerca per numero ticket (sia 8 cifre HDA TOUCH sia 5-7 cifre Vecchio Cruscotto es. 9018200)
-      const touchIdPromise = run(f, size)
-        .then((r) => readRawRows(r.rows))
-        .catch(() => []);
+      // Ricerca per numero ticket (sia 8 cifre HDA TOUCH con Z sia 5-7 cifre senza Z su Touch e Vecchio Cruscotto es. 9042633)
+      const idVariants = ticketIdVariants(tid);
+      const touchIdPromise = (async () => {
+        for (const v of idVariants) {
+          try {
+            const r = await hda.listData("Incidents", {
+              conditions: conditionsForId(v),
+              page: 1,
+              start: 0,
+              limit: size,
+              sort: sortSpec(),
+              signal: ac.signal,
+            });
+            const found = readRawRows(r.rows);
+            if (found.length) return found;
+          } catch {
+            /* prova variante successiva */
+          }
+        }
+        return [];
+      })();
       const touchRefPromise = isLegacyNum
         ? run({ ...f, text: "", subject: ticketNumber(tid) }, 20)
             .then((r) => readRawRows(r.rows))
@@ -642,10 +709,10 @@ async function search({ more = false } = {}) {
       if (ac.signal.aborted) return;
       S.activeEffectiveFilters = f;
       const cleanNum = ticketNumber(tid);
-      // Mettiamo in cima il ticket con numero esatto (da Touch o dal Vecchio Cruscotto)
-      const exactAr = arRows.filter((r) => r.id === cleanNum);
-      const otherAr = arRows.filter((r) => r.id !== cleanNum);
-      rows = mergeRowLists(idRows, exactAr, refRows, otherAr);
+      // Uniamo in un solo elenco i risultati di entrambi i cruscotti mettendo in cima il ticket con numero esatto
+      const exactAr = arRows.filter((r) => ticketNumber(r.id) === cleanNum);
+      const otherAr = arRows.filter((r) => ticketNumber(r.id) !== cleanNum);
+      rows = sortUnifiedRows(mergeRowLists(idRows, exactAr, refRows, otherAr), cleanNum);
       total = rows.length;
     } else {
       let res;
@@ -665,7 +732,7 @@ async function search({ more = false } = {}) {
       const arRows = await arPromise;
       if (ac.signal.aborted) return;
       const touchRows = await verifyTouchRowsAllWords(readRawRows(res.rows), f);
-      rows = mergeRowLists(touchRows, arRows);
+      rows = sortUnifiedRows(mergeRowLists(touchRows, arRows));
       total = multiWord ? rows.length : Math.max(res.total || 0, rows.length);
     }
 
@@ -901,13 +968,15 @@ function toggleFilters() {
 // ---------------------------------------------------------------- lettura del ticket
 
 async function openTicket(id, row, { force = false } = {}) {
-  const isArRow = row && row.source === "ar";
-  id = isArRow ? String(row.id || id || "") : ticketIdFrom(id) || String(id || "");
+  if (!row && id) {
+    const clean = ticketNumber(id);
+    row = S.results.find((r) => r.id === id || (clean && ticketNumber(r.id) === clean)) || null;
+  }
+  id = row && row.id ? String(row.id) : ticketIdFrom(id) || String(id || "").trim();
   if (!id) return;
   if (!force && S.current === id && !$("#reader").hidden) return;
   const my = ++openSeq;
   S.current = id;
-  if (!row) row = S.results.find((r) => r.id === id || ticketNumber(r.id) === ticketNumber(id)) || null;
   $("#layout").classList.add("reading");
   for (const n of document.querySelectorAll("#results .item")) n.classList.toggle("sel", n.dataset.id === id || ticketNumber(n.dataset.id) === ticketNumber(id));
   ui.readerSearch = "";

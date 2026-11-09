@@ -92,20 +92,35 @@ export function escapeHtml(s) {
   return String(s ?? "").replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" })[c]);
 }
 
-/** Numero ticket scritto dall'utente → ID HDA ("10500123" → "10500123Z"). null se non è un numero. */
+/**
+ * Numero ticket scritto dall'utente → ID principale.
+ * Su HDA TOUCH i ticket nativi a 8+ cifre hanno il suffisso "Z" (es. "11943209Z"),
+ * mentre i ticket a 5-7 cifre (es. "9042633") hanno l'ID numerico puro senza "Z".
+ */
 export function ticketIdFrom(q) {
   const s = String(q || "").trim().replace(/^#/, "");
   const m = /^(\d{5,10})([A-Za-z]?)$/.exec(s);
   if (!m) return null;
-  return m[1] + (m[2] ? m[2].toUpperCase() : "Z");
+  const suffix = m[2].toUpperCase();
+  if (suffix && suffix !== "Z") return m[1] + suffix;
+  return m[1].length >= 8 ? m[1] + "Z" : m[1];
 }
 
 /** "10500123Z" → "10500123" (come lo scrivono le persone) */
 export function ticketNumber(id) {
-  return String(id || "").replace(/Z$/i, "");
+  return String(id || "").trim().replace(/^#/, "").replace(/Z$/i, "");
 }
 
-/** Vero se il numero di ticket ha 5-7 cifre (tipico del vecchio cruscotto / Area Riservata). */
+/** Restituisce le varianti dell'ID (senza e con "Z") nell'ordine più probabile per HDA TOUCH. */
+export function ticketIdVariants(idOrQuery) {
+  const tid = ticketIdFrom(idOrQuery);
+  if (!tid) return [];
+  const num = ticketNumber(tid);
+  const withZ = `${num}Z`;
+  return tid === withZ ? [withZ, num] : [num, withZ];
+}
+
+/** Vero se il numero di ticket ha 5-7 cifre (tipico del vecchio cruscotto / Area Riservata o migrato senza Z). */
 export function isLegacyTicketNumber(idOrQuery) {
   const s = String(idOrQuery || "").trim().replace(/^#/, "");
   const m = /^(\d{5,7})([Zz]?)$/.exec(s);
