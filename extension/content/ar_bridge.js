@@ -13,12 +13,14 @@
 
   const MCID_PATTERNS = [
     /splResults\.m_cID\s*=\s*['"]([0-9a-fA-F]{16,64})['"]/,
-    /\bm_cID\s*[=:]\s*['"]([0-9a-fA-F]{16,64})['"]/,
+    /['"]spsl_fquery_mc['"][\s\S]{0,400}?\.m_cID\s*=\s*['"]([0-9a-fA-F]{16,64})['"]/,
   ];
 
   function extractFromHtml(html) {
     if (!html) return null;
-    const cen = /\bw_IdCenSer\s*=\s*['"]([A-Z0-9_]{2,12})['"]/.exec(html);
+    const cen =
+      /\bw_IdCenSer\s*=\s*['"]([A-Z0-9_]{2,12})['"]/.exec(html) ||
+      /\bIdCenSer:([A-Z0-9_]{2,12})\b/.exec(html);
     if (cen && cen[1]) state.idCenSer = cen[1];
     const area = /\bw_pArea\s*=\s*['"]([A-Z0-9_]{3,20})['"]/.exec(html);
     if (area && area[1]) state.pArea = area[1];
@@ -42,6 +44,25 @@
     }
   }
 
+  async function fetchPortletMcid(base) {
+    for (const portlet of ["spsl_wsolrresultsgrid_portlet.jsp", "gspl_wsolrresultsgrid_portlet.jsp"]) {
+      try {
+        const r = await fetch(`${base}/jsp/${portlet}`, {
+          method: "POST",
+          credentials: "same-origin",
+          headers: { "Content-Type": "application/x-www-form-urlencoded; charset=UTF-8" },
+          body: "clientsideinclusion=true",
+        });
+        if (!r.ok) continue;
+        const id = extractFromHtml(await r.text());
+        if (id) return id;
+      } catch {
+        /* */
+      }
+    }
+    return null;
+  }
+
   async function discover(hint = {}) {
     if (hint.idCenSer) state.idCenSer = hint.idCenSer;
     if (hint.pArea) state.pArea = hint.pArea;
@@ -51,64 +72,58 @@
     }
     if (state.mcid && !hint.force) return state;
 
-    const fromMain = scanDoc(document);
-    if (fromMain) {
-      state.mcid = fromMain;
-      return state;
-    }
-    try {
-      for (let i = 0; i < window.frames.length; i++) {
-        try {
-          const id = scanDoc(window.frames[i].document);
-          if (id) {
-            state.mcid = id;
-            return state;
-          }
-        } catch {
-          /* frame di altra origine */
-        }
+    if (!hint.force) {
+      const fromMain = scanDoc(document);
+      if (fromMain) {
+        state.mcid = fromMain;
+        return state;
       }
-    } catch {
-      /* */
-    }
-
-    const base = location.origin + "/areariservata";
-    const pages = [
-      `${base}/jsp/sipv_psearch_infi.jsp`,
-      `${base}/jsp/gspv_psearch.jsp`,
-      `${base}/jsp/gspl_wsolrresultsgrid_portlet.jsp`,
-      `${base}/jsp/spsl_wsolrresultsgrid_portlet.jsp`,
-    ];
-    for (const url of pages) {
       try {
-        const r = await fetch(url, { credentials: "same-origin" });
-        if (!r.ok) continue;
-        const html = await r.text();
-        const id = extractFromHtml(html);
-        if (id) {
-          state.mcid = id;
-          return state;
-        }
-        for (const pm of html.matchAll(/src\s*=\s*['"]([^'"]*(?:solrresultsgrid|fquery|psearch)[^'"]*)['"]/gi)) {
+        for (let i = 0; i < window.frames.length; i++) {
           try {
-            const subUrl = new URL(pm[1], url).href;
-            const sr = await fetch(subUrl, { credentials: "same-origin" });
-            if (sr.ok) {
-              const sid = extractFromHtml(await sr.text());
-              if (sid) {
-                state.mcid = sid;
-                return state;
-              }
+            const id = scanDoc(window.frames[i].document);
+            if (id) {
+              state.mcid = id;
+              return state;
             }
           } catch {
-            /* */
+            /* frame di altra origine */
           }
         }
       } catch {
         /* */
       }
     }
+
+    const base = location.origin + "/areariservata";
+    const portletId = await fetchPortletMcid(base);
+    if (portletId) {
+      state.mcid = portletId;
+    }
+
+    if (!state.idCenSer || !state.mcid) {
+      const pages = [`${base}/jsp/sipv_psearch_infi.jsp`, `${base}/jsp/gspv_psearch.jsp`];
+      for (const url of pages) {
+        try {
+          const r = await fetch(url, { credentials: "same-origin" });
+          if (!r.ok) continue;
+          const html = await r.text();
+          const id = extractFromHtml(html);
+          if (id && !state.mcid) state.mcid = id;
+          if (state.mcid && state.idCenSer) break;
+        } catch {
+          /* */
+        }
+      }
+    }
     return state;
+  }
+
+  function hasValidArPayload(text) {
+    const t = String(text || "").trim();
+    if (!t) return false;
+    if (/Function return value:\s*\{[\s\S]*\}\s*-->/.test(t)) return true;
+    return t.startsWith("{") || t.startsWith("[");
   }
 
   async function runSearch(msg) {
@@ -128,8 +143,7 @@
       return { status: r.status, text: await r.text() };
     };
     let res = await doPost(state.mcid);
-    const trimmed = String(res.text || "").trim();
-    if (!trimmed || (!trimmed.startsWith("{") && !trimmed.startsWith("["))) {
+    if (!hasValidArPayload(res.text)) {
       await discover({ ...(msg.hint || {}), force: true });
       if (state.mcid) res = await doPost(state.mcid);
     }

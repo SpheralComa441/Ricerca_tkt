@@ -55,13 +55,28 @@ function readArVarsInMainWorld() {
   let pArea = "";
   try {
     if (window.splResults && window.splResults.m_cID) mcid = String(window.splResults.m_cID);
-    if (!mcid) {
-      for (const k of Object.keys(window)) {
-        const v = window[k];
-        if (v && typeof v === "object" && typeof v.m_cID === "string" && /^[0-9a-fA-F]{16,64}$/.test(v.m_cID)) {
-          mcid = v.m_cID;
-          break;
-        }
+    for (const k of Object.keys(window)) {
+      let v;
+      try {
+        v = window[k];
+      } catch {
+        continue;
+      }
+      if (!v || typeof v !== "object") continue;
+      if (!mcid && v.splResults && typeof v.splResults.m_cID === "string" && /^[0-9a-fA-F]{16,64}$/.test(v.splResults.m_cID)) {
+        mcid = v.splResults.m_cID;
+      }
+      if (!mcid && v.m_cServlet === "spsl_fquery_mc" && typeof v.m_cID === "string" && /^[0-9a-fA-F]{16,64}$/.test(v.m_cID)) {
+        mcid = v.m_cID;
+      }
+      if (!idCenSer && v.userInput && typeof v.userInput.Value === "function") {
+        const uiVal = String(v.userInput.Value() || "");
+        const m = /\bIdCenSer:([A-Z0-9_]+)/.exec(uiVal);
+        if (m) idCenSer = m[1];
+      }
+      if (!pArea && v.area && typeof v.area.Value === "function") {
+        const aVal = String(v.area.Value() || "").trim();
+        if (aVal) pArea = aVal;
       }
     }
     if (typeof window.w_IdCenSer === "string" && window.w_IdCenSer) idCenSer = window.w_IdCenSer;

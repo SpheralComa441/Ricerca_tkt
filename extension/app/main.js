@@ -17,7 +17,7 @@ import { loadTicket, TICKET_COLUMNS } from "../lib/ticket.js";
 import { saveTicket, getTicket, searchArchive, archivedMap, archiveInfo, kvGet, kvSet, onKvChange, reviveRow } from "../lib/store.js";
 import { makeLookups } from "../lib/lookups.js";
 import { htmlToText, cleanText, isProbablyHtml, unescapeIfEscapedHtml } from "../lib/richtext.js";
-import { ticketIdFrom, ticketNumber, isLegacyTicketNumber, fmtRelative, fmtDateTime, tokens, matchesAllTokens, pool, sleep, csvCell, debounce } from "../lib/util.js";
+import { ticketIdFrom, ticketNumber, isLegacyTicketNumber, fmtRelative, fmtDateTime, tokens, queryTerms, matchesAllTokens, pool, sleep, csvCell, debounce } from "../lib/util.js";
 
 const inExtension = typeof chrome !== "undefined" && !!(chrome.runtime && chrome.runtime.id);
 const DAY = 86400000;
@@ -379,6 +379,13 @@ function isTimeoutError(e) {
   return /timeout|scaduto|tempo limite/i.test(String((e && e.message) || ""));
 }
 
+function twoYearsAgoDate() {
+  const d = new Date();
+  d.setFullYear(d.getFullYear() - 2);
+  const p = (n) => String(n).padStart(2, "0");
+  return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())}`;
+}
+
 function userGroupOrAssignedFallback(f) {
   const gId =
     S.caps.defaultGroupId ||
@@ -390,7 +397,84 @@ function userGroupOrAssignedFallback(f) {
   return null;
 }
 
-async function search({ more = false, forceFullText = false } = {}) {
+function mergeRowLists(...lists) {
+  const seen = new Set();
+  const out = [];
+  for (const list of lists) {
+    for (const r of list || []) {
+      if (!r || !r.id) continue;
+      const key = `${r.source || "hda"}:${r.id}`;
+      if (seen.has(key)) continue;
+      seen.add(key);
+      out.push(r);
+    }
+  }
+  return out;
+}
+
+/**
+ * Verifica che ogni ticket restituito da HDA TOUCH contenga TUTTE le parole cercate (in AND).
+ * Se una parola non compare già in Oggetto o Richiesta iniziale (`problem`), interroga in un'unica
+ * chiamata veloce `TicketConversationItem` per verificare che compaia nei messaggi della conversazione.
+ */
+async function verifyTouchRowsAllWords(rows, f) {
+  if (!rows || !rows.length) return [];
+  const subjWords = queryTerms(f.subject || "");
+  let candidates = rows;
+  if (subjWords.length > 1) {
+    candidates = candidates.filter((r) => matchesAllTokens(r.subject || "", subjWords));
+  }
+  const tid = ticketIdFrom(f.text);
+  const textWords = tid ? [] : queryTerms(f.text || "");
+  if (textWords.length <= 1) return candidates;
+
+  const confirmedIds = new Set();
+  const needConvCheck = [];
+  for (const r of candidates) {
+    const hay = `${r.subject || ""} ${r.problem || ""} ${r.catalog || ""} ${r.account || ""}`;
+    if (matchesAllTokens(hay, textWords)) {
+      confirmedIds.add(r.id);
+    } else {
+      needConvCheck.push(r);
+    }
+  }
+
+  if (needConvCheck.length && hda) {
+    try {
+      const checkIds = needConvCheck.slice(0, 60).map((r) => r.id);
+      const convRows = await hda.projection(
+        "TicketConversationItem",
+        [{ property: "TicketID", op: "in", value: checkIds.join("|") }],
+        ["TicketID", "Text"],
+        500,
+      );
+      const byTicket = new Map();
+      for (const c of convRows || []) {
+        const k = c && c.TicketID;
+        if (!k) continue;
+        if (!byTicket.has(k)) byTicket.set(k, []);
+        byTicket.get(k).push(String(c.Text || ""));
+      }
+      for (const r of needConvCheck) {
+        const msgs = byTicket.get(r.id) || [];
+        const fullHay = `${r.subject || ""} ${r.problem || ""} ${r.catalog || ""} ${r.account || ""} ${msgs.join(" ")}`;
+        if (matchesAllTokens(fullHay, textWords)) {
+          confirmedIds.add(r.id);
+          if (!r.problem && msgs.length) {
+            const hitMsg = msgs.find((m) => textWords.some((w) => matchesAllTokens(m, [w]))) || msgs[0];
+            if (hitMsg) r.problem = hitMsg;
+          }
+        }
+      }
+    } catch (e) {
+      log(`verifica parole conversazione: ${e.message}`);
+    }
+  }
+
+  return candidates.filter((r) => confirmedIds.has(r.id));
+}
+
+async function search({ more = false } = {}) {
   if (!hda) return;
   if (searchAbort) searchAbort.abort();
   const ac = new AbortController();
@@ -407,16 +491,16 @@ async function search({ more = false, forceFullText = false } = {}) {
   const f = S.filters;
   const size = Number(S.settings.pageSize) || 50;
   const tid = ticketIdFrom(f.text);
-  const prevResults = S.results;
-  const prevTotal = S.total;
-  const prevEff = S.activeEffectiveFilters;
+  const isLegacyNum = isLegacyTicketNumber(f.text);
+  const textWords = tid ? [] : queryTerms(f.text || "");
+  const subjWords = queryTerms(f.subject || "");
+  const multiWord = textWords.length > 1 || subjWords.length > 1;
+  const fetchLimit = !more && multiWord ? Math.max(size, 150) : size;
 
   if (!more) {
     S.page = 1;
-    if (!forceFullText) {
-      S.results = [];
-      S.total = 0;
-    }
+    S.results = [];
+    S.total = 0;
     S.cursor = -1;
     S.notices = [];
     runArchiveSearch(f.text);
@@ -427,129 +511,186 @@ async function search({ more = false, forceFullText = false } = {}) {
   S.error = null;
   renderResults();
 
-  const run = (filters) =>
+  const calibForSearch = { ...S.calib, primaryTermOnly: true };
+
+  const run = (filters, customLimit = fetchLimit) =>
     hda.listData("Incidents", {
-      conditions: buildConditions(filters, S.calib),
+      conditions: buildConditions(filters, calibForSearch),
       page: S.page,
       start: (S.page - 1) * size,
-      limit: size,
+      limit: customLimit,
       sort: sortSpec(),
       signal: ac.signal,
     });
 
+  const readRawRows = (rawRows) => {
+    checkReader(rawRows);
+    return rawRows.map((r) => rowReader.read(r));
+  };
+
+  // Ricerca in parallelo anche sul Vecchio Cruscotto (Area Riservata) quando si cercano parole o numeri a 5-7 cifre
+  const arPromise =
+    !more && ar && (f.text || f.subject)
+      ? ar
+          .search({
+            text: tid ? "" : f.text,
+            subject: f.subject,
+            ticketId: tid ? ticketNumber(tid) : "",
+            dateFrom: f.dateFrom,
+            dateTo: f.dateTo,
+          })
+          .then((r) => {
+            if (ar.state.connected) setArConn(true);
+            return r || [];
+          })
+          .catch((e) => {
+            log(`vecchio cruscotto: ${e.message}`);
+            return [];
+          })
+      : Promise.resolve([]);
+
   try {
-    let res;
+    let rows = [];
+    let total = 0;
+
     if (more && S.activeEffectiveFilters) {
-      res = await run(S.activeEffectiveFilters);
+      const res = await run(S.activeEffectiveFilters, size);
+      if (ac.signal.aborted) return;
+      rows = await verifyTouchRowsAllWords(readRawRows(res.rows), f);
+      total = res.total;
     } else if (isUnconstrained(f)) {
       // Un'interrogazione senza alcun filtro su 10+ anni di storico scade a 25s su SQL Server nelle ore di punta:
       // mostriamo i ticket negli stati aperti (come fa Touch all'avvio) e, se anche quello andasse in timeout, restringiamo al gruppo dell'operatore.
       const openF = { ...f, statuses: OPEN_STATUS_IDS };
+      let res;
       try {
-        res = await run(openF);
+        res = await run(openF, size);
         S.activeEffectiveFilters = openF;
         S.notices.push(
-          "Vista iniziale: mostro i ticket aperti per evitare il timeout del portale (25 s). Scrivi nella casella di ricerca o scegli un filtro a sinistra per cercare automaticamente anche in tutti i ticket chiusi."
+          "Vista iniziale: mostro i ticket aperti per evitare il timeout del portale (25 s). Scrivi nella casella di ricerca o scegli un filtro a sinistra per cercare automaticamente anche in tutti i ticket chiusi e nei messaggi."
         );
       } catch (e) {
         const fb = isTimeoutError(e) && userGroupOrAssignedFallback(f);
         if (!fb) throw e;
         log("timeout anche sugli aperti di tutti i gruppi: restringo al gruppo/operatore");
-        res = await run(fb);
+        res = await run(fb, size);
         S.activeEffectiveFilters = fb;
         S.notices.push(
-          "Vista iniziale: il portale era sovraccarico su tutti i gruppi, mostro i ticket aperti del tuo gruppo. Usa la ricerca o i filtri a sinistra per cercare su tutti i gruppi e nei ticket chiusi."
+          "Vista iniziale: il portale era sovraccarico su tutti i gruppi, mostro i ticket aperti del tuo gruppo. Usa la ricerca o i filtri a sinistra per cercare su tutti i gruppi, nei ticket chiusi e nei messaggi."
         );
       }
+      if (ac.signal.aborted) return;
+      rows = readRawRows(res.rows);
+      total = res.total;
     } else if (f.text && !tid) {
-      if (hasNarrowingFilter(f) || forceFullText) {
-        // C'è già un filtro (es. Gruppo, Cliente, Stato, Data) oppure l'utente ha chiesto esplicitamente di cercare nei messaggi sul portale:
-        // usiamo FullText/eq[INCLUDECONVERSATIONITEM] che cerca anche dentro i messaggi delle conversazioni.
+      // RICERCA NEI MESSAGGI ATTIVA DI DEFAULT SENZA POSSIBILITÀ DI SCELTA:
+      // Eseguiamo sempre in parallelo:
+      //  1) FullText/eq[INCLUDECONVERSATIONITEM] su HDA TOUCH (cerca dentro i messaggi delle conversazioni e nell'oggetto)
+      //  2) Subject su HDA TOUCH (~350 ms, mostra subito i primi risultati mentre FullText completa la scansione dei messaggi)
+      //  3) Vecchio Cruscotto (spsl_fquery_mc su Testi + Oggetto)
+      const subF = fallbackToSubject(f);
+      const subPromise = run(subF, fetchLimit)
+        .then((r) => verifyTouchRowsAllWords(readRawRows(r.rows), subF))
+        .catch(() => []);
+
+      const ftPromise = (async () => {
         try {
-          res = await run(f);
+          const r = await run(f, fetchLimit);
           S.activeEffectiveFilters = f;
-          if (forceFullText) {
-            S.notices.push(`Ricerca di «${f.text}» completata anche dentro i messaggi delle conversazioni sul portale.`);
-          }
+          return { rows: await verifyTouchRowsAllWords(readRawRows(r.rows), f), total: r.total };
         } catch (e) {
           if (e instanceof AuthError || e.name === "AbortError") throw e;
-          log(`ricerca FullText (${e.message}): ripiego sull'oggetto`);
-          if (forceFullText && prevResults.length) {
-            S.results = prevResults;
-            S.total = prevTotal;
-            S.activeEffectiveFilters = prevEff;
-            S.notices.push(
-              "La ricerca dentro tutti i messaggi di tutti gli anni ha superato il limite di 25 secondi del portale. Scegli almeno un filtro a sinistra (es. Gruppo, Cliente o Aperto dal) per cercare nei messaggi in meno di un secondo."
-            );
-            return;
-          }
-          const subF = fallbackToSubject(f);
+          log(`FullText su tutto lo storico (${e.message}): riprovo sugli ultimi 24 mesi / aperti`);
+          // Se SQL Server supera i 25s su 10 anni senza filtri, restringiamo automaticamente FullText agli ultimi 24 mesi (o agli aperti)
+          const recentF = !f.dateFrom ? { ...f, dateFrom: twoYearsAgoDate() } : { ...f, statuses: OPEN_STATUS_IDS };
           try {
-            res = await run(subF);
+            const r2 = await run(recentF, fetchLimit);
+            S.activeEffectiveFilters = recentF;
+            return { rows: await verifyTouchRowsAllWords(readRawRows(r2.rows), f), total: r2.total };
+          } catch {
             S.activeEffectiveFilters = subF;
-            S.notices.push(
-              `La ricerca nei messaggi sul portale ha impiegato troppo tempo: ho cercato «${f.text}» nell'oggetto dei ticket (e nell'Archivio locale).`
-            );
-          } catch (e2) {
-            if (!isTimeoutError(e2) || subF.statuses.length) throw e2;
-            const subOpen = { ...subF, statuses: OPEN_STATUS_IDS };
-            res = await run(subOpen);
-            S.activeEffectiveFilters = subOpen;
-            S.notices.push(
-              `Il portale ha superato i 25 secondi sullo storico completo: mostro i ticket aperti con «${f.text}». Aggiungi un filtro (Gruppo, Cliente o Data) per cercare anche nei chiusi.`
-            );
+            return { rows: [], total: 0 };
           }
         }
-      } else {
-        // Solo testo libero senza altri filtri: cerchiamo subito nell'Oggetto su TUTTI i ticket (aperti e chiusi) per rispondere in pochi secondi senza incorrere nel timeout di 25s sulle conversazioni storiche.
-        const subF = fallbackToSubject(f);
-        try {
-          res = await run(subF);
-          S.activeEffectiveFilters = subF;
-          S.notices.push({
-            text: `Ho cercato «${f.text}» nell'oggetto di tutti i ticket (aperti e chiusi) e nei messaggi dell'archivio locale. Se scegli un Gruppo, Cliente o Data a sinistra cerco automaticamente anche dentro i messaggi sul portale.`,
-            actionLabel: "Cerca anche nei messaggi sul portale",
-            action: () => search({ forceFullText: true }),
-          });
-        } catch (e) {
-          if (!isTimeoutError(e) || subF.statuses.length) throw e;
-          log("timeout sull'oggetto su tutto lo storico: riprovo sui ticket aperti");
-          const subOpen = { ...subF, statuses: OPEN_STATUS_IDS };
-          res = await run(subOpen);
-          S.activeEffectiveFilters = subOpen;
-          S.notices.push(
-            `Il portale ha superato i 25 secondi sullo storico completo: mostro i ticket aperti con «${f.text}». Scegli un Gruppo, Cliente o periodo a sinistra per cercare anche in tutti i ticket chiusi.`
-          );
-        }
+      })();
+
+      // Appena rispondono la ricerca veloce sull'Oggetto e il Vecchio Cruscotto (~350 ms), mostriamo subito i primi risultati
+      const [subRows, arRows] = await Promise.all([subPromise, arPromise]);
+      if (ac.signal.aborted) return;
+      const fastMerged = mergeRowLists(subRows, arRows);
+      if (fastMerged.length) {
+        S.results = fastMerged;
+        S.total = fastMerged.length;
+        renderResults();
       }
+
+      const ftRes = await ftPromise;
+      if (ac.signal.aborted) return;
+      rows = mergeRowLists(ftRes.rows, subRows, arRows);
+      total = multiWord ? rows.length : Math.max(ftRes.total || 0, rows.length);
+    } else if (tid) {
+      // Ricerca per numero ticket (sia 8 cifre HDA TOUCH sia 5-7 cifre Vecchio Cruscotto es. 9018200)
+      const touchIdPromise = run(f, size)
+        .then((r) => readRawRows(r.rows))
+        .catch(() => []);
+      const touchRefPromise = isLegacyNum
+        ? run({ ...f, text: "", subject: ticketNumber(tid) }, 20)
+            .then((r) => readRawRows(r.rows))
+            .catch(() => [])
+        : Promise.resolve([]);
+      const [idRows, refRows, arRows] = await Promise.all([touchIdPromise, touchRefPromise, arPromise]);
+      if (ac.signal.aborted) return;
+      S.activeEffectiveFilters = f;
+      const cleanNum = ticketNumber(tid);
+      // Mettiamo in cima il ticket con numero esatto (da Touch o dal Vecchio Cruscotto)
+      const exactAr = arRows.filter((r) => r.id === cleanNum);
+      const otherAr = arRows.filter((r) => r.id !== cleanNum);
+      rows = mergeRowLists(idRows, exactAr, refRows, otherAr);
+      total = rows.length;
     } else {
+      let res;
       try {
-        res = await run(f);
+        res = await run(f, fetchLimit);
         S.activeEffectiveFilters = f;
       } catch (e) {
         if (!isTimeoutError(e) || f.statuses.length) throw e;
         log("timeout sullo storico completo: riprovo sui ticket aperti");
         const openF = { ...f, statuses: OPEN_STATUS_IDS };
-        res = await run(openF);
+        res = await run(openF, fetchLimit);
         S.activeEffectiveFilters = openF;
         S.notices.push(
           "La ricerca su tutto lo storico ha superato il limite di 25 secondi del portale: mostro prima i ticket aperti. Aggiungi un filtro più specifico (es. Gruppo, Cliente o Data) per includere i ticket chiusi."
         );
       }
+      const arRows = await arPromise;
+      if (ac.signal.aborted) return;
+      const touchRows = await verifyTouchRowsAllWords(readRawRows(res.rows), f);
+      rows = mergeRowLists(touchRows, arRows);
+      total = multiWord ? rows.length : Math.max(res.total || 0, rows.length);
     }
+
     if (ac.signal.aborted) return;
-    checkReader(res.rows);
-    const rows = res.rows.map((r) => rowReader.read(r));
-    S.results = more ? S.results.concat(rows) : rows;
-    S.total = res.total;
-    if (!S.sampleTicket && rows[0] && rows[0].id && rows[0].subject) {
-      S.sampleTicket = { id: rows[0].id, subject: rows[0].subject };
+    S.results = more ? mergeRowLists(S.results, rows) : rows;
+    S.total = total;
+    const firstTouch = rows.find((r) => r.source !== "ar" && r.id && r.subject);
+    if (!S.sampleTicket && firstTouch) {
+      S.sampleTicket = { id: firstTouch.id, subject: firstTouch.subject };
     }
-    lookups.harvest(rows);
-    harvestTypes(rows);
+    lookups.harvest(rows.filter((r) => r.source !== "ar"));
+    harvestTypes(rows.filter((r) => r.source !== "ar"));
     if (S.connected !== true) setConn(true);
-    if (!more && tid && rows.length === 1) openTicket(rows[0].id, rows[0]);
-    if (!more && tid && !rows.length) S.notices.push(`Il ticket ${ticketNumber(tid)} non risulta tra quelli che puoi vedere in Touch (o il numero è errato).`);
+    if (!more && tid) {
+      const cleanNum = ticketNumber(tid);
+      const exact = rows.find((r) => ticketNumber(r.id) === cleanNum) || (rows.length === 1 ? rows[0] : null);
+      if (exact) openTicket(exact.id, exact);
+    }
+    if (!more && tid && !rows.length) {
+      S.notices.push(
+        isLegacyNum && S.arConnected !== true
+          ? `Il ticket #${ticketNumber(tid)} non è su HDA TOUCH. Clicca su «Collega vecchio cruscotto» in alto a destra ed esegui l'accesso all'Area Riservata per cercarlo e aprirlo dal Vecchio Cruscotto.`
+          : `Il ticket ${ticketNumber(tid)} non risulta né in HDA TOUCH né nel Vecchio Cruscotto.`
+      );
+    }
     archivedMap(rows.map((r) => r.id))
       .then((m) => { for (const [k, v] of m) S.archived.set(k, v); renderResults(); })
       .catch(() => {});
@@ -557,7 +698,14 @@ async function search({ more = false, forceFullText = false } = {}) {
     if (e.name === "AbortError" || ac.signal.aborted) return;
     log("ricerca: " + e.message);
     if (more) S.page -= 1;
-    S.error = e;
+    // Se Touch è andato in errore ma il Vecchio Cruscotto ha trovato risultati, li mostriamo comunque
+    const arFallback = await arPromise.catch(() => []);
+    if (arFallback && arFallback.length) {
+      S.results = arFallback;
+      S.total = arFallback.length;
+    } else {
+      S.error = e;
+    }
     if (e instanceof AuthError) setConn(false);
   } finally {
     if (searchAbort === ac) {

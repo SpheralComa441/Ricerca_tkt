@@ -128,6 +128,12 @@ export function ruleFor(def, calib = {}) {
   return rule;
 }
 
+/** Restituisce la parola più lunga (più selettiva sul database) tra quelle cercate. */
+export function primaryTerm(terms) {
+  if (!terms || !terms.length) return "";
+  return [...terms].sort((a, b) => b.length - a.length)[0];
+}
+
 function cond(def, rule, value) {
   const c = { property: rule.property, value, op: rule.op, id: def.touchId };
   if (rule.extKey) c.extKey = rule.extKey;
@@ -157,12 +163,16 @@ export function buildConditions(f, calib = {}) {
       if (rule.wildcard) {
         if (s.includes("%")) {
           out.push(cond(def, rule, s));
+        } else if (calib.primaryTermOnly && terms.length > 1) {
+          out.push(cond(def, rule, `%${primaryTerm(terms)}%`));
         } else {
           // Una condizione LIKE "%parola%" per ogni parola/frase: in AND trovano solo i ticket che contengono TUTTE le parole in qualsiasi ordine.
           for (const t of terms.length ? terms : [s]) {
             out.push(cond(def, rule, `%${t}%`));
           }
         }
+      } else if (def.key === "text" && calib.primaryTermOnly && terms.length > 1) {
+        out.push(cond(def, rule, primaryTerm(terms)));
       } else if (def.key === "text" && !calib.singleFullText && terms.length > 1) {
         // Più parole su FullText: una condizione per ogni parola in AND.
         for (const t of terms) {

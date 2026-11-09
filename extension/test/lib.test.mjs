@@ -6,11 +6,11 @@ import assert from "node:assert/strict";
 import { parseMsDate, ticketIdFrom, ticketNumber, isLegacyTicketNumber, tokens, queryTerms, matchesAllTokens, norm, csvCell, fmtDate } from "../lib/util.js";
 import { parseListConfig } from "../lib/listconfig.js";
 import { makeRowReader } from "../lib/rows.js";
-import { buildConditions, emptyFilters, formatDateValue, learnFromConditions, ruleFor, DEF, describeFilters, filterPayload, pickCalibrationSample, isUnconstrained, hasNarrowingFilter } from "../lib/filters.js";
+import { buildConditions, emptyFilters, formatDateValue, learnFromConditions, ruleFor, DEF, describeFilters, filterPayload, pickCalibrationSample, isUnconstrained, hasNarrowingFilter, primaryTerm } from "../lib/filters.js";
 import { htmlToText, splitQuoted, linkifyParts, decodeEntities, unescapeIfEscapedHtml, cleanText } from "../lib/richtext.js";
 import { makeTransport, AuthError, HdaError, formBody } from "../lib/transport.js";
 import { makeHda } from "../lib/hda.js";
-import { buildArQuery, parseArResponse, buildArTicket, extractMcidFromHtml } from "../lib/ar.js";
+import { buildArQuery, parseArResponse, buildArTicket, extractMcidFromHtml, splitArTesti } from "../lib/ar.js";
 
 // ---------------------------------------------------------------- util
 
@@ -131,7 +131,8 @@ test("buildConditions: più gruppi → in; numero ticket → ID eq senza testo",
   assert.equal(c.some((x) => x.id === "FullText"), false);
 });
 
-test("ruleFor, isUnconstrained, hasNarrowingFilter e condizioni AND per ogni parola cercata", () => {
+test("ruleFor, isUnconstrained, hasNarrowingFilter, primaryTerm e condizioni per parole cercate", () => {
+  assert.equal(primaryTerm(["info", "detassazione", "premi"]), "detassazione");
   const defText = ruleFor(DEF.text, {});
   assert.equal(defText.source, "verificato");
   assert.equal(defText.op, "eq");
@@ -145,7 +146,7 @@ test("ruleFor, isUnconstrained, hasNarrowingFilter e condizioni AND per ogni par
   assert.equal(r1.op, "ct");
   assert.equal(r1.property, "FullTextField");
   assert.equal(r1.source, "configurazione Touch");
-  // Subject conserva "like" con "%…%" e genera una condizione AND per ciascuna parola
+  // Subject conserva "like" con "%…%"
   const rSub = ruleFor(DEF.subject, cfg);
   assert.equal(rSub.op, "like");
   assert.equal(rSub.wildcard, true);
@@ -157,19 +158,18 @@ test("ruleFor, isUnconstrained, hasNarrowingFilter e condizioni AND per ogni par
       { property: "Subject", value: "%detassazione%", op: "like", id: "Subject" },
     ]
   );
-  // FullText con più parole genera una condizione per ciascuna parola in AND (o una sola con singleFullText)
-  const cFt = buildConditions({ ...emptyFilters(), text: "ricalcolo detassazione" }, {});
-  assert.deepEqual(
-    cFt.filter((x) => x.id === "FullText"),
-    [
-      { property: "FullText", value: "ricalcolo", op: "eq", extKey: "INCLUDECONVERSATIONITEM", id: "FullText" },
-      { property: "FullText", value: "detassazione", op: "eq", extKey: "INCLUDECONVERSATIONITEM", id: "FullText" },
-    ]
+  // Con primaryTermOnly invia a SQL Server il termine più selettivo (evitando l'OR lato server di Touch)
+  const cPrimary = buildConditions(
+    { ...emptyFilters(), text: "info detassazione", subject: "info detassazione" },
+    { primaryTermOnly: true }
   );
-  const cFtSingle = buildConditions({ ...emptyFilters(), text: "ricalcolo detassazione" }, { singleFullText: true });
   assert.deepEqual(
-    cFtSingle.filter((x) => x.id === "FullText"),
-    [{ property: "FullText", value: "ricalcolo detassazione", op: "eq", extKey: "INCLUDECONVERSATIONITEM", id: "FullText" }]
+    cPrimary.filter((x) => x.id === "FullText"),
+    [{ property: "FullText", value: "detassazione", op: "eq", extKey: "INCLUDECONVERSATIONITEM", id: "FullText" }]
+  );
+  assert.deepEqual(
+    cPrimary.filter((x) => x.id === "Subject"),
+    [{ property: "Subject", value: "%detassazione%", op: "like", id: "Subject" }]
   );
 
   const r2 = ruleFor(DEF.text, { ...cfg, learned: { FullText: { property: "FT", op: "like", value: "x" } } });
@@ -264,13 +264,15 @@ function fakeFetch(handler) {
   return fn;
 }
 
-test("transport: JSON ok, invio form con cookie", async () => {
-  const f = fakeFetch(() => ({ body: JSON.stringify({ success: true, data: [1, 2], total: 2 }) }));
-  const t = makeTransport({ base: "https://x/HDAPortal", fetch: f });
-  const d = await t.request({ path: "/WSCView/ListData/Incidents", method: "POST", body: formBody({ a: 1, b: { c: 2 } }), expect: "json" });
-  assert.deepEqual(d.data, [1, 2]);
-  assert.equal(f.calls[0].init.credentials, "include");
-  assert.equal(f.calls[0].init.body, "a=1&b=%7B%22c%22%3A2%7D");
+test("transport: JSON ok, invio form con cookie", () => {
+  return (async () => {
+    const f = fakeFetch(() => ({ body: JSON.stringify({ success: true, data: [1, 2], total: 2 }) }));
+    const t = makeTransport({ base: "https://x/HDAPortal", fetch: f });
+    const d = await t.request({ path: "/WSCView/ListData/Incidents", method: "POST", body: formBody({ a: 1, b: { c: 2 } }), expect: "json" });
+    assert.deepEqual(d.data, [1, 2]);
+    assert.equal(f.calls[0].init.credentials, "include");
+    assert.equal(f.calls[0].init.body, "a=1&b=%7B%22c%22%3A2%7D");
+  })();
 });
 
 test("transport: pagina di login → AuthError; success:false → HdaError", async () => {
@@ -313,59 +315,64 @@ test("hda: projection rimappa le colonne sulle espressioni", async () => {
 
 // ---------------------------------------------------------------- vecchio cruscotto (Area Riservata)
 
-test("ar: extractMcidFromHtml, buildArQuery (AND tra tutte le parole), parseArResponse e buildArTicket", () => {
-  const info = extractMcidFromHtml('var w_IdCenSer="PAOW"; var w_pArea="TICKOPEXXX"; splResults.m_cID = "a1b2c3d4e5f60718293a";');
-  assert.deepEqual(info, { mcid: "a1b2c3d4e5f60718293a", idCenSer: "PAOW", pArea: "TICKOPEXXX" });
+test("ar: extractMcidFromHtml, buildArQuery (NumTic e AND tra parole), parseArResponse (HTML comment) e splitArTesti", () => {
+  const info = extractMcidFromHtml('var w_IdCenSer="PAOW"; var w_pArea="TICKOPEXXX"; this.splResults.m_cID = "869b6b5acf5d583993b21322b693202a";');
+  assert.deepEqual(info, { mcid: "869b6b5acf5d583993b21322b693202a", idCenSer: "PAOW", pArea: "TICKOPEXXX" });
 
-  // Ricerca per più parole concatenate in AND
+  // Ricerca per più parole concatenate in AND (formato reale di spsl_fquery_mc)
   const qWords = buildArQuery({ text: "ricalcolo detassazione", idCenSer: "PAOW" });
-  assert.equal(qWords, '( Testi:("ricalcolo") or Oggetto:("ricalcolo") ) and ( Testi:("detassazione") or Oggetto:("detassazione") ) and (IdCenSer:PAOW)');
+  assert.equal(qWords, "IdCenSer:PAOW and ( Testi:(ricalcolo) or Oggetto:(ricalcolo) ) and ( Testi:(detassazione) or Oggetto:(detassazione) )");
 
-  // Ricerca per numero ticket a 7 cifre (senza filtro IdCenSer per trovare il ticket su qualsiasi centro)
+  // Ricerca per numero ticket a 7 cifre tramite il campo Solr NumTic
   const qTid = buildArQuery({ ticketId: "9018200Z", idCenSer: "PAOW" });
-  assert.equal(qTid, '( Testi:("9018200") or Oggetto:("9018200") )');
+  assert.equal(qTid, "IdCenSer:PAOW and NumTic:9018200");
 
-  const sampleJson = JSON.stringify({
-    fields: ["id", "type", "description", "altdescription", "url1"],
-    data: [
-      [
-        "TK9018200",
-        "Ticket",
-        "[#9018200] [PAGHE WEB] [14-05-2024] Ricalcolo detassazione su premi",
-        "<p>Buongiorno, chiediamo verifica del ricalcolo detassazione.</p>",
-        "../jsp/gsTK_view.jsp?TicketID=9018200",
-      ],
-    ],
-  });
-  const rows = parseArResponse(sampleJson);
+  // Risposta HTML reale di spsl_fquery_mc con commento `<!-- Function return value:{...} -->` e riga sentinella finale
+  const sampleHtml = [
+    "<!doctype html><html><body><p class='TabLabel'>Ok routine eseguita.</p><!--",
+    "Function return value:" +
+      JSON.stringify({
+        fields: ["id", "type", "description", "altDescription", "NumTic", "IdStato", "StatoBase", "IdProdotto", "Oggetto", "DataApe", "IdCenSer", "IdGruppo", "Testi", "url1"],
+        data: [
+          [
+            "000000009021830",
+            "TICKOPE003",
+            "[#9018200] [PAGHEW] [02-09-2026] Gestione contrattuale festività cadenti di domenica",
+            "<div>Buongiorno, il cliente ha una ditta...</div>",
+            "9018200",
+            "CLOSE",
+            "C",
+            "PAGHEW",
+            "Gestione contrattuale festività cadenti di domenica",
+            "2026-09-02 15:30:31.0",
+            "PAOW",
+            "10663",
+            "Buongiorno, richiesta del cliente con freccia --> interna.  Ticket preassegnato dal dispatcher automatico alla coda operatore.  Ticket preassegnato dal dispatcher automatico alla coda operatore.  Buongiorno, ecco la prima risposta operatore.  Ciao, replica del cliente.  Ciao, ecco la soluzione finale.  Gentile cliente, In riferimento alla richiesta di assistenza in oggetto, procediamo alla chiusura.",
+            "gspv_psearch_card.jsp?w_TTCODICE=000000009021830",
+          ],
+          "t,CCCCCCCCCCCCCC,-1",
+        ],
+      }),
+    "--></body></html>",
+  ].join("\n");
+
+  const rows = parseArResponse(sampleHtml);
   assert.equal(rows.length, 1);
   assert.equal(rows[0].id, "9018200");
   assert.equal(rows[0].source, "ar");
-  assert.equal(rows[0].catalog, "PAGHE WEB");
-  assert.equal(rows[0].subject, "Ricalcolo detassazione su premi");
-  assert.equal(rows[0].problem, "Buongiorno, chiediamo verifica del ricalcolo detassazione.");
-  assert.equal(rows[0].arUrl, "https://www.zucchetti.it/areariservata/jsp/gsTK_view.jsp?TicketID=9018200");
+  assert.equal(rows[0].catalog, "PAGHEW");
+  assert.equal(rows[0].ownerGroup, "PAOW · 10663");
+  assert.equal(rows[0].subject, "Gestione contrattuale festività cadenti di domenica");
+  assert.equal(rows[0].arUrl, "https://www.zucchetti.it/areariservata/jsp/gspv_psearch_card.jsp?w_TTCODICE=000000009021830");
 
-  const full = buildArTicket({
-    id: "9018200",
-    row: rows[0],
-    detail: {
-      title: "Dettaglio ticket 9018200",
-      fields: [["Ragione sociale", "Rossi Srl"], ["Stato", "Chiuso"], ["Priorità", "Normale"]],
-      texts: [
-        ["Descrizione richiesta", "Buongiorno, chiediamo verifica del ricalcolo detassazione."],
-        ["Soluzione", "Occorre impostare la voce nel tabellone detassazione."],
-      ],
-      tables: [],
-      url: rows[0].arUrl,
-    },
-  });
+  const full = buildArTicket({ id: "9018200", row: rows[0] });
   assert.equal(full.id, "9018200");
   assert.equal(full.source, "ar");
-  assert.equal(full.row.account, "Rossi Srl");
-  assert.equal(full.row.statusText, "Chiuso");
-  assert.equal(full.timeline.length, 2);
+  assert.equal(full.timeline.length, 6);
   assert.equal(full.timeline[0].kind, "request");
-  assert.equal(full.timeline[1].kind, "solution");
+  assert.equal(full.timeline[1].internal, true);
+  assert.equal(full.timeline[4].kind, "solution");
+  assert.equal(full.timeline[5].internal, true);
 });
+
 
