@@ -23,7 +23,7 @@ import { ticketIdFrom, ticketIdVariants, ticketNumber, isLegacyTicketNumber, isT
 const inExtension = typeof chrome !== "undefined" && !!(chrome.runtime && chrome.runtime.id);
 const DAY = 86400000;
 // portalLang "auto": la stessa lingua (_pl) che usa la pagina di Touch (registrata dal service worker)
-const DEFAULT_SETTINGS = { pageSize: 50, portalLang: "auto", archiveOnRead: true, archiveCap: 300 };
+const DEFAULT_SETTINGS = { pageSize: 50, portalLang: "auto", archiveOnRead: true, archiveCap: 300, arCentro: "" };
 
 function portalLang(settings, touchLang) {
   const chosen = settings && settings.portalLang;
@@ -59,7 +59,7 @@ const S = {
   tab: "touch", // touch | ar | storico (le tre fonti) | archive | favorites | recent
   touchTotal: 0,
   storico: { filters: emptyStoricoFilters(), results: [], total: 0, loading: false, error: null, key: "" },
-  stLookups: { groups: {}, operators: {} },
+  stLookups: { groups: {}, operators: {}, clients: {} },
   archiveHits: [],
   archiveCount: 0,
   archived: new Map(),
@@ -112,6 +112,7 @@ const ctx = {
   storicoSetFilter,
   storicoReset,
   storicoLookup,
+  arCentre: () => (ar && ar.state.idCenSer) || S.caps.arCentro || "",
 };
 
 // ---------------------------------------------------------------- utilità
@@ -188,7 +189,11 @@ async function checkArConnection() {
   try {
     const st = await ar.checkStatus();
     setArConn(st.connected === true);
-    if (st.connected) log(`vecchio cruscotto collegato (${st.mode}${st.idCenSer ? ", centro " + st.idCenSer : ""})`);
+    if (st.connected) {
+      log(`vecchio cruscotto collegato (${st.mode}${st.idCenSer ? ", centro " + st.idCenSer : ", centro non ancora noto"})`);
+      // il centro servizi (e i nomi di operatori e gruppi) si cercano subito, senza aspettare la prima ricerca
+      ensureCentre().then((c) => (c ? warmNames() : log("centro servizi dell'Area Riservata non trovato: si può scrivere in Diagnostica → Impostazioni")));
+    }
     return st.connected === true;
   } catch {
     setArConn(false);
@@ -783,17 +788,21 @@ async function search({ more = false, fresh = false } = {}) {
     } else {
       arPromise = track(
         "Vecchio Cruscotto",
-        ar
-          .search({
+        ensureCentre()
+          .then(() => ar.search({
             text: tid ? "" : f.text,
             subject: tid ? "" : f.subject,
             ticketId: tid ? ticketNumber(tid) : "",
             dateFrom: tid ? "" : f.dateFrom,
             dateTo: tid ? "" : f.dateTo,
             groups: plan.groups,
-          })
+          }))
           .then((r) => {
             if (ar.state.connected) setArConn(true);
+            // senza centro servizi le parole si cercano in tutti i centri: lo si dice
+            if (!tid && !ac.signal.aborted && ar.state.connected && !ar.state.idCenSer && r && r.length) {
+              S.notices.push("Vecchio Cruscotto: non conosco il tuo centro servizi, quindi questi risultati comprendono anche i ticket degli altri centri (partner compresi). Scrivilo in Diagnostica → Impostazioni → «Centro servizi dell'Area Riservata».");
+            }
             return r || [];
           })
           .catch((e) => {
@@ -1149,6 +1158,67 @@ function autoPickTab() {
   }
 }
 
+// ---------------------------------------------------------------- centro servizi dell'Area Riservata
+
+/**
+ * Il centro servizi dell'operatore (es. "PAOW") serve al Vecchio Cruscotto e allo Storico per cercare solo tra i
+ * ticket del proprio centro: senza, la ricerca per parole pesca anche i ticket degli altri centri (partner compresi).
+ * In ordine: quello scritto nelle Impostazioni, quello letto dalla pagina del cruscotto, quello già trovato in
+ * passato, quello ricavato dai ticket del proprio gruppo di Touch ("G10663HR" → gruppo 10663).
+ */
+let centrePromise = null;
+function ensureCentre() {
+  if (!ar) return Promise.resolve("");
+  if (S.settings.arCentro) ar.setCentre(S.settings.arCentro);
+  if (ar.state.idCenSer) return Promise.resolve(ar.state.idCenSer);
+  if (S.caps.arCentro) {
+    ar.setCentre(S.caps.arCentro);
+    return Promise.resolve(ar.state.idCenSer);
+  }
+  if (!centrePromise) {
+    const g = /^G(\d+)/i.exec(String(S.caps.defaultGroupId || ""));
+    centrePromise = (g ? ar.findCentre([g[1]]) : Promise.resolve(""))
+      .catch((e) => (log(`centro servizi: ${e.message}`), ""))
+      .then((c) => {
+        centrePromise = null;
+        if (c) {
+          S.caps.arCentro = c;
+          kvSet("caps", S.caps);
+          warmNames();
+        }
+        return c;
+      });
+  }
+  return centrePromise;
+}
+
+/** Nomi di operatori, gruppi e clienti per le righe del Vecchio Cruscotto (che riporta solo i codici): dagli ultimi ticket dello Storico. */
+let namesWarmed = false;
+async function warmNames() {
+  if (namesWarmed || !storico || Object.keys(S.stLookups.operators).length >= 15) return;
+  namesWarmed = true;
+  try {
+    const d = new Date(Date.now() - 45 * DAY);
+    const p2 = (n) => String(n).padStart(2, "0");
+    const res = await storico.search({ ...emptyStoricoFilters(), dateFrom: `${d.getFullYear()}-${p2(d.getMonth() + 1)}-${p2(d.getDate())}`, dateTo: "" }, { rows: 100 });
+    harvestStorico(res.rows);
+    renderResults();
+  } catch (e) {
+    log(`nomi dallo Storico: ${e.message}`);
+  }
+}
+
+/** Riga del Vecchio Cruscotto con i nomi al posto dei codici, dove li conosciamo. */
+function withArNames(r) {
+  if (!r || r.source !== "ar") return r;
+  const L = S.stLookups;
+  const group = r.ownerGroupId && L.groups[r.ownerGroupId];
+  const oper = r.assignedId && L.operators[r.assignedId];
+  const client = r.customerCode && L.clients[r.customerCode];
+  if (!group && !oper && !client) return r;
+  return { ...r, ownerGroup: group || r.ownerGroup, assigned: oper || r.assigned, account: client || r.account };
+}
+
 // ---------------------------------------------------------------- Storico (ricerca avanzata dell'Area Riservata)
 
 /** Cosa cercare nello Storico: il numero scritto nella casella in alto, altrimenti i filtri della scheda Storico. */
@@ -1176,6 +1246,7 @@ async function runStorico({ more = false, fresh = false } = {}) {
   Object.assign(st, { loading: true, error: null, key });
   renderResults();
   try {
+    await ensureCentre();
     const res = await storico.search(q, { start: more ? st.results.length : 0, rows: Number(S.settings.pageSize) || 50 });
     if (my !== storicoSeq) return [];
     const seen = new Set(more ? st.results.map((r) => r.ttCodice) : []);
@@ -1210,6 +1281,7 @@ function harvestStorico(rows) {
   for (const r of rows) {
     if (r.ownerGroupId && r.ownerGroup && S.stLookups.groups[r.ownerGroupId] !== r.ownerGroup) { S.stLookups.groups[r.ownerGroupId] = r.ownerGroup; changed = true; }
     if (r.assignedId && r.assigned && S.stLookups.operators[r.assignedId] !== r.assigned) { S.stLookups.operators[r.assignedId] = r.assigned; changed = true; }
+    if (r.customerCode && r.account && S.stLookups.clients[r.customerCode] !== r.account && Object.keys(S.stLookups.clients).length < 5000) { S.stLookups.clients[r.customerCode] = r.account; changed = true; }
   }
   if (changed) kvSet("stLookups", S.stLookups);
 }
@@ -1288,7 +1360,7 @@ function visibleItems() {
 }
 
 function itemEl(it, i) {
-  const r = it.row;
+  const r = withArNames(it.row);
   const st = statusInfo(r.statusId, r.statusText);
   const fav = isFavorite(r.id);
   const seen = S.recent.some((x) => x.id === r.id);
@@ -1513,6 +1585,7 @@ async function openTicket(id, row, { force = false } = {}) {
   id = row && row.id ? String(row.id) : ticketIdFrom(id) || String(id || "").trim();
   if (!id) return;
   if (!force && S.current === id && !$("#reader").hidden) return;
+  row = withArNames(row);
   const my = ++openSeq;
   S.current = id;
   $("#layout").classList.add("reading");
@@ -1603,6 +1676,7 @@ function saveUi() {
 async function saveSettings(patch) {
   Object.assign(S.settings, patch);
   await kvSet("settings", S.settings);
+  if (ar && S.settings.arCentro) ar.setCentre(S.settings.arCentro);
 }
 
 // ---------------------------------------------------------------- lavori lunghi: CSV e archiviazione
@@ -1755,7 +1829,7 @@ async function init() {
     kvGet("touchLang", null), kvGet("transportMode", null), kvGet("openAllSlowAt", 0), kvGet("storicoFilters", null), kvGet("stLookups", null),
   ]);
   if (storicoFilters) S.storico.filters = { ...emptyStoricoFilters(), ...storicoFilters };
-  if (stLookups) S.stLookups = { groups: stLookups.groups || {}, operators: stLookups.operators || {} };
+  if (stLookups) S.stLookups = { groups: stLookups.groups || {}, operators: stLookups.operators || {}, clients: stLookups.clients || {} };
   S.openAllSlowAt = Number(openAllSlowAt) || 0;
   Object.assign(S.settings, settings || {});
   Object.assign(ui, savedUi || {});

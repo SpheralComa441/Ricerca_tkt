@@ -241,9 +241,13 @@ export function parseArResponse(raw) {
       problem: altDesc || cleanText(fullText.replace(/  +/g, " — ")),
       fullText,
       account: cliente ? `Cliente ${cliente}` : "",
+      customerCode: cliente,
       contact: "",
       ownerGroup,
+      ownerGroupId: gruppo,
+      cenSer,
       assigned: operatore ? `Op. ${operatore}` : "",
+      assignedId: operatore ? operatore.padStart(15, "0") : "",
     });
   }
   return out;
@@ -625,8 +629,9 @@ export function makeAr({ log = () => {}, fetch: fetchImpl = globalThis.fetch } =
     });
     if (!q1) return [];
     let rows = await rawQuery(q1);
-    if (!rows.length && (state.idCenSer || ticketId)) {
-      // Riprova senza vincolo di centro di servizio o cercando il numero anche nel testo dei messaggi
+    if (!rows.length && ticketId) {
+      // Solo per un numero ticket: si riprova senza il centro servizi e cercando il numero anche nel testo dei messaggi.
+      // Per le parole no: fuori dal proprio centro si troverebbero i ticket degli altri centri (partner compresi).
       const q2 = buildArQuery({
         text,
         subject,
@@ -703,6 +708,34 @@ export function makeAr({ log = () => {}, fetch: fetchImpl = globalThis.fetch } =
     return await r.text();
   }
 
+  /**
+   * Il centro servizi dell'operatore (es. "PAOW"). Le pagine del cruscotto non lo riportano: il portale lo aggiunge
+   * alla ricerca dal suo modulo. Lo si ricava dai ticket del gruppo dell'operatore (in Touch "G10663HR" = gruppo 10663):
+   * ogni ticket trovato riporta il suo centro (campo IdCenSer).
+   */
+  async function findCentre(groups = []) {
+    if (state.idCenSer) return state.idCenSer;
+    for (const g of groups) {
+      const num = String(g || "").replace(/\D/g, "");
+      if (!num) continue;
+      const rows = await rawQuery(`IdGruppo:${num}`);
+      const count = new Map();
+      for (const r of rows) if (r.cenSer && r.ownerGroupId === num) count.set(r.cenSer, (count.get(r.cenSer) || 0) + 1);
+      const best = [...count.entries()].sort((a, b) => b[1] - a[1])[0];
+      if (best) {
+        state.idCenSer = best[0];
+        log(`vecchio cruscotto: centro servizi ${best[0]} (dai ticket del gruppo ${num})`);
+        return best[0];
+      }
+    }
+    return "";
+  }
+
+  function setCentre(c) {
+    const v = String(c || "").trim().toUpperCase();
+    if (/^[A-Z0-9_]{2,12}$/.test(v)) state.idCenSer = v;
+  }
+
   function openHome(url) {
     const target = resolveArUrl(url) || AR_SEARCH_URL;
     if (inExt && chrome.tabs) chrome.tabs.create({ url: target });
@@ -717,6 +750,8 @@ export function makeAr({ log = () => {}, fetch: fetchImpl = globalThis.fetch } =
     search,
     loadTicket,
     request,
+    findCentre,
+    setCentre,
     openHome,
   };
 }

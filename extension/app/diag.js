@@ -135,7 +135,20 @@ function settingsSection(ctx) {
       sel("pageSize", [[50, "50"], [100, "100"], [200, "200"]], "Ticket per pagina"),
       sel("archiveCap", [[100, "100"], [300, "300"], [1000, "1000"], [3000, "3000"]], "Massimo per «Archivia risultati»", "Tanti ticket = tante richieste al portale: meglio a blocchi."),
       sel("portalLang", [["auto", "Automatica (la stessa di Touch)"], ["it", "Italiano"], ["en", "Inglese"]], "Lingua del portale", "Automatica usa la lingua delle richieste della pagina di Touch. Ricarica la pagina dopo averla cambiata."),
+      centroField(ctx),
       h("div", { class: "field" }, h("label", null, "Archivio"), h("label", { class: "check" }, cb, "Salva nell'archivio locale ogni ticket che apro"))));
+}
+
+/** Centro servizi dell'Area Riservata: di solito l'app lo trova da sola (dal gruppo di Touch); qui lo si può scrivere a mano. */
+function centroField(ctx) {
+  const found = ctx.arCentre ? ctx.arCentre() : "";
+  const inp = h("input", { class: "input", type: "text", value: ctx.S.settings.arCentro || "", placeholder: found ? `trovato: ${found}` : "es. PAOW", maxlength: "12", style: { maxWidth: "160px", textTransform: "uppercase" } });
+  inp.addEventListener("change", () => {
+    ctx.S.settings.arCentro = inp.value.trim().toUpperCase();
+    ctx.saveSettings();
+  });
+  return h("div", { class: "field" }, h("label", null, "Centro servizi dell'Area Riservata"), inp,
+    h("div", { class: "hint" }, "Serve al Vecchio Cruscotto e allo Storico per cercare solo tra i ticket del tuo centro. Vuoto = lo trova l'app" + (found ? ` (ora: ${found}).` : ".")));
 }
 
 function archiveSection(ctx) {

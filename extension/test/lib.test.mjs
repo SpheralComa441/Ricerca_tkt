@@ -674,3 +674,38 @@ test("transport: una richiesta dalla scheda di Touch si può annullare (non si a
   done.abort();
   await assert.rejects(abortable(new Promise(() => {}), done.signal), (e) => e.name === "AbortError");
 });
+
+test("ar: centro servizi ricavato dai ticket del proprio gruppo; le parole non si cercano fuori dal centro", async () => {
+  const portlet = "this.splResults.m_cID='f0f7834fde6879c8685311c282f6734a';"; // la pagina non riporta il centro
+  const queries = [];
+  const fetchImpl = async (url, init = {}) => {
+    let body = "<html></html>";
+    if (/portlet\.jsp$/.test(url)) body = portlet;
+    else if (/spsl_fquery_mc$/.test(url)) {
+      const q = decodeURIComponent(init.body.split("&")[0].slice(9));
+      queries.push(q);
+      // ticket del gruppo 10663: tutti del centro PAOW; le parole nel proprio centro non trovano nulla
+      body = q === "IdGruppo:10663"
+        ? arPage([arRow({ num: "8900042", code: "000000008903653", subject: "a", date: "2026-04-21", testi: "x" }), arRow({ num: "8916529", code: "000000008920147", subject: "b", date: "2026-05-07", testi: "y" })])
+        : /^IdCenSer:PAOW and /.test(q) ? arPage([]) : arPage([arRow({ num: "7000001", code: "000000007000001", subject: "ticket di un partner", date: "2026-05-07", testi: "cud" })]);
+    }
+    return { ok: true, status: 200, text: async () => body };
+  };
+  const ar = makeAr({ fetch: fetchImpl });
+  await ar.checkStatus();
+  assert.equal(ar.state.idCenSer, "", "dalla pagina il centro non si ricava");
+  assert.equal(await ar.findCentre(["10663"]), "PAOW");
+  assert.equal(ar.state.idCenSer, "PAOW");
+  const rows = await ar.search({ text: "cud" });
+  assert.deepEqual(rows, [], "niente nel proprio centro: non si pescano i ticket degli altri centri");
+  assert.ok(queries.every((q) => q === "IdGruppo:10663" || q.startsWith("IdCenSer:PAOW and ")), queries.join(" | "));
+  // un numero ticket invece si cerca anche fuori dal centro
+  const byNum = await ar.search({ ticketId: "7000001" });
+  assert.equal(byNum[0].id, "7000001");
+  // centro scritto a mano nelle impostazioni
+  const manual = makeAr({ fetch: fetchImpl });
+  manual.setCentre("paox");
+  assert.equal(manual.state.idCenSer, "PAOX");
+  manual.setCentre("non valido!");
+  assert.equal(manual.state.idCenSer, "PAOX");
+});

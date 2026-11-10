@@ -48,6 +48,8 @@ Sopra l'elenco ci sono tre schede, ognuna con il suo colore e il numero di ticke
 - **Parole** nella casella in alto: si cercano in HDA Touch e nel Vecchio Cruscotto. La scheda Storico lo dice e propone i suoi filtri.
 - **Scheda Storico**: a sinistra compaiono i suoi filtri. Di partenza il periodo è «fino al 2023» (i ticket che il Vecchio Cruscotto non mostra più); con *Tutti gli anni* si cerca su tutto. Senza nessun filtro non parte nessuna ricerca.
 - Se la scheda aperta resta vuota e un'altra fonte ha trovato qualcosa, l'app passa da sola a quella.
+- **Centro servizi**: Vecchio Cruscotto e Storico cercano solo tra i ticket del tuo centro (es. `PAOW`). L'app lo ricava da sola dai ticket del tuo gruppo di Touch (`G10663HR` → gruppo 10663); se non ci riesce lo si scrive in *Diagnostica → Impostazioni → Centro servizi dell'Area Riservata*. Senza centro le parole si cercherebbero in tutti i centri (ticket dei partner compresi): in quel caso un avviso lo dice. Un numero ticket si cerca comunque anche fuori dal centro.
+- Il Vecchio Cruscotto riporta solo i codici di cliente, gruppo e operatore: l'app mostra i nomi quando li ha già visti nei risultati dello Storico.
 - Per lo Storico serve l'accesso all'Area Riservata (come per il Vecchio Cruscotto). Gli allegati dei ticket dello Storico si aprono dalla scheda del ticket nell'Area Riservata.
 - Nelle schede *Archivio locale*, *Preferiti* e *Recenti* ogni riga porta l'etichetta della sua fonte.
 

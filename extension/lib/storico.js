@@ -310,7 +310,7 @@ export function makeStorico({ log = () => {}, request, centro = () => "" } = {})
 
   async function query(f, { start = 0, rows = ST_PAGE_SIZE } = {}) {
     const c = centro();
-    if (!c) throw new StoricoError("Storico: non conosco ancora il tuo centro servizi. Collega il Vecchio Cruscotto (in alto a destra) e riprova.");
+    if (!c) throw new StoricoError("Storico: non conosco il tuo centro servizi. Scrivilo in Diagnostica → Impostazioni → «Centro servizi dell'Area Riservata» (es. PAOW) e riprova.");
     const run = async (force) => {
       const cmdhash = await ensureHash(force);
       const body = encodeParams(buildStoricoParams(f, { centro: c, start, rows, cmdhash, count: start === 0 }));
