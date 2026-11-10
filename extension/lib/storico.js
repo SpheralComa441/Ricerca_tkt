@@ -19,13 +19,14 @@ export const ST_DEFAULT_TO = "2023-12-31";
 const ST_FIRST_DAY = "2000-01-01";
 
 export function emptyStoricoFilters() {
-  return { number: "", dateFrom: "", dateTo: ST_DEFAULT_TO, clientCode: "", group: "", operator: null };
+  // dateRef: a quale data si riferisce il periodo ("1" ultimo aggiornamento, "2" apertura); statoBase: "" tutti, "A" aperti, "C" chiusi
+  return { number: "", dateFrom: "", dateTo: ST_DEFAULT_TO, dateRef: "1", statoBase: "", clientCode: "", group: "", operator: null };
 }
 
 /** Vero se c'è almeno un filtro che restringe davvero (il solo periodo predefinito non basta). */
 export function hasStoricoFilter(f) {
   if (!f) return false;
-  return !!(String(f.number || "").trim() || f.dateFrom || String(f.clientCode || "").trim() || f.group || (f.operator && f.operator.id) || (f.dateTo && f.dateTo !== ST_DEFAULT_TO));
+  return !!(String(f.number || "").trim() || f.dateFrom || String(f.clientCode || "").trim() || f.group || (f.operator && f.operator.id) || f.statoBase || (f.dateTo && f.dateTo !== ST_DEFAULT_TO));
 }
 
 const pad = (n) => String(n).padStart(2, "0");
@@ -75,7 +76,7 @@ export function buildStoricoParams(f = {}, { centro = "", start = 0, rows = ST_P
     ["p_DatIni", from],
     ["p_DatFin", nextDay(to)],
     ["p_StatoDett", ""],
-    ["p_StatoBase", ""],
+    ["p_StatoBase", num ? "" : f.statoBase === "A" || f.statoBase === "C" ? f.statoBase : ""],
     ["p_Priorita", ""],
     ["p_Tipologia", ""],
     ["p_DurataTot", 0],
@@ -93,7 +94,7 @@ export function buildStoricoParams(f = {}, { centro = "", start = 0, rows = ST_P
     ["p_Matricola", ""],
     ["w_SelCentre", centro],
     ["p_Gruppo", String(f.group || "").replace(/\D/g, "") || 0],
-    ["p_DataRiferimento", 1],
+    ["p_DataRiferimento", f.dateRef === "2" ? 2 : 1],
     ["p_PersonaRif", ""],
     ["p_AziendaRif", ""],
     ["p_TicketRif", 0],

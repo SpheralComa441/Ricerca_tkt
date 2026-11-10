@@ -1331,7 +1331,8 @@ function describeStorico() {
   const day = (d) => d.split("-").reverse().join("/");
   const chips = [];
   if (f.number) chips.push({ key: "number", label: `Numero ${f.number}` });
-  if (f.dateFrom || f.dateTo) chips.push({ key: "dates", label: `Periodo: ${f.dateFrom ? "dal " + day(f.dateFrom) : "dall'inizio"} ${f.dateTo ? "al " + day(f.dateTo) : "a oggi"}` });
+  if (f.dateFrom || f.dateTo) chips.push({ key: "dates", label: `${f.dateRef === "2" ? "Apertura" : "Ultimo aggiornamento"} ${f.dateFrom ? "dal " + day(f.dateFrom) : "dall'inizio"} ${f.dateTo ? "al " + day(f.dateTo) : "a oggi"}` });
+  if (f.statoBase) chips.push({ key: "statoBase", label: f.statoBase === "A" ? "Stato: aperti" : "Stato: chiusi" });
   if (f.clientCode) chips.push({ key: "clientCode", label: `Cliente cod. ${f.clientCode}` });
   if (f.group) chips.push({ key: "group", label: `Gruppo: ${S.stLookups.groups[f.group] || f.groupLabel || f.group}` });
   if (f.operator && f.operator.id) chips.push({ key: "operator", label: `Operatore: ${f.operator.label || f.operator.id}` });

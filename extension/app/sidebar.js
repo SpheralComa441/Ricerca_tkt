@@ -231,6 +231,12 @@ function renderStoricoSidebar(ctx) {
         h("div", { class: "row2" }, day("dateFrom", "dal"), day("dateTo", "al")),
         h("div", { class: "presets" }, presets.map(([name, val]) =>
           h("button", { type: "button", class: "preset" + (f.dateFrom === val.dateFrom && f.dateTo === val.dateTo ? " on" : ""), onclick: () => ctx.storicoSetFilter(val) }, name))))),
+    field("Il periodo si riferisce a", h("div", { class: "seg" },
+      [["1", "Ultimo aggiornamento"], ["2", "Apertura"]].map(([v, name]) =>
+        h("button", { type: "button", class: "preset" + ((f.dateRef || "1") === v ? " on" : ""), onclick: () => (f.dateRef || "1") !== v && ctx.storicoSetFilter("dateRef", v) }, name)))),
+    field("Stato", h("div", { class: "seg" },
+      [["", "Tutti"], ["A", "Aperti"], ["C", "Chiusi"]].map(([v, name]) =>
+        h("button", { type: "button", class: "preset" + ((f.statoBase || "") === v ? " on" : ""), onclick: () => (f.statoBase || "") !== v && ctx.storicoSetFilter("statoBase", v) }, name)))),
     field("Cliente (codice)", text("clientCode", "es. 1234", (v) => v.replace(/\D/g, "")), "Il codice del cliente, come nella Ricerca avanzata del portale."),
     field("Gruppo", tokenInput({
       values: one(f.group ? { id: f.group, label: ctx.S.stLookups.groups[f.group] || f.groupLabel || f.group } : null),

@@ -62,6 +62,13 @@ test("storico: con il numero ticket si cerca su tutti gli anni; gruppo e operato
   assert.equal(q.p_Operatore, "000000000100001");
   assert.equal(q.p_DatFin, "2024-01-01");
   assert.equal(q.startrow, 50);
+  // stato di base e data di riferimento, come nel modulo del portale (A/C; 1 = ultimo aggiornamento, 2 = apertura)
+  const sb = Object.fromEntries(buildStoricoParams({ ...emptyStoricoFilters(), statoBase: "C", dateRef: "2" }, { centro: "PAOW" }));
+  assert.equal(sb.p_StatoBase, "C");
+  assert.equal(sb.p_DataRiferimento, 2);
+  assert.equal(Object.fromEntries(buildStoricoParams({ ...emptyStoricoFilters(), statoBase: "X" }, { centro: "PAOW" })).p_StatoBase, "");
+  assert.equal(Object.fromEntries(buildStoricoParams({ ...emptyStoricoFilters(), statoBase: "A", number: "5123456" }, { centro: "PAOW" })).p_StatoBase, "", "con il numero lo stato non conta");
+  assert.equal(hasStoricoFilter({ ...emptyStoricoFilters(), statoBase: "A" }), true);
   assert.equal(companyId("1234"), "000000000001234");
   assert.equal(companyId(""), "");
   assert.equal(nextDay("2023-12-31"), "2024-01-01");

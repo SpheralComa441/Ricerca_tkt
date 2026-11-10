@@ -17,6 +17,24 @@ export function resolveArUrl(rawUrl) {
   return `${AR_BASE}/jsp/${s}`;
 }
 
+/**
+ * Il centro servizi dell'operatore dal modulo di ricerca del portale (servlet/gspv_winf_search):
+ *   <select name='CentroServizi' …><option value=''></option><option value='PAOW' >[HR] Paghe Infinity</option></select>
+ *   DeclareWVs('PAOW','',…)   ← il centro preselezionato
+ * Con più centri vale quello preselezionato; con uno solo, quello.
+ */
+export function extractCentreFromForm(html) {
+  const s = String(html || "");
+  const sel = /<select[^>]*name=['"]CentroServizi['"][^>]*>([\s\S]*?)<\/select>/i.exec(s);
+  if (!sel) return "";
+  const codes = [...sel[1].matchAll(/<option[^>]*value=['"]([A-Z0-9_]{2,12})['"]/gi)].map((m) => m[1].toUpperCase());
+  if (!codes.length) return "";
+  if (codes.length === 1) return codes[0];
+  const decl = /DeclareWVs\(([^\n<]{0,200})/.exec(s);
+  const preset = decl ? [...decl[1].matchAll(/'([A-Z0-9_]{2,12})'/g)].map((m) => m[1]).find((c) => codes.includes(c)) : "";
+  return preset || "";
+}
+
 export function extractMcidFromHtml(html) {
   const s = String(html || "");
   const cen =
@@ -645,6 +663,8 @@ export function makeAr({ log = () => {}, fetch: fetchImpl = globalThis.fetch } =
       });
       if (q2 && q2 !== q1) rows = await rawQuery(q2);
     }
+    // I partner usano lo stesso cruscotto con un loro centro servizi: cercando parole restano solo i ticket del proprio centro
+    if (!ticketId && state.idCenSer) rows = rows.filter((r) => !r.cenSer || r.cenSer === state.idCenSer);
     // Se si cercano più parole, verifichiamo che TUTTE le parole compaiano nel ticket (oggetto, testo completo o riepilogo)
     const allWords = [...queryTerms(text), ...queryTerms(subject)];
     if (!ticketId && allWords.length > 1) {
@@ -709,12 +729,26 @@ export function makeAr({ log = () => {}, fetch: fetchImpl = globalThis.fetch } =
   }
 
   /**
-   * Il centro servizi dell'operatore (es. "PAOW"). Le pagine del cruscotto non lo riportano: il portale lo aggiunge
-   * alla ricerca dal suo modulo. Lo si ricava dai ticket del gruppo dell'operatore (in Touch "G10663HR" = gruppo 10663):
-   * ogni ticket trovato riporta il suo centro (campo IdCenSer).
+   * Il centro servizi dell'operatore (es. "PAOW"). La pagina dei risultati non lo riporta: il portale lo aggiunge
+   * alla ricerca dal suo modulo. Lo si legge da quel modulo; di riserva lo si ricava dai ticket del gruppo
+   * dell'operatore (in Touch "G10663HR" = gruppo 10663): ogni ticket trovato riporta il suo centro (campo IdCenSer).
    */
   async function findCentre(groups = []) {
     if (state.idCenSer) return state.idCenSer;
+    // 1. dal modulo di ricerca del portale: è lì che il portale stesso prende il centro
+    for (const form of ["/servlet/gspv_winf_search?m_cDecoration=none", "/servlet/gspv_wsearch?m_cDecoration=none"]) {
+      try {
+        const c = extractCentreFromForm(await request(form));
+        if (c) {
+          state.idCenSer = c;
+          log(`vecchio cruscotto: centro servizi ${c} (dal modulo di ricerca del portale)`);
+          return c;
+        }
+      } catch (e) {
+        log(`centro servizi dal modulo di ricerca: ${e.message}`);
+      }
+    }
+    // 2. dai ticket del proprio gruppo
     for (const g of groups) {
       const num = String(g || "").replace(/\D/g, "");
       if (!num) continue;

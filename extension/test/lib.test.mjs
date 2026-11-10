@@ -10,7 +10,7 @@ import { buildConditions, emptyFilters, formatDateValue, learnFromConditions, ru
 import { htmlToText, splitQuoted, linkifyParts, decodeEntities, unescapeIfEscapedHtml, cleanText } from "../lib/richtext.js";
 import { makeTransport, AuthError, HdaError, formBody, abortable } from "../lib/transport.js";
 import { makeHda, parsePreviewAttachmentResponse, guessMimeFromName } from "../lib/hda.js";
-import { buildArQuery, parseArResponse, buildArTicket, extractMcidFromHtml, splitArTesti, makeAr } from "../lib/ar.js";
+import { buildArQuery, parseArResponse, buildArTicket, extractMcidFromHtml, extractCentreFromForm, splitArTesti, makeAr } from "../lib/ar.js";
 import { loadTicket, normalizeAttachment } from "../lib/ticket.js";
 
 // ---------------------------------------------------------------- util
@@ -708,4 +708,34 @@ test("ar: centro servizi ricavato dai ticket del proprio gruppo; le parole non s
   assert.equal(manual.state.idCenSer, "PAOX");
   manual.setCentre("non valido!");
   assert.equal(manual.state.idCenSer, "PAOX");
+});
+
+test("ar: centro servizi letto dal modulo di ricerca del portale; i ticket degli altri centri si scartano", async () => {
+  const FORM = `<script>\nDeclareWVs('PAOW','',new Date(2026,10,10,0,0,0,0),['',''],0);\n</script>
+<select name='CentroServizi' id='MQCQNKQMGB' class='Combobox' title='Centro servizi'><option value=''></option>\n<option value='PAOW' >[HR] Paghe Infinity</option>\n</select>`;
+  assert.equal(extractCentreFromForm(FORM), "PAOW");
+  assert.equal(extractCentreFromForm("<html>login</html>"), "");
+  const two = `<script>DeclareWVs('','PRES1',new Date(2026,0,1),0);</script><select name='CentroServizi'><option value=''></option><option value='PAOW'>a</option><option value='PRES1' >b</option></select>`;
+  assert.equal(extractCentreFromForm(two), "PRES1", "con più centri vale quello preselezionato");
+  assert.equal(extractCentreFromForm(two.replace("'PRES1',new", "'',new")), "", "più centri e nessuno preselezionato: non si tira a indovinare");
+
+  const queries = [];
+  const partner = arRow({ num: "7000001", code: "000000007000001", subject: "cud di un partner", date: "2026-05-07", testi: "cud" });
+  partner[AR_FIELDS.indexOf("IdCenSer")] = "GZ067";
+  const fetchImpl = async (url, init = {}) => {
+    let body = "<html></html>";
+    if (/gspv_winf_search/.test(url)) body = FORM;
+    else if (/portlet\.jsp$/.test(url)) body = "this.splResults.m_cID='f0f7834fde6879c8685311c282f6734a';";
+    else if (/spsl_fquery_mc$/.test(url)) {
+      queries.push(decodeURIComponent(init.body.split("&")[0].slice(9)));
+      body = arPage([arRow({ num: "8900042", code: "000000008903653", subject: "cud", date: "2026-04-21", testi: "cud" }), partner]);
+    }
+    return { ok: true, status: 200, text: async () => body };
+  };
+  const ar = makeAr({ fetch: fetchImpl });
+  assert.equal(await ar.findCentre(["10663"]), "PAOW");
+  assert.deepEqual(queries, [], "dal modulo: nessuna ricerca per ricavarlo");
+  const rows = await ar.search({ text: "cud" });
+  assert.deepEqual(rows.map((r) => r.id), ["8900042"], "il ticket del centro di un partner non compare");
+  assert.match(queries[0], /^IdCenSer:PAOW and /);
 });
