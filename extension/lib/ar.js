@@ -379,6 +379,12 @@ export function buildArTicket({ id, row = null, detail = null } = {}) {
     contact: (row && row.contact) || "",
     ownerGroup: (row && row.ownerGroup) || "",
     assigned: (row && row.assigned) || "",
+    // i codici servono per ritrovare i nomi (cliente, gruppo, operatore) e la scheda del ticket
+    ttCodice: (row && row.ttCodice) || "",
+    customerCode: (row && row.customerCode) || "",
+    ownerGroupId: (row && row.ownerGroupId) || "",
+    assignedId: (row && row.assignedId) || "",
+    cenSer: (row && row.cenSer) || "",
   };
 
   const extraFacts = [];

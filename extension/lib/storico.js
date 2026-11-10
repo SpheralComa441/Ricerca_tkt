@@ -63,8 +63,10 @@ export function extractCmdHash(html, sqlcmd = ST_QUERY) {
  */
 export function buildStoricoParams(f = {}, { centro = "", start = 0, rows = ST_PAGE_SIZE, cmdhash = "", count = true } = {}) {
   const num = ticketNumber(String(f.number || "").trim()).replace(/\D/g, "");
-  const from = num ? ST_FIRST_DAY : f.dateFrom || ST_FIRST_DAY;
-  const to = num ? today() : f.dateTo || today();
+  // f.narrow: si conosce già il giorno del ticket (ricerca dei nomi per il Vecchio Cruscotto), quindi il periodo resta stretto
+  const allYears = num && !f.narrow;
+  const from = allYears ? ST_FIRST_DAY : f.dateFrom || ST_FIRST_DAY;
+  const to = allYears ? today() : f.dateTo || today();
   return [
     ["rows", rows],
     ["startrow", start],
@@ -286,6 +288,73 @@ export function buildStoricoTicket({ row, moves = [], attachments = [] }) {
   };
 }
 
+/** Giorno "AAAA-MM-GG" spostato di n giorni. */
+export function shiftDay(date, n) {
+  const d = date instanceof Date ? new Date(date.getFullYear(), date.getMonth(), date.getDate() + n) : null;
+  return d && !isNaN(d) ? `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}` : "";
+}
+
+/** Filtri per ritrovare nello Storico un ticket di cui si conoscono numero e giorno di apertura (e, se c'è, il cliente). */
+export function ticketLookupFilters({ number, date = null, clientCode = "" } = {}) {
+  const f = { ...emptyStoricoFilters(), dateTo: "", number: String(number || ""), clientCode: String(clientCode || "") };
+  const from = shiftDay(date, -1);
+  if (!from) return f; // senza data si cerca il numero su tutti gli anni
+  return { ...f, dateFrom: from, dateTo: shiftDay(date, 1), dateRef: "2", narrow: true };
+}
+
+/** Operatori del centro che compaiono nei movimenti: { "<id a 15 cifre>": "COGNOME NOME" }. */
+export function movePeople(moves) {
+  const out = {};
+  const add = (id, name) => {
+    const i = String(id || "").trim();
+    const n = String(name || "").trim();
+    if (/^\d{15}$/.test(i) && n) out[i] = n;
+  };
+  for (const v of moves || []) {
+    if (Number(v.DTTIPMIT) === 1) add(v.DTMITPER, v.DTMITPER_DESC);
+    if (Number(v.DTTIPDES) === 1) add(v.DTDESPER, v.DTDESPER_DESC);
+  }
+  return out;
+}
+
+/**
+ * Ticket del Vecchio Cruscotto (letto dalla ricerca per parole, che riporta solo codici e il testo tutto attaccato)
+ * completato con i dati veri del portale: `info` è la riga dello Storico (nomi di cliente, contatto, gruppo, operatore),
+ * `moves` i movimenti della scheda (chi ha scritto ogni messaggio, a chi, quando).
+ */
+export function enrichArTicket(full, { info = null, moves = [], attachments = [] } = {}) {
+  if (!full || (!info && !moves.length)) return full;
+  const base = full.row || {};
+  const firstCustomer = moves.find((v) => Number(v.DTTIPMIT) === 2);
+  const last = moves[moves.length - 1] || {};
+  const row = {
+    ...base,
+    account: (info && info.account) || base.account || "",
+    contact: (info && info.contact) || base.contact || (firstCustomer && firstCustomer.DTMITPER_DESC) || "",
+    ownerGroup: (info && info.ownerGroup) || base.ownerGroup || "",
+    assigned: (info && info.assigned) || base.assigned || "",
+    statusText: (info && info.statusText) || last.STDESCRI || base.statusText || "",
+    typeText: (info && info.typeText) || last.TRDESCRI || base.typeText || "",
+    priority: (info && info.priority) || last.PRDESCRI || base.priority || "",
+    catalog: base.catalog || (info && info.catalog) || "",
+    lastChange: (info && info.lastChange) || base.lastChange || null,
+    topic: (info && info.topic) || base.topic || "",
+  };
+  const timeline = moves.length ? previewTimeline(moves, row) : full.timeline;
+  const extraFacts = (full.extraFacts || []).filter(([k]) => k !== "Priorità" && k !== "Argomento");
+  if (row.topic) extraFacts.unshift(["Argomento", row.topic]);
+  return {
+    ...full,
+    row,
+    timeline,
+    attachments: attachments.length ? attachments : full.attachments || [],
+    extraFacts,
+    notes: moves.length
+      ? ["Ticket del Vecchio Cruscotto (Area Riservata Zucchetti): conversazione letta dalla scheda del ticket."]
+      : full.notes,
+  };
+}
+
 // ---------------------------------------------------------------- client
 
 export class StoricoError extends Error {}
@@ -309,12 +378,12 @@ export function makeStorico({ log = () => {}, request, centro = () => "" } = {})
     return h;
   }
 
-  async function query(f, { start = 0, rows = ST_PAGE_SIZE } = {}) {
+  async function query(f, { start = 0, rows = ST_PAGE_SIZE, count = start === 0 } = {}) {
     const c = centro();
     if (!c) throw new StoricoError("Storico: non conosco il tuo centro servizi. Scrivilo in Diagnostica → Impostazioni → «Centro servizi dell'Area Riservata» (es. PAOW) e riprova.");
     const run = async (force) => {
       const cmdhash = await ensureHash(force);
-      const body = encodeParams(buildStoricoParams(f, { centro: c, start, rows, cmdhash, count: start === 0 }));
+      const body = encodeParams(buildStoricoParams(f, { centro: c, start, rows, cmdhash, count }));
       return parseSqlData(await request("/servlet/SQLDataProviderServer", { method: "POST", body }));
     };
     let data = await run(false);
@@ -370,6 +439,27 @@ export function makeStorico({ log = () => {}, request, centro = () => "" } = {})
     return out;
   }
 
+  /** I movimenti di un ticket dalla sua scheda (vale per ogni ticket del portale, anche quelli recenti del Vecchio Cruscotto). */
+  async function loadMoves(ttCodice) {
+    const html = await request(`/jsp/gspv_preview_ticket_frame_portlet.jsp?w_TTCODICE=${encodeURIComponent(ttCodice)}&OrderBy=${encodeURIComponent("DT__DATA ASC")}`, { method: "GET" });
+    const moves = parsePreview(html);
+    if (!moves.length && !/gspv_preview_ticket/.test(html)) {
+      throw new StoricoError("Non riesco a leggere il ticket dallo Storico: apri l'Area Riservata, esegui l'accesso e riprova.");
+    }
+    return moves;
+  }
+
+  /**
+   * La riga dello Storico di un ticket di cui si conoscono numero e giorno di apertura: una richiesta sola e stretta
+   * (numero + giorno + cliente), senza conteggio. → riga oppure null se lo Storico non lo riporta.
+   */
+  async function findTicket({ number, date = null, clientCode = "" } = {}) {
+    const num = ticketNumber(number);
+    if (!num) return null;
+    const data = await query(ticketLookupFilters({ number: num, date, clientCode }), { rows: 5, count: false });
+    return data.rows.map(storicoRow).filter(Boolean).find((r) => r.id === num) || null;
+  }
+
   async function loadTicket(id, { row = null } = {}) {
     const num = ticketNumber(id);
     if (!row || !row.ttCodice) {
@@ -377,11 +467,7 @@ export function makeStorico({ log = () => {}, request, centro = () => "" } = {})
       row = found.rows.find((r) => r.id === num) || null;
       if (!row) throw new StoricoError(`Ticket #${num} non trovato nello Storico`);
     }
-    const html = await request(`/jsp/gspv_preview_ticket_frame_portlet.jsp?w_TTCODICE=${encodeURIComponent(row.ttCodice)}&OrderBy=${encodeURIComponent("DT__DATA ASC")}`, { method: "GET" });
-    const moves = parsePreview(html);
-    if (!moves.length && !/gspv_preview_ticket/.test(html)) {
-      throw new StoricoError("Non riesco a leggere il ticket dallo Storico: apri l'Area Riservata, esegui l'accesso e riprova.");
-    }
+    const moves = await loadMoves(row.ttCodice);
     const attachments = await loadAttachments(moves, row);
     state.connected = true;
     return buildStoricoTicket({ row, moves, attachments });
@@ -391,5 +477,8 @@ export function makeStorico({ log = () => {}, request, centro = () => "" } = {})
     get state() { return state; },
     search,
     loadTicket,
+    loadMoves,
+    loadAttachments,
+    findTicket,
   };
 }

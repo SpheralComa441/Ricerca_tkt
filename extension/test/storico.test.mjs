@@ -4,9 +4,12 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 
+import { buildArTicket } from "../lib/ar.js";
+
 import {
   buildStoricoParams, encodeParams, companyId, nextDay, extractCmdHash, parseSqlData, parseSqlDate, storicoRow,
   unescapeJs, parsePreview, previewTimeline, parsePreviewDate, buildStoricoTicket, makeStorico, emptyStoricoFilters, hasStoricoFilter, ST_DEFAULT_TO,
+  ticketLookupFilters, shiftDay, movePeople, enrichArTicket,
 } from "../lib/storico.js";
 
 const HASH = "0123456789abcdef0123456789abcdef";
@@ -162,4 +165,82 @@ test("storico: ricerca e lettura del ticket; firma scaduta → si rilegge; senza
 
   await assert.rejects(makeStorico({ request, centro: () => "" }).search({ number: "1" }), /centro servizi/);
   await assert.rejects(makeStorico({ request: async () => "<html>login</html>", centro: () => "PAOW" }).search({ number: "1" }), /Storico non collegato/);
+});
+
+// ---------------------------------------------------------------- nomi per il Vecchio Cruscotto
+
+test("nomi: un ticket di cui si conoscono numero e giorno si chiede allo Storico con una richiesta stretta", async () => {
+  assert.equal(shiftDay(new Date(2026, 2, 1), -1), "2026-02-28");
+  assert.equal(shiftDay(null, 1), "");
+  const f = ticketLookupFilters({ number: "5123456", date: new Date(2021, 1, 22, 11, 42), clientCode: "1234" });
+  const p = Object.fromEntries(buildStoricoParams(f, { centro: "PAOW", cmdhash: HASH, count: false, rows: 5 }));
+  assert.equal(p.p_NumIni, "5123456");
+  assert.equal(p.p_DatIni, "2021-02-21", "dal giorno prima dell'apertura…");
+  assert.equal(p.p_DatFin, "2021-02-24", "…al giorno dopo (il portale manda come fine il giorno seguente)");
+  assert.equal(p.p_DataRiferimento, 2, "il periodo si riferisce alla data di apertura");
+  assert.equal(p.p_Azienda, "000000000001234");
+  assert.equal(p.count, "false");
+  // senza data resta la ricerca del numero su tutti gli anni
+  const all = Object.fromEntries(buildStoricoParams(ticketLookupFilters({ number: "5123456" }), { centro: "PAOW" }));
+  assert.equal(all.p_DatIni, "2000-01-01");
+  assert.equal(all.p_DataRiferimento, 1);
+
+  const bodies = [];
+  const request = async (path, { body } = {}) => {
+    if (path === "/jsp/gspv_psearch_res.jsp") return RES_PAGE;
+    bodies.push(body);
+    return sqlResponse(/p_NumIni=5123456/.test(body) ? [sqlRow("5123456", "Errore Uniemens", "2021-02-22")] : [], -1);
+  };
+  const st = makeStorico({ request, centro: () => "PAOW" });
+  const row = await st.findTicket({ number: "5123456", date: new Date(2021, 1, 22), clientCode: "1234" });
+  assert.equal(row.account, "ALFA MECCANICA SRL");
+  assert.equal(row.assigned, "VERDI LAURA");
+  assert.equal(row.assignedId, "000000000100001");
+  assert.match(bodies[0], /count=false/);
+  assert.match(bodies[0], /p_DatIni=2021-02-21/);
+  assert.equal(await st.findTicket({ number: "5999999", date: new Date(2021, 1, 22) }), null, "ticket che lo Storico non riporta");
+});
+
+test("nomi: ticket del Vecchio Cruscotto completato con la scheda (chi scrive) e con lo Storico (cliente, operatore)", () => {
+  const arRow = {
+    id: "5123456", source: "ar", ttCodice: "000000005123456", subject: "Errore Uniemens", date: new Date(2021, 1, 22), statusId: "S5", statusText: "Chiuso (Vecchio cruscotto)",
+    fullText: "Errore nell'invio  basta rigenerare il flusso", account: "Cliente 1234", customerCode: "1234", ownerGroup: "PAOW · 10663", ownerGroupId: "10663",
+    assigned: "Op. 100001", assignedId: "000000000100001", cenSer: "PAOW", priority: "",
+  };
+  const full = buildArTicket({ id: "5123456", row: arRow });
+  assert.equal(full.row.ttCodice, "000000005123456", "la riga del ticket conserva i codici");
+  assert.equal(full.row.customerCode, "1234");
+  assert.equal(full.timeline[0].account, "Cliente 1234");
+  assert.equal(enrichArTicket(full, {}), full, "senza dati in più resta com'è");
+
+  const moves = parsePreview(PREVIEW).map((m, i) => ({ ...m, DTMITPER: i === 0 ? "000000000555555" : "000000000100001", DTDESPER: "" }));
+  assert.deepEqual(movePeople(moves), { "000000000100001": "VERDI LAURA" }, "solo chi scrive dal centro servizi, non il cliente");
+
+  const st = makeStorico({ request: async () => "", centro: () => "PAOW" });
+  assert.equal(typeof st.loadMoves, "function");
+  const info = storicoRow(Object.fromEntries(FIELDS.map((k, i) => [k, String(sqlRow("5123456", "Errore Uniemens", "2021-02-22")[i]).trim()])));
+  const rich = enrichArTicket(full, { info, moves, attachments: [{ id: "st-1", fileName: "flusso.xml" }] });
+  assert.equal(rich.source, "ar", "resta un ticket del Vecchio Cruscotto");
+  assert.equal(rich.row.account, "ALFA MECCANICA SRL");
+  assert.equal(rich.row.contact, "ROSSI ANNA");
+  assert.equal(rich.row.assigned, "VERDI LAURA");
+  assert.equal(rich.row.ownerGroup, "Paghe Web P");
+  assert.equal(rich.row.statusText, "Chiuso");
+  assert.equal(rich.row.fullText, arRow.fullText, "il testo per la ricerca resta");
+  assert.equal(rich.timeline.length, 3);
+  assert.equal(rich.timeline[0].author, "ROSSI ANNA");
+  assert.equal(rich.timeline[0].account, "ALFA MECCANICA SRL");
+  assert.equal(rich.timeline[2].author, "VERDI LAURA (Paghe Web P)");
+  assert.equal(rich.attachments.length, 1);
+  assert.match(rich.notes[0], /scheda del ticket/);
+
+  // solo la scheda (lo Storico non riporta il ticket): i nomi di chi scrive ci sono comunque
+  const onlyMoves = enrichArTicket(full, { moves });
+  assert.equal(onlyMoves.row.account, "Cliente 1234");
+  assert.equal(onlyMoves.row.contact, "ROSSI ANNA");
+  assert.equal(onlyMoves.timeline[2].author, "VERDI LAURA (Paghe Web P)");
+  // solo lo Storico (scheda non leggibile): nomi nei dati del ticket, conversazione ricostruita dal testo
+  const onlyInfo = enrichArTicket(full, { info });
+  assert.equal(onlyInfo.row.account, "ALFA MECCANICA SRL");
+  assert.equal(onlyInfo.timeline, full.timeline);
 });

@@ -10,7 +10,7 @@ import { openDiag } from "./diag.js";
 import { makeTransport, AuthError, PORTAL_BASE } from "../lib/transport.js";
 import { makeHda } from "../lib/hda.js";
 import { makeAr } from "../lib/ar.js";
-import { makeStorico, emptyStoricoFilters, hasStoricoFilter } from "../lib/storico.js";
+import { makeStorico, emptyStoricoFilters, hasStoricoFilter, enrichArTicket, movePeople } from "../lib/storico.js";
 import { makeRowReader } from "../lib/rows.js";
 import { emptyFilters, buildConditions, describeFilters, ruleFor, DEF, DOMAIN_CONDITION, OPEN_STATUS_IDS, FILTER_DEFS, isEmptyFilter, isUnconstrained, hasNarrowingFilter } from "../lib/filters.js";
 import { statusInfo, mergePortalStatuses } from "../lib/statuses.js";
@@ -659,6 +659,7 @@ async function search({ more = false, fresh = false } = {}) {
   if (searchAbort) searchAbort.abort();
   const ac = new AbortController();
   searchAbort = ac;
+  if (!more) names.queue.length = 0; // i nomi in coda erano per l'elenco di prima
 
   // Se l'utente ha scritto nella casella #q senza premere Invio e ha cliccato Riprova / Aggiorna, sincronizziamo subito il testo.
   const qEl = $("#q");
@@ -1275,15 +1276,106 @@ async function runStorico({ more = false, fresh = false } = {}) {
   }
 }
 
-/** Gruppi e operatori visti nei risultati dello Storico: servono come suggerimenti dei suoi filtri. */
+/** Gruppi, operatori e clienti visti nei risultati dello Storico: suggerimenti dei suoi filtri e nomi per il Vecchio Cruscotto. */
+const ST_CLIENTS_MAX = 8000;
+let stLookupsTimer = null;
+function saveStLookupsSoon() {
+  if (stLookupsTimer) return;
+  stLookupsTimer = setTimeout(() => { stLookupsTimer = null; kvSet("stLookups", S.stLookups); }, 1500);
+}
 function harvestStorico(rows) {
   let changed = false;
+  const L = S.stLookups;
   for (const r of rows) {
-    if (r.ownerGroupId && r.ownerGroup && S.stLookups.groups[r.ownerGroupId] !== r.ownerGroup) { S.stLookups.groups[r.ownerGroupId] = r.ownerGroup; changed = true; }
-    if (r.assignedId && r.assigned && S.stLookups.operators[r.assignedId] !== r.assigned) { S.stLookups.operators[r.assignedId] = r.assigned; changed = true; }
-    if (r.customerCode && r.account && S.stLookups.clients[r.customerCode] !== r.account && Object.keys(S.stLookups.clients).length < 5000) { S.stLookups.clients[r.customerCode] = r.account; changed = true; }
+    if (r.ownerGroupId && r.ownerGroup && L.groups[r.ownerGroupId] !== r.ownerGroup) { L.groups[r.ownerGroupId] = r.ownerGroup; changed = true; }
+    if (r.assignedId && r.assigned && L.operators[r.assignedId] !== r.assigned) { L.operators[r.assignedId] = r.assigned; changed = true; }
+    if (r.customerCode && r.account && L.clients[r.customerCode] !== r.account && (r.customerCode in L.clients || Object.keys(L.clients).length < ST_CLIENTS_MAX)) { L.clients[r.customerCode] = r.account; changed = true; }
   }
-  if (changed) kvSet("stLookups", S.stLookups);
+  if (changed) saveStLookupsSoon();
+  return changed;
+}
+/** Operatori letti dai movimenti di un ticket: { id: nome }. */
+function harvestOperators(map) {
+  let changed = false;
+  for (const [id, name] of Object.entries(map || {})) if (S.stLookups.operators[id] !== name) { S.stLookups.operators[id] = name; changed = true; }
+  if (changed) saveStLookupsSoon();
+  return changed;
+}
+
+// ---------------------------------------------------------------- nomi per il Vecchio Cruscotto
+// La ricerca per parole del Vecchio Cruscotto riporta solo i codici di cliente e operatore. I nomi si chiedono allo Storico,
+// un ticket alla volta (numero + giorno di apertura: richiesta stretta), partendo dall'alto dell'elenco; ogni nome trovato
+// resta in memoria, quindi lo stesso cliente o operatore non si richiede più.
+const NAMES_PARALLEL = 3;
+const NAMES_SLOW_MS = 12000;
+const names = { queue: [], active: 0, tried: new Set(), fails: 0, off: false };
+
+function needsNames(r) {
+  if (!r || r.source !== "ar") return false;
+  const L = S.stLookups;
+  return !!((r.customerCode && !L.clients[r.customerCode]) || (r.assignedId && !L.operators[r.assignedId]));
+}
+
+/** Mette in coda i ticket del Vecchio Cruscotto visibili che hanno ancora un codice al posto del nome. */
+function queueArNames() {
+  if (names.off || !storico || !ar || !ctx.arCentre()) return;
+  const queued = new Set(names.queue.map((r) => r.id));
+  for (const r of arRows()) {
+    // i ticket di un altro centro (trovati per numero) non sono nello Storico del proprio centro
+    if (r.cenSer && r.cenSer !== ctx.arCentre()) continue;
+    if (needsNames(r) && r.date && !names.tried.has(r.id) && !queued.has(r.id)) names.queue.push(r);
+  }
+  pumpNames();
+}
+
+function stopNames(why) {
+  names.off = true;
+  names.queue.length = 0;
+  log(`nomi del Vecchio Cruscotto: mi fermo (${why}); riprovo alla prossima apertura dell'app`);
+}
+
+function pumpNames() {
+  while (!names.off && names.active < NAMES_PARALLEL && names.queue.length) {
+    const r = names.queue.shift();
+    if (!needsNames(r) || names.tried.has(r.id)) continue;
+    names.tried.add(r.id);
+    names.active++;
+    const t0 = Date.now();
+    storico.findTicket({ number: r.id, date: r.date, clientCode: r.customerCode })
+      .then((info) => {
+        names.fails = 0;
+        if (info && harvestStorico([info])) refreshArNamesSoon();
+        // uno Storico lento non va caricato con una richiesta per ticket
+        if (Date.now() - t0 > NAMES_SLOW_MS) stopNames("lo Storico risponde lentamente");
+      })
+      .catch((e) => {
+        if (++names.fails >= 3) stopNames(e.message);
+      })
+      .finally(() => {
+        names.active--;
+        pumpNames();
+      });
+  }
+}
+
+let namesPaint = null;
+function refreshArNamesSoon() {
+  if (namesPaint) return;
+  namesPaint = setTimeout(() => { namesPaint = null; refreshArNames(); }, 250);
+}
+
+/** Aggiorna sul posto la riga "cliente · gruppo → operatore" dei ticket del Vecchio Cruscotto già in elenco (senza ridisegnare tutto). */
+function refreshArNames() {
+  const byId = new Map(S.results.filter((r) => r.source === "ar").map((r) => [r.id, r]));
+  for (const n of document.querySelectorAll('#results .item[data-source="ar"]')) {
+    const r = byId.get(n.dataset.id);
+    if (!r) continue;
+    const fresh = metaEl(withArNames(r));
+    const old = n.querySelector(":scope > .meta");
+    if (!fresh || (old && old.textContent === fresh.textContent)) continue;
+    if (old) old.replaceWith(fresh);
+    else n.querySelector(".item-l1").after(fresh);
+  }
 }
 
 /** Suggerimenti per i filtri dello Storico. I gruppi di Touch "G10663HR" sono i gruppi 10663 dell'Area Riservata. */
@@ -1367,7 +1459,6 @@ function itemEl(it, i) {
   const seen = S.recent.some((x) => x.id === r.id);
   const arch = S.archived.get(r.id);
   const when = S.sort.key === "lastChange" ? r.lastChange : r.date;
-  const meta = [r.account, r.ownerGroup, r.assigned && `→ ${r.assigned}`].filter(Boolean);
   const snip = it.snippet || snippetOf(r);
   const el = h("div", {
     class: `item src-${sourceOf(r)}` + (r.id === S.current ? " sel" : "") + (seen ? " seen" : ""),
@@ -1384,9 +1475,15 @@ function itemEl(it, i) {
       arch ? h("span", { class: "tag-mini", title: `Nell'archivio locale (salvato il ${fmtDateTime(arch.savedAt)})` }, icon("archive")) : null,
       fav ? h("span", { class: "star-on", title: "Preferito" }, icon("star")) : null,
       h("span", { class: "when", title: when ? fmtDateTime(when) : "" }, fmtRelative(when))),
-    meta.length ? h("div", { class: "meta" }, meta.flatMap((m, k) => [k ? h("span", { class: "sep" }, "·") : null, h("span", { title: m }, m)])) : null,
+    metaEl(r),
     snip ? h("div", { class: "snip" }, snip) : null);
   return el;
+}
+
+/** La riga «cliente · gruppo · → operatore» di un ticket in elenco. */
+function metaEl(r) {
+  const meta = [r.account, r.ownerGroup, r.assigned && `→ ${r.assigned}`].filter(Boolean);
+  return meta.length ? h("div", { class: "meta" }, meta.flatMap((m, k) => [k ? h("span", { class: "sep" }, "·") : null, h("span", { title: m }, m)])) : null;
 }
 
 function tabBtn(key, label, n) {
@@ -1560,6 +1657,7 @@ function renderResults() {
   if (src && S.tab !== "storico" && words.length && !ticketIdFrom(S.filters.text)) highlight(list, words);
   else if (S.tab === "archive" && words.length) highlight(list, words);
   el.scrollTop = top;
+  if (S.tab === "ar" && !S.loading) queueArNames();
 }
 
 function clearFilterKey(key) {
@@ -1594,10 +1692,14 @@ async function openTicket(id, row, { force = false } = {}) {
   ui.readerSearch = "";
   renderReaderLoading(ctx, id, row);
   try {
-    const full = row && row.source === "storico"
+    const loaded = row && row.source === "storico"
       ? await storico.loadTicket(id, { row })
       : await loadTicket(hda, id, { row, rowReader, conditionsFor: conditionsForId, caps: S.caps, ar, log });
-    if (full.source === "ar") setArConn(true);
+    let full = loaded;
+    if (full.source === "ar") {
+      setArConn(true);
+      full = await completeArTicket(full);
+    }
     S.current = full.id || id;
     kvSet("caps", S.caps);
     if (!full.row && !full.ticket && !full.items.length && !(full.timeline && full.timeline.length)) {
@@ -1626,6 +1728,50 @@ async function openTicket(id, row, { force = false } = {}) {
     if (rec) renderReader(ctx, { id: rec.id, row: rec.row, ticket: null, items: [], attachments: rec.attachments || [], timeline: rec.timeline, notes: [] }, { fromArchive: rec.savedAt });
     else renderReaderError(ctx, id, row, e);
   }
+}
+
+/**
+ * Ticket del Vecchio Cruscotto appena letto → con i nomi veri: dalla scheda del ticket (chi ha scritto ogni messaggio)
+ * e dallo Storico (cliente, contatto, gruppo, operatore). Se il portale non risponde in tempo resta com'è.
+ */
+const AR_COMPLETE_MS = 6000;
+async function completeArTicket(full) {
+  const row = full.row || {};
+  if (!storico || !row.ttCodice) return full;
+  const own = !row.cenSer || !ctx.arCentre() || row.cenSer === ctx.arCentre();
+  const known = S.storico.results.find((r) => r.id === row.id && r.ttCodice === row.ttCodice) || null;
+  const work = (async () => {
+    const [mv, inf] = await Promise.allSettled([
+      storico.loadMoves(row.ttCodice),
+      // se lo Storico ha già trovato questo ticket (ricerca per numero) la sua riga basta
+      known ? Promise.resolve(known) : own && ctx.arCentre() ? storico.findTicket({ number: row.id, date: row.date, clientCode: row.customerCode }) : Promise.resolve(null),
+    ]);
+    const moves = mv.status === "fulfilled" ? mv.value : [];
+    const info = inf.status === "fulfilled" ? inf.value : null;
+    if (mv.status === "rejected") log(`scheda del ticket ${row.id}: ${mv.reason.message}`);
+    if (inf.status === "rejected") log(`nomi del ticket ${row.id}: ${inf.reason.message}`);
+    let changed = harvestOperators(movePeople(moves));
+    if (info) changed = harvestStorico([info]) || changed;
+    if (changed) refreshArNamesSoon();
+    let attachments = [];
+    if (moves.length) {
+      try {
+        attachments = await storico.loadAttachments(moves, row);
+      } catch (e) {
+        log(`allegati del ticket ${row.id}: ${e.message}`);
+      }
+    }
+    return enrichArTicket(full, { info, moves, attachments });
+  })();
+  const late = new Promise((res) => setTimeout(() => res(null), AR_COMPLETE_MS));
+  const done = await Promise.race([work.catch((e) => (log(`ticket ${row.id}: ${e.message}`), null)), late]);
+  const out = done || full;
+  const named = withArNames(out.row);
+  // nella conversazione ricostruita dal testo il cliente compare con il codice: si mette il nome appena lo si conosce
+  const timeline = named.account && named.account !== row.account
+    ? (out.timeline || []).map((e) => (e.account && e.account === row.account ? { ...e, account: named.account } : e))
+    : out.timeline;
+  return { ...out, row: named, timeline };
 }
 
 function closeReader() {
