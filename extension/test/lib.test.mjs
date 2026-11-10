@@ -8,7 +8,7 @@ import { parseListConfig } from "../lib/listconfig.js";
 import { makeRowReader } from "../lib/rows.js";
 import { buildConditions, emptyFilters, formatDateValue, learnFromConditions, ruleFor, DEF, describeFilters, filterPayload, pickCalibrationSample, isUnconstrained, hasNarrowingFilter, primaryTerm } from "../lib/filters.js";
 import { htmlToText, splitQuoted, linkifyParts, decodeEntities, unescapeIfEscapedHtml, cleanText } from "../lib/richtext.js";
-import { makeTransport, AuthError, HdaError, formBody } from "../lib/transport.js";
+import { makeTransport, AuthError, HdaError, formBody, abortable } from "../lib/transport.js";
 import { makeHda, parsePreviewAttachmentResponse, guessMimeFromName } from "../lib/hda.js";
 import { buildArQuery, parseArResponse, buildArTicket, extractMcidFromHtml, splitArTesti, makeAr } from "../lib/ar.js";
 import { loadTicket, normalizeAttachment } from "../lib/ticket.js";
@@ -656,4 +656,21 @@ test("transport: 'errore durante il caricamento dei dati' dopo che la strada ha 
   await t.request({ path: "/a", expect: "json" });
   await assert.rejects(() => t.request({ path: "/b", expect: "json" }), /caricamento dei dati/);
   assert.equal(proxied, 0);
+});
+
+test("transport: una richiesta dalla scheda di Touch si può annullare (non si aspetta la risposta)", async () => {
+  let release;
+  const slow = new Promise((r) => (release = r));
+  const t = makeTransport({ base: "https://x/HDAPortal", mode: "proxy", fetch: fakeFetch(() => ({ body: OK })), sendMessage: () => slow.then(() => ({ status: 200, contentType: "application/json", text: OK })) });
+  const ac = new AbortController();
+  const p = t.request({ path: "/WSCView/ListData/Incidents", method: "POST", body: "a=1", expect: "json", signal: ac.signal });
+  ac.abort();
+  await assert.rejects(p, (e) => e.name === "AbortError");
+  release();
+  // abortable: senza segnale resta la promessa; già annullato → rifiuta subito; risultato normale passa
+  assert.equal(await abortable(Promise.resolve(7)), 7);
+  assert.equal(await abortable(Promise.resolve(8), new AbortController().signal), 8);
+  const done = new AbortController();
+  done.abort();
+  await assert.rejects(abortable(new Promise(() => {}), done.signal), (e) => e.name === "AbortError");
 });

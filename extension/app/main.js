@@ -314,13 +314,29 @@ function filtersChanged(immediate) {
   }
 }
 
+/**
+ * Un numero ticket nella casella di ricerca porta dritto a quel ticket e ignora tutti gli altri filtri:
+ * quando si sceglie un filtro a sinistra (gruppo, stato, cliente…) il numero rimasto da una ricerca
+ * precedente si toglie, altrimenti si vedrebbero sempre e solo i ticket con quel numero.
+ */
+function dropTicketNumberFor(keys) {
+  const tid = ticketIdFrom(S.filters.text);
+  if (!tid || !keys.some((k) => k !== "text" && !isEmptyFilter(S.filters[k]))) return;
+  S.filters.text = "";
+  const q = $("#q");
+  if (q) q.value = "";
+  toast(`Tolto il numero ${ticketNumber(tid)} dalla casella di ricerca: ora vedi i ticket dei filtri scelti.`, "info", 4000);
+}
+
 function setFilter(key, val, immediate = false) {
   S.filters[key] = val;
+  dropTicketNumberFor([key]);
   filtersChanged(immediate);
 }
 
 function setFilters(obj) {
   Object.assign(S.filters, obj);
+  dropTicketNumberFor(Object.keys(obj));
   filtersChanged(true);
 }
 
@@ -397,6 +413,8 @@ function twoYearsAgoDate() {
   return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())}`;
 }
 
+const OPEN_ALL_SLOW_TTL = 12 * 3600 * 1000;
+
 function userGroupOrAssignedFallback(f) {
   const gId =
     S.caps.defaultGroupId ||
@@ -470,8 +488,8 @@ function sortUnifiedRows(rows, exactNum = "") {
 
 /**
  * Verifica che ogni ticket restituito da HDA TOUCH contenga TUTTE le parole cercate (in AND).
- * Se una parola non compare già in Oggetto o Richiesta iniziale (`problem`), interroga in un'unica
- * chiamata veloce `TicketConversationItem` per verificare che compaia nei messaggi della conversazione.
+ * Se una parola non compare già in Oggetto o Richiesta iniziale (`problem`), legge i messaggi dei ticket
+ * (`TicketConversationItem`, a gruppi di 40) per verificare che compaia nella conversazione.
  */
 async function verifyTouchRowsAllWords(rows, f) {
   if (!rows || !rows.length) return [];
@@ -496,14 +514,26 @@ async function verifyTouchRowsAllWords(rows, f) {
   }
 
   if (needConvCheck.length && hda) {
-    try {
-      const checkIds = needConvCheck.slice(0, 60).map((r) => r.id);
-      const convRows = await hda.projection(
-        "TicketConversationItem",
-        [{ property: "TicketID", op: "in", value: checkIds.join("|") }],
-        ["TicketID", "Text"],
-        500,
-      );
+    // Tutti i candidati, a gruppi (prima si guardavano solo i primi 60 e gli altri sparivano dall'elenco).
+    // Se i messaggi non si possono leggere tutti (errore o limite di righe raggiunto) il ticket resta:
+    // il portale l'ha già trovato con la parola principale, meglio un ticket in più che uno perso.
+    const batches = [];
+    for (let i = 0; i < needConvCheck.length; i += CONV_CHECK_BATCH) batches.push(needConvCheck.slice(i, i + CONV_CHECK_BATCH));
+    await pool(batches, 2, async (batch) => {
+      let convRows;
+      try {
+        convRows = await hda.projection(
+          "TicketConversationItem",
+          [{ property: "TicketID", op: "in", value: batch.map((r) => r.id).join("|") }],
+          ["TicketID", "Text"],
+          CONV_CHECK_LIMIT,
+        );
+      } catch (e) {
+        log(`verifica parole conversazione: ${e.message} (tengo i ${batch.length} ticket trovati dal portale)`);
+        batch.forEach((r) => confirmedIds.add(r.id));
+        return;
+      }
+      const truncated = (convRows || []).length >= CONV_CHECK_LIMIT;
       const byTicket = new Map();
       for (const c of convRows || []) {
         const k = c && c.TicketID;
@@ -511,7 +541,7 @@ async function verifyTouchRowsAllWords(rows, f) {
         if (!byTicket.has(k)) byTicket.set(k, []);
         byTicket.get(k).push(String(c.Text || ""));
       }
-      for (const r of needConvCheck) {
+      for (const r of batch) {
         const msgs = byTicket.get(r.id) || [];
         const fullHay = `${r.subject || ""} ${r.problem || ""} ${r.catalog || ""} ${r.account || ""} ${msgs.join(" ")}`;
         if (matchesAllTokens(fullHay, textWords)) {
@@ -520,15 +550,18 @@ async function verifyTouchRowsAllWords(rows, f) {
             const hitMsg = msgs.find((m) => textWords.some((w) => matchesAllTokens(m, [w]))) || msgs[0];
             if (hitMsg) r.problem = hitMsg;
           }
+        } else if (truncated) {
+          confirmedIds.add(r.id);
         }
       }
-    } catch (e) {
-      log(`verifica parole conversazione: ${e.message}`);
-    }
+    });
   }
 
   return candidates.filter((r) => confirmedIds.has(r.id));
 }
+
+const CONV_CHECK_BATCH = 40;
+const CONV_CHECK_LIMIT = 1500;
 
 // Risultati recenti in memoria: rifare una ricerca appena fatta (tornare indietro, togliere e rimettere
 // un filtro, cancellare una lettera) è immediato. «Aggiorna» e «Riprova» rifanno sempre la ricerca.
@@ -579,6 +612,16 @@ function sameNumberNotice(rows, tid) {
   if (exact.length < 2) return null;
   const labels = exact.map((r) => (r.source === "ar" ? `#${num} del Vecchio Cruscotto` : `${r.id} di HDA TOUCH`));
   return `Il numero ${num} corrisponde a ${exact.length} ticket diversi (${labels.join(", ")}): li trovi tutti nell'elenco.`;
+}
+
+/** Testo nella casella + filtri: si cercano le parole SOLO nei ticket dei filtri. Lo si dice, con il modo per toglierlo. */
+function textNarrowsNotice(f) {
+  const what = describeFilters({ ...f, text: "" }).map((c) => c.label).join(", ");
+  return {
+    text: `Cerco «${f.text}» solo tra i ticket con ${what}. Per vedere tutti i ticket di questi filtri togli il testo dalla casella di ricerca.`,
+    action: () => clearFilterKey("text"),
+    actionLabel: "Togli il testo",
+  };
 }
 
 // Filtri che esistono anche nel Vecchio Cruscotto: testo, oggetto, data di apertura e gruppo
@@ -690,14 +733,14 @@ async function search({ more = false, fresh = false } = {}) {
 
   const calibForSearch = { ...S.calib, primaryTermOnly: true };
 
-  const run = (filters, customLimit = fetchLimit) =>
+  const run = (filters, customLimit = fetchLimit, signal = ac.signal) =>
     hda.listData("Incidents", {
       conditions: buildConditions(filters, calibForSearch),
       page: S.page,
       start: (S.page - 1) * size,
       limit: customLimit,
       sort: sortSpec(),
-      signal: ac.signal,
+      signal,
     });
 
   const readRawRows = (rawRows) => {
@@ -709,7 +752,8 @@ async function search({ more = false, fresh = false } = {}) {
   // Con la "Z" scritta si vuole il ticket nativo di Touch: lì il Vecchio Cruscotto non serve.
   let arPromise = Promise.resolve([]);
   if (!more && ar && (f.text || f.subject) && !typedZ) {
-    const plan = arSearchPlan(f);
+    // con un numero ticket i filtri non contano (come su Touch): nel Vecchio Cruscotto si cerca solo il numero
+    const plan = tid ? { groups: [] } : arSearchPlan(f);
     if (plan.blocked) {
       log(`vecchio cruscotto non interrogato: filtri solo di Touch (${plan.blocked.join(", ")})`);
       if (S.arConnected === true) {
@@ -721,10 +765,10 @@ async function search({ more = false, fresh = false } = {}) {
         ar
           .search({
             text: tid ? "" : f.text,
-            subject: f.subject,
+            subject: tid ? "" : f.subject,
             ticketId: tid ? ticketNumber(tid) : "",
-            dateFrom: f.dateFrom,
-            dateTo: f.dateTo,
+            dateFrom: tid ? "" : f.dateFrom,
+            dateTo: tid ? "" : f.dateTo,
             groups: plan.groups,
           })
           .then((r) => {
@@ -751,23 +795,35 @@ async function search({ more = false, fresh = false } = {}) {
     } else if (isUnconstrained(f)) {
       // Un'interrogazione senza alcun filtro su 10+ anni di storico scade a 25s su SQL Server nelle ore di punta:
       // mostriamo i ticket negli stati aperti (come fa Touch all'avvio) e, se anche quello andasse in timeout, restringiamo al gruppo dell'operatore.
+      // Se di recente gli aperti di tutti i gruppi sono andati in timeout si parte subito dal proprio gruppo
+      // (all'avvio si risparmiano i 25 s del tentativo destinato a fallire).
       const openF = { ...f, statuses: OPEN_STATUS_IDS };
+      const groupNotice =
+        "Vista iniziale: il portale era sovraccarico su tutti i gruppi, mostro i ticket aperti del tuo gruppo. Usa la ricerca o i filtri a sinistra per cercare su tutti i gruppi, nei ticket chiusi e nei messaggi.";
+      const fbNow = Date.now() - (S.openAllSlowAt || 0) < OPEN_ALL_SLOW_TTL ? userGroupOrAssignedFallback(f) : null;
       let res;
-      try {
-        res = await run(openF, size);
-        S.activeEffectiveFilters = openF;
-        S.notices.push(
-          "Vista iniziale: mostro i ticket aperti per evitare il timeout del portale (25 s). Scrivi nella casella di ricerca o scegli un filtro a sinistra per cercare automaticamente anche in tutti i ticket chiusi e nei messaggi."
-        );
-      } catch (e) {
-        const fb = isTimeoutError(e) && userGroupOrAssignedFallback(f);
-        if (!fb) throw e;
-        log("timeout anche sugli aperti di tutti i gruppi: restringo al gruppo/operatore");
-        res = await run(fb, size);
-        S.activeEffectiveFilters = fb;
-        S.notices.push(
-          "Vista iniziale: il portale era sovraccarico su tutti i gruppi, mostro i ticket aperti del tuo gruppo. Usa la ricerca o i filtri a sinistra per cercare su tutti i gruppi, nei ticket chiusi e nei messaggi."
-        );
+      if (fbNow) {
+        log("vista iniziale: gli aperti di tutti i gruppi sono andati in timeout da poco, parto dal gruppo/operatore");
+        res = await run(fbNow, size);
+        S.activeEffectiveFilters = fbNow;
+        S.notices.push(groupNotice);
+      } else {
+        try {
+          res = await run(openF, size);
+          S.activeEffectiveFilters = openF;
+          S.notices.push(
+            "Vista iniziale: mostro i ticket aperti per evitare il timeout del portale (25 s). Scrivi nella casella di ricerca o scegli un filtro a sinistra per cercare automaticamente anche in tutti i ticket chiusi e nei messaggi."
+          );
+        } catch (e) {
+          const fb = isTimeoutError(e) && userGroupOrAssignedFallback(f);
+          if (!fb) throw e;
+          log("timeout anche sugli aperti di tutti i gruppi: restringo al gruppo/operatore");
+          S.openAllSlowAt = Date.now();
+          kvSet("openAllSlowAt", S.openAllSlowAt);
+          res = await run(fb, size);
+          S.activeEffectiveFilters = fb;
+          S.notices.push(groupNotice);
+        }
       }
       if (ac.signal.aborted) return;
       rows = readRawRows(res.rows);
@@ -782,9 +838,14 @@ async function search({ more = false, fresh = false } = {}) {
       parts.set("sub", []);
       parts.set("ar", []);
       const subF = fallbackToSubject(f);
+      // La ricerca sull'oggetto serve solo a mostrare presto i primi risultati: quando quella nei messaggi
+      // (che copre anche l'oggetto) ha risposto su tutto lo storico, non la si aspetta più (su tutto lo
+      // storico l'oggetto "a metà parola" può arrivare al timeout di 25 s).
+      const subAc = new AbortController();
+      ac.signal.addEventListener("abort", () => subAc.abort(), { once: true });
       const subPromise = track(
         "oggetti di Touch",
-        run(subF, fetchLimit)
+        run(subF, fetchLimit, subAc.signal)
           .then((r) => verifyTouchRowsAllWords(readRawRows(r.rows), subF))
           .catch((e) => {
             if (e.name !== "AbortError") log(`ricerca sull'oggetto: ${e.message}`);
@@ -800,7 +861,7 @@ async function search({ more = false, fresh = false } = {}) {
           try {
             const r = await run(f, fetchLimit);
             S.activeEffectiveFilters = f;
-            return { rows: await verifyTouchRowsAllWords(readRawRows(r.rows), f), total: r.total };
+            return { rows: await verifyTouchRowsAllWords(readRawRows(r.rows), f), total: r.total, complete: true };
           } catch (e) {
             if (e instanceof AuthError || e.name === "AbortError") throw e;
             log(`FullText su tutto lo storico (${e.message}): riprovo sugli ultimi 24 mesi / aperti`);
@@ -826,10 +887,12 @@ async function search({ more = false, fresh = false } = {}) {
       ftPromise.then((r) => show("ft", r.rows), () => {});
 
       const ftRes = await ftPromise;
+      if (ftRes.complete) subAc.abort();
       const [subRows, arRows] = await Promise.all([subPromise, arPromise]);
       if (ac.signal.aborted) return;
       rows = sortUnifiedRows(mergeRowLists(ftRes.rows, subRows, arRows));
       total = multiWord ? rows.length : Math.max(ftRes.total || 0, rows.length);
+      if (hasNarrowingFilter(f) && rows.length < size) S.notices.push(textNarrowsNotice(f));
     } else if (tid) {
       // Ricerca per numero ticket: su HDA TOUCH tutte le varianti dell'ID in parallelo (es. "9876543" e "9876543Z",
       // "11943797Z" e "11943797"), nel Vecchio Cruscotto il numero (NumTic), su Touch i ticket che citano il numero
@@ -885,6 +948,13 @@ async function search({ more = false, fresh = false } = {}) {
       total = rows.length;
       const note = sameNumberNotice(rows, tid);
       if (note) S.notices.push(note);
+      if (hasNarrowingFilter(f)) {
+        S.notices.push({
+          text: `Con un numero ticket nella casella di ricerca i filtri a sinistra non contano: cerco solo il ticket ${exactNum}. Per vedere i ticket dei filtri togli il numero.`,
+          action: () => clearFilterKey("text"),
+          actionLabel: "Togli il numero",
+        });
+      }
       if (!openedId) {
         const exact = pickExactTicket(rows, f.text);
         if (exact) openTicket(exact.id, exact);
@@ -1404,11 +1474,12 @@ function onKey(e) {
 // ---------------------------------------------------------------- avvio
 
 async function init() {
-  const [settings, savedUi, lastFilters, sort, saved, favorites, recent, learned, captures, caps, typesSeen, touchLang, transportMode] = await Promise.all([
+  const [settings, savedUi, lastFilters, sort, saved, favorites, recent, learned, captures, caps, typesSeen, touchLang, transportMode, openAllSlowAt] = await Promise.all([
     kvGet("settings", null), kvGet("ui", null), kvGet("lastFilters", null), kvGet("sort", null), kvGet("saved", []),
     kvGet("favorites", []), kvGet("recent", []), kvGet("learned", {}), kvGet("captures", []), kvGet("caps", {}), kvGet("typesSeen", {}),
-    kvGet("touchLang", null), kvGet("transportMode", null),
+    kvGet("touchLang", null), kvGet("transportMode", null), kvGet("openAllSlowAt", 0),
   ]);
+  S.openAllSlowAt = Number(openAllSlowAt) || 0;
   Object.assign(S.settings, settings || {});
   Object.assign(ui, savedUi || {});
   ui.openSections = ui.openSections || {};

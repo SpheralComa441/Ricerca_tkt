@@ -110,7 +110,8 @@ def matches(t, c):
     if c.get("extKey") == "MODIFIEDTICKET":
         return str(t.get("OwnerUserID") or "") in v.split("|")
     if p == "FullText":
-        hay = (t["Subject"] + " " + t["Problem"]).lower()
+        # come Touch con INCLUDECONVERSATIONITEM: oggetto, richiesta e testo dei messaggi
+        hay = (t["Subject"] + " " + t["Problem"] + " " + " ".join(str(it.get("Text", "")) for it in conversation(t))).lower()
         return all(w in hay for w in v.lower().split())
     if p == "CLASSCLI.TranslatedDescription":
         p = "CLASSCLI"
@@ -212,8 +213,8 @@ class Handler(SimpleHTTPRequestHandler):
                 if ent == "Incident":
                     src = [t for t in TICKETS if all(matches(t, c) for c in conds)]
                 elif ent == "TicketConversationItem":
-                    tid = next((c["value"] for c in conds if c.get("property") == "TicketID"), None)
-                    src = conversation(BY_ID[tid]) if tid in BY_ID else []
+                    tids = next((str(c["value"]).split("|") for c in conds if c.get("property") == "TicketID"), [])
+                    src = [dict(it, TicketID=tid) for tid in tids if tid in BY_ID for it in conversation(BY_ID[tid])]
                 elif ent == "UserGroup":
                     src = [{"ID": i, "Description": d, "Active": True} for i, d in GROUPS]
                 elif ent == "User":

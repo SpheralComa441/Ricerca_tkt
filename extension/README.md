@@ -55,12 +55,21 @@ Scrivi il numero nella barra principale (vanno bene anche `#`, `tk`, `ticket n.`
 - I ticket di Touch **con la Z** e quelli del **Vecchio Cruscotto** con le stesse cifre sono ticket diversi: compaiono entrambi nell'elenco (le righe del Vecchio Cruscotto hanno l'etichetta *Vecchio cruscotto*) e un avviso lo segnala. Un ticket di Touch **senza Z** (migrato) che c'è anche nel Vecchio Cruscotto diventa una riga sola.
 - Si apre da solo il ticket nella forma scritta (7 cifre senza Z → prima il ticket senza Z, poi quello di Touch con la Z); con la Z scritta, sempre quello di Touch.
 - Cliccando una riga del Vecchio Cruscotto si legge quel ticket (non un ticket di Touch con le stesse cifre).
+- Un numero ticket nella casella porta solo a quel ticket e **non tiene conto dei filtri a sinistra**: quando scegli un filtro (gruppo, stato, cliente…) il numero rimasto da una ricerca precedente si toglie da solo, e se scrivi un numero con dei filtri già scelti un avviso lo ricorda (*Togli il numero*).
+
+## Gruppo di lavoro e testo nella casella
+
+- **Gruppo di lavoro** è il *Gruppo owner* del ticket in Touch (es. `Paghe Infinity - Paghe Web P`). Per i ticket assegnati a un gruppo usa *Assegnato a*.
+- Con delle parole nella casella di ricerca e un filtro scelto, si cercano le parole **solo nei ticket del filtro**: sopra l'elenco un avviso lo dice e con *Togli il testo* vedi tutti i ticket del gruppo.
+- Con più parole, i ticket trovati dal portale vengono verificati tutti (anche oltre i primi 60): se i messaggi di un ticket non si possono leggere, il ticket resta nell'elenco.
 
 ## Velocità
 
 - I risultati compaiono **man mano che arrivano**: prima l'oggetto dei ticket di Touch e il Vecchio Cruscotto, poi la ricerca dentro i messaggi di Touch (la più lenta). Sotto l'elenco si vede dove sta ancora cercando.
 - Le ricerche fatte negli ultimi 2 minuti tornano **subito dalla memoria**; il pulsante ↻ (Aggiorna) le rifà sempre sul portale.
 - Mentre scrivi si cerca dopo una breve pausa e da 3 caratteri (o un numero ticket completo); <kbd>Invio</kbd> cerca subito.
+- Quando la ricerca nei messaggi di Touch (che copre anche l'oggetto) ha risposto, quella sull'oggetto non si aspetta più: su tutto lo storico può arrivare al timeout di 25 s.
+- Se all'avvio i ticket aperti di tutti i gruppi vanno in timeout, per 12 ore l'app parte direttamente dai ticket aperti del tuo gruppo (senza aspettare di nuovo i 25 s).
 - Aprendo un ticket dall'elenco, dati, conversazione e allegati si caricano insieme.
 - Nel Vecchio Cruscotto si cerca con testo, oggetto, data di apertura e **Gruppo di lavoro** (il gruppo Touch `G10663HR` è `IdGruppo:10663`); con filtri che lì non esistono (stato, persone, cliente…) si cerca solo in Touch e l'app lo dice.
 

@@ -213,7 +213,8 @@ export function renderSidebar(ctx) {
 
   const me = ctx.hda.currentUserId;
   el.appendChild(section("people", "Gruppi e persone", n("ownerGroups", "assigned", "ownerUsers", "modifiedBy"), ui.openSections.people ?? true, [
-    field("Gruppo di lavoro", tokenInput({ values: f.ownerGroups, placeholder: "es. Paghe Infinity…", onChange: (v) => ctx.setFilter("ownerGroups", v), search: (q) => ctx.lookups.search("groups", q) })),
+    field("Gruppo di lavoro", tokenInput({ values: f.ownerGroups, placeholder: "es. Paghe Infinity…", onChange: (v) => ctx.setFilter("ownerGroups", v), search: (q) => ctx.lookups.search("groups", q) }),
+      "Il «Gruppo owner» del ticket in Touch. Per i ticket assegnati a un gruppo usa «Assegnato a»."),
     field("Assegnato a (operatore o gruppo)", tokenInput({ values: f.assigned, placeholder: "Nome operatore o gruppo…", onChange: (v) => ctx.setFilter("assigned", v), search: (q) => ctx.lookups.search("people", q) }),
       me ? h("button", { type: "button", class: "linkbtn", onclick: () => ctx.setFilter("assigned", [{ id: me, label: ctx.lookups.label("users", me) || "Io" }]) }, "Solo i miei") : null),
     field("Responsabile del ticket", tokenInput({ values: f.ownerUsers, placeholder: "Nome operatore…", onChange: (v) => ctx.setFilter("ownerUsers", v), search: (q) => ctx.lookups.search("users", q) })),

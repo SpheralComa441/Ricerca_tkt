@@ -80,7 +80,8 @@ export function makeTransport(opts = {}) {
 
   async function viaProxy(req) {
     if (!inExtension() && !opts.sendMessage) throw new AuthError();
-    const out = await sendMessage({ type: "hda-proxy", req: { path: req.path, method: req.method, body: req.body } });
+    // la scheda di Touch completa comunque la sua richiesta, ma chi l'ha chiesta smette di aspettarla
+    const out = await abortable(sendMessage({ type: "hda-proxy", req: { path: req.path, method: req.method, body: req.body } }), req.signal);
     if (!out || out.error === "no-tab") throw new AuthError("Nessuna scheda HDA TOUCH aperta: aprila, accedi e riprova.");
     if (out.error) throw new HdaError(out.error);
     return out;
@@ -170,6 +171,25 @@ export function makeTransport(opts = {}) {
     set mode(m) { mode = m; },
     base,
   };
+}
+
+function abortError() {
+  if (typeof DOMException === "function") return new DOMException("Richiesta annullata", "AbortError");
+  return Object.assign(new Error("Richiesta annullata"), { name: "AbortError" });
+}
+
+/** La promessa, ma rifiutata con AbortError appena `signal` viene annullato. */
+export function abortable(p, signal) {
+  if (!signal) return p;
+  if (signal.aborted) return Promise.reject(abortError());
+  return new Promise((resolve, reject) => {
+    const onAbort = () => reject(abortError());
+    signal.addEventListener("abort", onAbort, { once: true });
+    Promise.resolve(p).then(
+      (v) => (signal.removeEventListener("abort", onAbort), resolve(v)),
+      (e) => (signal.removeEventListener("abort", onAbort), reject(e)),
+    );
+  });
 }
 
 /** {a:1,b:[..]} → "a=1&b=%5B..%5D" (gli oggetti diventano JSON, come fa ExtJS) */
