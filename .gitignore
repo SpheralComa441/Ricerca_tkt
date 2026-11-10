@@ -1,0 +1,10 @@
+__pycache__/
+*.pyc
+.venv/
+venv/
+.env
+data/*
+!data/.gitkeep
+.pytest_cache/
+bookmarklet/node_modules/
+bookmarklet/test/vendor/

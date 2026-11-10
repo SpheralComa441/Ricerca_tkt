@@ -1,0 +1,338 @@
+<!doctype html>
+<html lang="it">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Ricerca TKT</title>
+  <link rel="icon" href="/static/img/icon.svg" type="image/svg+xml">
+  <link rel="stylesheet" href="/static/css/app.css">
+  <script src="/static/js/app.js" defer></script>
+</head>
+<body>
+<div id="boot" class="boot">Caricamento…</div>
+
+<!-- ============================ LOGIN ============================ -->
+<section id="view-login" class="login" hidden>
+  <form id="login-form" class="card login-card" autocomplete="on">
+    <div class="brand brand-lg"><span class="brand-mark" aria-hidden="true"></span>Ricerca TKT</div>
+    <p class="muted">Motore di ricerca avanzato per i ticket dell'Area Riservata Zucchetti.</p>
+
+    <label class="fld" id="login-connector-wrap">Sistema
+      <select id="login-connector"></select>
+    </label>
+
+    <div class="seg seg-sm" id="login-method" role="tablist" hidden>
+      <button type="button" role="tab" data-method="password" aria-selected="true">Credenziali</button>
+      <button type="button" role="tab" data-method="cookie" aria-selected="false">Sessione del browser</button>
+    </div>
+
+    <label class="fld">Nome utente
+      <input id="login-user" name="username" autocomplete="username" required>
+    </label>
+    <label class="fld" id="login-pass-wrap">Password
+      <input id="login-pass" name="password" type="password" autocomplete="current-password">
+    </label>
+    <label class="fld" id="login-cookie-wrap" hidden>Cookie della sessione Zucchetti
+      <textarea id="login-cookie" rows="3" placeholder="JSESSIONID=…; altri=…"></textarea>
+      <small class="muted">Utile se l'accesso usa SSO o un secondo fattore. Accedi a Zucchetti nel browser, apri gli strumenti per sviluppatori (F12) → Rete, seleziona una richiesta verso zucchetti.it e copia il valore dell'intestazione <code>Cookie</code>.</small>
+    </label>
+
+    <p id="login-hint" class="muted small"></p>
+    <p id="login-error" class="error" role="alert"></p>
+    <button type="submit" class="btn primary block" id="login-submit">Accedi</button>
+    <p class="fineprint">La password serve solo per aprire la sessione su Zucchetti: non viene salvata.</p>
+  </form>
+</section>
+
+<!-- ============================ APP ============================ -->
+<div id="view-main" hidden>
+  <header class="topbar">
+    <div class="brand"><span class="brand-mark" aria-hidden="true"></span>Ricerca TKT</div>
+    <nav class="tabs" id="nav" aria-label="Sezioni">
+      <button type="button" data-tab="search" aria-current="page">Cerca</button>
+      <button type="button" data-tab="saved">Salvate</button>
+      <button type="button" data-tab="history">Cronologia</button>
+      <button type="button" data-tab="favorites">Preferiti <span class="count" id="fav-count"></span></button>
+      <button type="button" data-tab="diag" id="nav-diag" hidden>Diagnostica</button>
+    </nav>
+    <div class="user">
+      <span class="badge" id="conn-badge"></span>
+      <span id="user-name" class="muted"></span>
+      <button type="button" class="btn ghost small" id="btn-logout">Esci</button>
+    </div>
+  </header>
+
+  <main class="page">
+    <!-- ======================== CERCA ======================== -->
+    <section id="tab-search" class="tab">
+      <form id="search-form" class="card search-panel" autocomplete="off">
+        <div class="searchbar">
+          <div class="sb-input">
+            <span class="ico ico-search" aria-hidden="true"></span>
+            <input id="q" type="search" placeholder="Cerca nei ticket… es. detassazione premio" aria-label="Testo da cercare" spellcheck="false">
+            <ul id="suggest" class="suggest" role="listbox" hidden></ul>
+          </div>
+          <button type="submit" class="btn primary" id="btn-search">Cerca</button>
+        </div>
+
+        <div class="row wrap gap">
+          <div class="seg" id="mode" role="radiogroup" aria-label="Modalità">
+            <button type="button" data-mode="all" aria-checked="true" role="radio" title="Il ticket deve contenere tutte le parole">Tutte le parole</button>
+            <button type="button" data-mode="any" aria-checked="false" role="radio" title="Basta una delle parole">Almeno una</button>
+            <button type="button" data-mode="phrase" aria-checked="false" role="radio" title="Le parole esattamente in quest'ordine">Frase esatta</button>
+            <button type="button" data-mode="solr" aria-checked="false" role="radio" title="Sintassi Lucene/Solr: AND OR NOT ( ) &quot;frase&quot;~N parola* parola~ campo:valore">Sintassi Solr</button>
+          </div>
+        </div>
+
+        <div class="quick">
+          <label class="fld">Periodo
+            <select id="date-preset">
+              <option value="">Qualsiasi</option>
+              <option value="30d">Ultimi 30 giorni</option>
+              <option value="3m">Ultimi 3 mesi</option>
+              <option value="6m">Ultimi 6 mesi</option>
+              <option value="1y">Ultimi 12 mesi</option>
+              <option value="ytd">Anno corrente</option>
+              <option value="py">Anno scorso</option>
+              <option value="2y">Ultimi 2 anni</option>
+              <option value="5y">Ultimi 5 anni</option>
+              <option value="custom">Personalizzato</option>
+            </select>
+          </label>
+          <label class="fld">Dal <input type="date" id="date-from"></label>
+          <label class="fld">Al <input type="date" id="date-to"></label>
+          <label class="fld">Numero ticket
+            <input id="numbers" placeholder="1234567, 1230000-1240000" inputmode="numeric">
+          </label>
+          <div class="fld">Prodotti
+            <div class="chips-input" id="products-in" data-placeholder="es. PAGHEW"></div>
+          </div>
+        </div>
+
+        <details id="adv" class="adv">
+          <summary>Opzioni avanzate <span class="muted small" id="adv-count"></span></summary>
+          <div class="adv-grid">
+            <fieldset>
+              <legend>Testo</legend>
+              <label class="fld">Escludi parole
+                <input id="exclude" placeholder="es. storno &quot;cassa integrazione&quot;">
+              </label>
+              <label class="fld">Deve contenere la frase
+                <input id="phrase" placeholder="es. premio di risultato">
+              </label>
+              <label class="fld">Cerca in
+                <select id="scope">
+                  <option value="all">Testo e oggetto</option>
+                  <option value="subject">Solo oggetto</option>
+                  <option value="text">Solo testo</option>
+                </select>
+              </label>
+              <label class="fld">Distanza massima tra le parole (frase esatta)
+                <input id="proximity" type="number" min="0" max="50" value="0">
+              </label>
+              <label class="check"><input type="checkbox" id="prefix"> Corrispondenza parziale (detass… trova detassazione)</label>
+              <label class="check"><input type="checkbox" id="fuzzy"> Tolleranza errori di battitura</label>
+            </fieldset>
+
+            <fieldset>
+              <legend>Prodotti da escludere</legend>
+              <div class="chips-input" id="products-out" data-placeholder="es. HRPORTAL"></div>
+            </fieldset>
+
+            <fieldset>
+              <legend>Indice di ricerca</legend>
+              <label class="fld">Indice (core) <input id="core"></label>
+              <label class="fld">Area <input id="area"></label>
+              <label class="fld">Lingue <input id="langs"></label>
+            </fieldset>
+            <fieldset class="span2">
+              <legend>Filtri su dati di riepilogo tickets</legend>
+              <div class="field-grid" id="riepilogo"></div>
+              <p class="muted small">Più valori separati da virgola; anteponi <code>-</code> per escludere un valore; <code>*</code> come carattere jolly.</p>
+            </fieldset>
+
+          </div>
+        </details>
+
+        <div class="qpreview">
+          <span class="muted small">Query Solr</span>
+          <code id="qpreview" class="mono"></code>
+          <div class="qp-actions">
+            <button type="button" class="btn ghost small" id="btn-copy-query">Copia</button>
+            <button type="button" class="btn ghost small" id="btn-edit-query" title="Passa alla sintassi Solr con questa query">Modifica</button>
+            <button type="button" class="btn ghost small" id="btn-save-search">Salva ricerca</button>
+            <button type="button" class="btn ghost small" id="btn-reset">Azzera</button>
+          </div>
+        </div>
+        <div id="qwarnings" class="notes"></div>
+      </form>
+
+      <div id="empty-state" class="card empty">
+        <h2>Come cercare</h2>
+        <ul class="tips">
+          <li><b>Tutte le parole</b>: <code>detassazione premio</code> trova i ticket che contengono entrambe.</li>
+          <li>Usa le virgolette per una frase: <code>"premio di risultato" conguaglio</code>.</li>
+          <li><b>Sintassi Solr</b>: <code>(detassazione OR "premio di risultato") AND NOT storno</code>, <code>detass*</code>, <code>conguaglo~</code>.</li>
+          <li><b>#1234567</b> nel campo di ricerca apre direttamente quel numero di ticket.</li>
+          <li>Zucchetti mostra al massimo <span class="cap-n">210</span> risultati, i più rilevanti: se li raggiungi, restringi la ricerca con un periodo, un prodotto o parole più specifiche.</li>
+          <li>Scorciatoie: <kbd>/</kbd> per cercare, <kbd>Esc</kbd> per interrompere.</li>
+        </ul>
+      </div>
+
+      <section id="results" class="results" hidden>
+        <aside class="facets card" id="facets" aria-label="Filtri sui risultati">
+          <div class="facet">
+            <h3>Prodotto</h3>
+            <ul id="facet-product"></ul>
+          </div>
+          <div class="facet">
+            <h3>Anno</h3>
+            <ul id="facet-year" class="bars"></ul>
+          </div>
+          <div class="facet" id="facet-month-wrap" hidden>
+            <h3>Mese</h3>
+            <ul id="facet-month" class="bars"></ul>
+          </div>
+          <div class="facet" id="facet-tag-wrap" hidden>
+            <h3>Etichette</h3>
+            <ul id="facet-tag"></ul>
+          </div>
+        </aside>
+
+        <div class="res-main">
+          <div id="progress" class="card progress" hidden>
+            <div class="bar"><span id="progress-bar"></span></div>
+            <div class="row gap"><span id="progress-text" class="small"></span>
+              <button type="button" class="btn ghost small" id="btn-stop">Interrompi</button></div>
+          </div>
+          <div id="res-alert" class="alert" hidden></div>
+          <div class="res-head-row">
+            <div id="res-summary" class="res-summary"></div>
+          </div>
+          <div class="res-toolbar">
+            <input id="refine" type="search" placeholder="Filtra nei risultati… (parole, -escludi, &quot;frase&quot;)" aria-label="Filtra nei risultati">
+            <select id="sort" aria-label="Ordinamento">
+              <option value="rank">Rilevanza</option>
+              <option value="date_desc">Data: più recenti</option>
+              <option value="date_asc">Data: meno recenti</option>
+              <option value="num_desc">Numero: decrescente</option>
+              <option value="num_asc">Numero: crescente</option>
+              <option value="subject">Oggetto A→Z</option>
+            </select>
+            <select id="group" aria-label="Raggruppamento">
+              <option value="none">Nessun raggruppamento</option>
+              <option value="product">Per prodotto</option>
+              <option value="month">Per mese</option>
+              <option value="year">Per anno</option>
+            </select>
+            <select id="page-size" aria-label="Risultati per pagina">
+              <option>25</option><option selected>50</option><option>100</option><option>250</option>
+            </select>
+            <div class="menu">
+              <button type="button" class="btn ghost small" id="btn-export" aria-haspopup="true" aria-expanded="false">Esporta ▾</button>
+              <div class="menu-list" id="export-menu" hidden>
+                <button type="button" data-export="csv">CSV (Excel)</button>
+                <button type="button" data-export="json">JSON</button>
+                <button type="button" data-export="numbers">Copia numeri ticket</button>
+                <button type="button" data-export="list">Copia elenco</button>
+              </div>
+            </div>
+            <label class="check small"><input type="checkbox" id="sel-all"> Seleziona pagina</label>
+          </div>
+          <div id="active-filters" class="chips"></div>
+          <div id="result-list" class="result-list"></div>
+          <nav id="pager" class="pager" aria-label="Pagine"></nav>
+        </div>
+      </section>
+    </section>
+
+    <!-- ======================== SALVATE ======================== -->
+    <section id="tab-saved" class="tab" hidden>
+      <div class="card">
+        <div class="row between"><h2>Ricerche salvate</h2></div>
+        <div id="saved-list" class="list"></div>
+      </div>
+    </section>
+
+    <!-- ======================== CRONOLOGIA ======================== -->
+    <section id="tab-history" class="tab" hidden>
+      <div class="card">
+        <div class="row between"><h2>Cronologia</h2>
+          <button type="button" class="btn ghost small" id="btn-clear-history">Svuota cronologia</button></div>
+        <div id="history-list" class="list"></div>
+      </div>
+    </section>
+
+    <!-- ======================== PREFERITI ======================== -->
+    <section id="tab-favorites" class="tab" hidden>
+      <div class="card">
+        <div class="row between wrap gap"><h2>Preferiti</h2>
+          <div class="row gap">
+            <input id="fav-filter" type="search" placeholder="Filtra per testo o etichetta…">
+            <button type="button" class="btn ghost small" id="btn-fav-export">Esporta CSV</button>
+          </div>
+        </div>
+        <div id="fav-list" class="result-list"></div>
+      </div>
+    </section>
+
+    <!-- ======================== DIAGNOSTICA ======================== -->
+    <section id="tab-diag" class="tab" hidden>
+      <div class="card">
+        <h2>Diagnostica del connettore</h2>
+        <pre id="diag-info" class="mono pre"></pre>
+      </div>
+      <div class="card">
+        <h3>1. Importa la richiesta di ricerca da cURL</h3>
+        <p class="small muted">Sul sito Zucchetti esegui una ricerca con una parola semplice (es. <code>detassazione</code>). Negli strumenti per sviluppatori (F12) → Rete, individua la richiesta <code>spsl_fquery_mc</code>, tasto destro → <i>Copy → Copy as cURL (bash)</i> e incollala qui. I cookie non vengono salvati.</p>
+        <form id="diag-curl-form" class="stack">
+          <textarea id="diag-curl" rows="5" class="mono" placeholder="curl 'https://www.zucchetti.it/areariservata/servlet/spsl_fquery_mc' ..."></textarea>
+          <label class="fld">Parola cercata nella richiesta <input id="diag-keyword" placeholder="detassazione"></label>
+          <div class="row gap">
+            <button type="submit" class="btn" data-save="0">Analizza</button>
+            <button type="submit" class="btn primary" data-save="1">Analizza e salva</button>
+            <button type="button" class="btn ghost" id="diag-template-del">Rimuovi modello salvato</button>
+          </div>
+        </form>
+        <pre id="diag-curl-out" class="mono pre" hidden></pre>
+      </div>
+      <div class="card">
+        <h3>2. Prova una query e guarda la risposta grezza</h3>
+        <form id="diag-raw-form" class="stack">
+          <label class="fld">Query (pKeyword) <input id="diag-query" class="mono" value="detassazione"></label>
+          <button type="submit" class="btn">Esegui</button>
+        </form>
+        <pre id="diag-raw-out" class="mono pre" hidden></pre>
+      </div>
+    </section>
+  </main>
+</div>
+
+<!-- ============================ DIALOGHI ============================ -->
+<dialog id="dlg-note" class="dialog">
+  <form method="dialog" id="note-form" class="stack">
+    <h3 id="note-title">Nota</h3>
+    <label class="fld">Nota personale <textarea id="note-text" rows="5"></textarea></label>
+    <label class="fld">Etichette (separate da virgola) <input id="note-tags" placeholder="es. da verificare, normativa"></label>
+    <div class="row gap end">
+      <button value="cancel" class="btn ghost" formnovalidate>Annulla</button>
+      <button value="remove" class="btn ghost danger" id="note-remove">Rimuovi dai preferiti</button>
+      <button value="ok" class="btn primary">Salva</button>
+    </div>
+  </form>
+</dialog>
+
+<dialog id="dlg-save" class="dialog">
+  <form method="dialog" id="save-form" class="stack">
+    <h3>Salva ricerca</h3>
+    <label class="fld">Nome <input id="save-name" required maxlength="200"></label>
+    <div class="row gap end">
+      <button value="cancel" class="btn ghost" formnovalidate>Annulla</button>
+      <button value="ok" class="btn primary">Salva</button>
+    </div>
+  </form>
+</dialog>
+
+<div id="toast" class="toast" role="status" aria-live="polite" hidden></div>
+</body>
+</html>
