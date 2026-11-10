@@ -62,9 +62,10 @@ export function mergePortalStatuses(rows) {
     if (!id) continue;
     if (!STATUSES[id]) {
       const d = String(r.TranslatedDescription || r.Description || id);
-      const closed = /clos|chius|solv|risolt|discard|scart/i.test(d);
+      // "In attesa di chiusura" / "Awaiting closure" sono ancora in attesa: si guarda prima l'attesa
       const waiting = /await|attesa|sospes|pending|draft|bozza|waiting/i.test(d);
-      STATUSES[id] = { it: d, group: closed ? "closed" : waiting ? "waiting" : "open" };
+      const closed = /clos|chius|solv|risolt|discard|scart/i.test(d);
+      STATUSES[id] = { it: d, group: waiting ? "waiting" : closed ? "closed" : "open" };
     }
   }
 }

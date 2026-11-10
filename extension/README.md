@@ -34,6 +34,28 @@ Dopo un aggiornamento del codice basta premere il pulsante **Ricarica** (↻) ne
    - Con **Archivia risultati** puoi salvare in blocco i ticket della ricerca corrente (2 alla volta con pausa, saltando quelli non modificati).
    - Nella scheda **Archivio locale** la ricerca trova le parole anche dentro tutti i messaggi e le note interne.
 
+## Ricerca per numero ticket (HDA TOUCH e Vecchio Cruscotto)
+
+Scrivi il numero nella barra principale (vanno bene anche `#`, `tk`, `ticket n.` davanti):
+
+| Scrivi | HDA TOUCH | Vecchio Cruscotto |
+|---|---|---|
+| `11943797` (8 cifre) | `11943797Z` e `11943797`, in parallelo | `NumTic:11943797` |
+| `9876543` (7 cifre) | `9876543` (migrato) e `9876543Z` (nativo), in parallelo | `NumTic:9876543` |
+| `9876543Z` (Z scritta) | solo `9876543Z` | non interrogato |
+
+- I ticket di Touch **con la Z** e quelli del **Vecchio Cruscotto** con le stesse cifre sono ticket diversi: compaiono entrambi nell'elenco (le righe del Vecchio Cruscotto hanno l'etichetta *Vecchio cruscotto*) e un avviso lo segnala. Un ticket di Touch **senza Z** (migrato) che c'è anche nel Vecchio Cruscotto diventa una riga sola.
+- Si apre da solo il ticket nella forma scritta (7 cifre senza Z → prima il ticket senza Z, poi quello di Touch con la Z); con la Z scritta, sempre quello di Touch.
+- Cliccando una riga del Vecchio Cruscotto si legge quel ticket (non un ticket di Touch con le stesse cifre).
+
+## Velocità
+
+- I risultati compaiono **man mano che arrivano**: prima l'oggetto dei ticket di Touch e il Vecchio Cruscotto, poi la ricerca dentro i messaggi di Touch (la più lenta). Sotto l'elenco si vede dove sta ancora cercando.
+- Le ricerche fatte negli ultimi 2 minuti tornano **subito dalla memoria**; il pulsante ↻ (Aggiorna) le rifà sempre sul portale.
+- Mentre scrivi si cerca dopo una breve pausa e da 3 caratteri (o un numero ticket completo); <kbd>Invio</kbd> cerca subito.
+- Aprendo un ticket dall'elenco, dati, conversazione e allegati si caricano insieme.
+- Nel Vecchio Cruscotto si cerca con testo, oggetto, data di apertura e **Gruppo di lavoro** (il gruppo Touch `G10663HR` è `IdGruppo:10663`); con filtri che lì non esistono (stato, persone, cliente…) si cerca solo in Touch e l'app lo dice.
+
 ## Auto-apprendimento dei filtri e Diagnostica
 
 Alcuni filtri di Touch (formato delle date, ricerca nel testo completo, oggetto, tag) non compaiono nel tracciato iniziale e vengono appresi automaticamente:

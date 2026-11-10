@@ -77,8 +77,13 @@ export function splitQuoted(text) {
       return { main, quoted: lines.slice(i).join("\n").trim() };
     }
   }
-  // righe che iniziano con ">"
-  const k = lines.findIndex((l, i) => i > 0 && /^\s*>/.test(l) && lines.slice(i).filter((x) => x.trim()).every((x) => /^\s*>/.test(x)));
+  // righe che iniziano con ">" fino alla fine (una sola scansione dal fondo: i messaggi lunghi restano veloci)
+  let k = -1;
+  for (let i = lines.length - 1; i > 0; i--) {
+    if (!lines[i].trim()) continue;
+    if (!/^\s*>/.test(lines[i])) break;
+    k = i;
+  }
   if (k > 0) return { main: lines.slice(0, k).join("\n").trim(), quoted: lines.slice(k).join("\n").trim() };
   return { main: String(text ?? "").trim(), quoted: "" };
 }

@@ -87,10 +87,12 @@ function readArVarsInMainWorld() {
   return { mcid, idCenSer, pArea };
 }
 
-async function arProxy(msg) {
-  const tab = await arTab();
-  if (!tab) return { error: "no-tab" };
-  let hint = {};
+// Parametri della Ricerca rapida letti dalla pagina dell'Area Riservata (m_cID, centro di servizio, area),
+// tenuti per scheda: la lettura (script in tutti i frame) si fa una volta sola e non a ogni ricerca.
+const arHints = new Map(); // tabId → { url, hint }
+
+async function readArHint(tab) {
+  const hint = {};
   try {
     const frames = await chrome.scripting.executeScript({
       target: { tabId: tab.id, allFrames: true },
@@ -107,14 +109,35 @@ async function arProxy(msg) {
   } catch {
     /* */
   }
-  const payload = { ...msg, type: "ar-cmd", hint };
-  const send = () => chrome.tabs.sendMessage(tab.id, payload);
+  if (hint.mcid || hint.idCenSer) arHints.set(tab.id, { url: tab.url, hint });
+  return hint;
+}
+
+chrome.tabs.onRemoved.addListener((tabId) => arHints.delete(tabId));
+chrome.tabs.onUpdated.addListener((tabId, info) => {
+  if (info.status === "loading" || info.url) arHints.delete(tabId);
+});
+
+async function arProxy(msg) {
+  const tab = await arTab();
+  if (!tab) return { error: "no-tab" };
+  const cached = arHints.get(tab.id);
+  const fresh = !cached || cached.url !== tab.url || msg.cmd === "status";
+  const hint = fresh ? await readArHint(tab) : cached.hint;
+  const send = (h) => chrome.tabs.sendMessage(tab.id, { ...msg, type: "ar-cmd", hint: h });
+  let res;
   try {
-    return await send();
+    res = await send(hint);
   } catch {
     await chrome.scripting.executeScript({ target: { tabId: tab.id }, files: ["content/ar_bridge.js"] });
-    return await send();
+    res = await send(hint);
   }
+  // risposta non valida con i parametri in memoria: si rileggono dalla pagina e si riprova una volta
+  if (!fresh && (!res || res.error || (msg.cmd === "search" && !res.ok))) {
+    arHints.delete(tab.id);
+    res = await send(await readArHint(tab));
+  }
+  return res;
 }
 
 function openDetailInPage(id) {

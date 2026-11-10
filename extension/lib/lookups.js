@@ -11,6 +11,9 @@ const DAY = 86400000;
 export function makeLookups(hda, { kvGet, kvSet, log = () => {} }) {
   const lists = { groups: new Map(), users: new Map(), accounts: new Map(), catalog: new Map() };
   const loaded = { groups: false, users: false, catalog: false };
+  let fullAt = 0; // quando sono stati caricati gli elenchi completi (resta valido 7 giorni)
+  const inflight = {}; // un solo caricamento alla volta per elenco (si scrive mentre carica)
+  const failed = {}; // elenchi non disponibili: non si riprova a ogni tasto
   let dirty = false;
   let saveTimer = null;
 
@@ -31,7 +34,9 @@ export function makeLookups(hda, { kvGet, kvSet, log = () => {} }) {
       dirty = false;
       const o = {};
       for (const [k, m] of Object.entries(lists)) o[k] = [...m.values()].slice(0, 30000);
-      await kvSet("lookups", { at: Date.now(), ...o });
+      // il segno "elenco completo" va salvato insieme, altrimenti al riavvio si riscaricherebbe tutto
+      const full = fullAt ? { at: fullAt, loaded: { ...loaded } } : undefined;
+      await kvSet("lookups", { at: Date.now(), ...o, full });
     }, 1500);
   }
 
@@ -39,7 +44,10 @@ export function makeLookups(hda, { kvGet, kvSet, log = () => {} }) {
     const saved = await kvGet("lookups", null);
     if (!saved) return;
     for (const k of Object.keys(lists)) for (const x of saved[k] || []) lists[k].set(x.id, x);
-    if (saved.full && Date.now() - (saved.full.at || 0) < 7 * DAY) Object.assign(loaded, saved.full.loaded || {});
+    if (saved.full && Date.now() - (saved.full.at || 0) < 7 * DAY) {
+      Object.assign(loaded, saved.full.loaded || {});
+      fullAt = saved.full.at;
+    }
   }
 
   /** Raccoglie gruppi, persone e clienti dalle righe dei risultati */
@@ -64,8 +72,22 @@ export function makeLookups(hda, { kvGet, kvSet, log = () => {} }) {
     return null;
   }
 
-  async function loadFull(kind) {
-    if (loaded[kind]) return true;
+  function loadFull(kind) {
+    if (loaded[kind]) return Promise.resolve(true);
+    if (failed[kind] && Date.now() - failed[kind] < 10 * 60 * 1000) return Promise.resolve(false);
+    if (!inflight[kind]) {
+      inflight[kind] = loadFullNow(kind)
+        .catch(() => false)
+        .then((ok) => {
+          if (!ok) failed[kind] = Date.now();
+          delete inflight[kind];
+          return ok;
+        });
+    }
+    return inflight[kind];
+  }
+
+  async function loadFullNow(kind) {
     let ok = false;
     if (kind === "groups") {
       const rows = await tryProjection(["UserGroup", "UserGroups"], ["ID", "Description", "Active"], 5000);
@@ -88,10 +110,9 @@ export function makeLookups(hda, { kvGet, kvSet, log = () => {} }) {
     }
     loaded[kind] = ok;
     if (ok) {
+      fullAt = Date.now();
       dirty = true;
       scheduleSave();
-      const saved = (await kvGet("lookups", {})) || {};
-      await kvSet("lookups", { ...saved, full: { at: Date.now(), loaded: { ...loaded } } });
     }
     return ok;
   }

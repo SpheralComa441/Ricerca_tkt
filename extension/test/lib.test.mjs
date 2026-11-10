@@ -3,14 +3,14 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 
-import { parseMsDate, ticketIdFrom, ticketIdVariants, ticketNumber, isLegacyTicketNumber, tokens, queryTerms, matchesAllTokens, norm, csvCell, fmtDate } from "../lib/util.js";
+import { parseMsDate, ticketIdFrom, ticketIdVariants, ticketNumber, isLegacyTicketNumber, isTouchNativeId, ticketMergeKey, tokens, queryTerms, matchesAllTokens, norm, csvCell, fmtDate } from "../lib/util.js";
 import { parseListConfig } from "../lib/listconfig.js";
 import { makeRowReader } from "../lib/rows.js";
 import { buildConditions, emptyFilters, formatDateValue, learnFromConditions, ruleFor, DEF, describeFilters, filterPayload, pickCalibrationSample, isUnconstrained, hasNarrowingFilter, primaryTerm } from "../lib/filters.js";
 import { htmlToText, splitQuoted, linkifyParts, decodeEntities, unescapeIfEscapedHtml, cleanText } from "../lib/richtext.js";
 import { makeTransport, AuthError, HdaError, formBody } from "../lib/transport.js";
 import { makeHda, parsePreviewAttachmentResponse, guessMimeFromName } from "../lib/hda.js";
-import { buildArQuery, parseArResponse, buildArTicket, extractMcidFromHtml, splitArTesti } from "../lib/ar.js";
+import { buildArQuery, parseArResponse, buildArTicket, extractMcidFromHtml, splitArTesti, makeAr } from "../lib/ar.js";
 import { loadTicket, normalizeAttachment } from "../lib/ticket.js";
 
 // ---------------------------------------------------------------- util
@@ -24,23 +24,40 @@ test("parseMsDate: formato /Date(ms)/, data nulla HDA, ISO", () => {
   assert.equal(fmtDate(new Date(2026, 10, 6)), "06/11/2026");
 });
 
-test("numero ticket ↔ ID HDA (8 cifre con Z, 5-7 cifre senza Z) e varianti ID", () => {
+test("numero ticket ↔ ID HDA: 8 cifre → Z, 5-7 cifre senza Z, la Z scritta resta, varianti ID", () => {
   assert.equal(ticketIdFrom("10500123"), "10500123Z");
   assert.equal(ticketIdFrom(" #10500123 "), "10500123Z");
   assert.equal(ticketIdFrom("10500123z"), "10500123Z");
   assert.equal(ticketIdFrom("9018200"), "9018200");
   assert.equal(ticketIdFrom("9042633"), "9042633");
-  assert.equal(ticketIdFrom("9042633Z"), "9042633");
+  // ticket nativo di Touch a 7 cifre: la Z scritta dall'utente non si perde
+  assert.equal(ticketIdFrom("9042633Z"), "9042633Z");
+  assert.equal(ticketIdFrom("tk 11943797"), "11943797Z");
+  assert.equal(ticketIdFrom("TKT#9876543z"), "9876543Z");
+  assert.equal(ticketIdFrom("ticket n. 8900042"), "8900042");
+  // senza Z si provano entrambe le forme; con la Z solo quella
   assert.deepEqual(ticketIdVariants("9042633"), ["9042633", "9042633Z"]);
+  assert.deepEqual(ticketIdVariants("9042633Z"), ["9042633Z"]);
   assert.deepEqual(ticketIdVariants("10500123"), ["10500123Z", "10500123"]);
+  assert.deepEqual(ticketIdVariants("10500123Z"), ["10500123Z"]);
   assert.equal(ticketIdFrom("cedolino"), null);
   assert.equal(ticketIdFrom("12 34"), null);
+  assert.equal(ticketIdFrom("tk"), null);
   assert.equal(ticketNumber("10500123Z"), "10500123");
   assert.equal(ticketNumber("9042633"), "9042633");
   assert.equal(isLegacyTicketNumber("9018200"), true);
-  assert.equal(isLegacyTicketNumber("9018200Z"), true);
   assert.equal(isLegacyTicketNumber("#8907717"), true);
+  assert.equal(isLegacyTicketNumber("9018200Z"), false);
   assert.equal(isLegacyTicketNumber("11935498Z"), false);
+  assert.equal(isTouchNativeId("9876543Z"), true);
+  assert.equal(isTouchNativeId("9876543"), false);
+});
+
+test("ticketMergeKey: un ticket di Touch con la Z non si unisce al ticket del Vecchio Cruscotto con le stesse cifre", () => {
+  assert.notEqual(ticketMergeKey({ id: "9876543Z" }), ticketMergeKey({ id: "9876543", source: "ar" }));
+  // Touch migrato (senza Z) e Vecchio Cruscotto con lo stesso numero sono lo stesso ticket
+  assert.equal(ticketMergeKey({ id: "9042633" }), ticketMergeKey({ id: "9042633", source: "ar" }));
+  assert.equal(ticketMergeKey({ id: "11943797Z" }), ticketMergeKey({ id: "11943797z" }));
 });
 
 test("tokens, queryTerms, matchesAllTokens e norm: frasi tra virgolette, accenti", () => {
@@ -250,6 +267,8 @@ test("linkifyParts: URL e numeri di ticket (8 cifre con Z, 7 cifre senza Z)", ()
   assert.equal(p.filter((x) => x.t === "ticket")[1].id, "9042633");
   assert.ok(p.find((x) => x.t === "url").v.startsWith("https://example.com/x?y=1"));
   assert.equal(p.filter((x) => x.t === "ticket").length, 2);
+  const z = linkifyParts("vedi 9876543Z");
+  assert.equal(z.find((x) => x.t === "ticket").id, "9876543Z");
 });
 
 // ---------------------------------------------------------------- trasporto
@@ -476,4 +495,111 @@ test("allegati: normalizeAttachment, parsePreviewAttachmentResponse e hda.listAt
   });
   assert.equal(prev.content, "JVBERi0xLjQK");
   assert.equal(prev.fileName, "retribuzione lavoratore a chiamata.pdf");
+});
+
+// ---------------------------------------------------------------- Vecchio Cruscotto: formato reale di spsl_fquery_mc
+
+// Elenco dei campi come nella risposta reale (42 colonne); i valori delle righe sono inventati.
+const AR_FIELDS = ["type", "category", "id", "description", "altDescription", "attachmentData", "entityName", "NumTic", "IdStato", "StatoBase", "IdPriorita", "IdTipologia", "Durata", "Lavoro", "IdGruppo", "IdOperatore", "IdCliente", "IdPersCli", "IdProdotto", "IdSede", "Oggetto", "DataApe", "IdCenSer", "IdArgomenti", "IdClassificazioni", "IdRifTick", "IdRifPers", "IdRifAzi", "Testi", "IdMeseA", "IdAnnoA", "IdMeseM", "IdAnnoM", "IdOperatoreIn", "IdGruppoIn", "img", "url1", "url2", "url2lbl", "urlPublic", "mimeType", "viewFields"];
+function arRow({ num, code, subject, date, testi, gruppo = "10663" }) {
+  const v = Object.fromEntries(AR_FIELDS.map((f) => [f, ""]));
+  Object.assign(v, {
+    type: "TICKOPE003", category: "TICKOPE003", id: code, entityName: "sipv_aticketssolrTICKOPE003",
+    description: `[#${num}] [PAGHEW] [${date.slice(8, 10)}-${date.slice(5, 7)}-${date.slice(0, 4)}] <span style="font-weight:bold;" solrfound="true">${subject}</span>`,
+    altDescription: `<div style="padding-top:2px;">${testi.slice(0, 60)}</div>`,
+    NumTic: num, IdStato: "CLOSE", StatoBase: "C", IdPriorita: "LOW", IdTipologia: "INFO", IdGruppo: gruppo,
+    IdProdotto: "PAGHEW", Oggetto: subject, DataApe: `${date} 14:14:58.0`, IdCenSer: "PAOW", Testi: testi,
+    url1: `gspv_psearch_card.jsp?w_TTCODICE=${code}`,
+  });
+  return AR_FIELDS.map((f) => v[f]);
+}
+function arPage(rows) {
+  const payload = { data: [...rows, "t,CCCCCCCCCCCCCCCCCCCC,-1"], maxResults: [210], fields: AR_FIELDS, facet: [["TICKOPE003", rows.length, "TICKET"]], errors: [] };
+  return `<!doctype html>\n<html><body>\n<p class='TabLabel' style='margin:0'>Ok routine eseguita.</p>\n<!--\nFunction return value:${JSON.stringify(payload)}\n -->\n</body>\n</html>`;
+}
+
+test("ar: risposta nel formato reale (42 campi, riga sentinella, maxResults) e filtro gruppo/anno", () => {
+  const html = arPage([
+    arRow({ num: "8900042", code: "000000008903653", subject: "detassazione", date: "2026-04-21", testi: "detassazione pregresso  spiegata la detassazione" }),
+    arRow({ num: "8916529", code: "000000008920147", subject: "ricalcolo detassazione", date: "2026-05-07", testi: "ricalcolo detassazione versione 26.05.00  informazioni sul ricalcolo" }),
+  ]);
+  const rows = parseArResponse(html);
+  assert.deepEqual(rows.map((r) => r.id), ["8900042", "8916529"]);
+  assert.equal(rows[0].ownerGroup, "PAOW · 10663");
+  assert.equal(rows[0].statusId, "S5"); // Chiuso (S8 su Touch è uno stato aperto)
+  assert.equal(rows[0].date.getFullYear(), 2026);
+  assert.equal(rows[1].arUrl, "https://www.zucchetti.it/areariservata/jsp/gspv_psearch_card.jsp?w_TTCODICE=000000008920147");
+
+  // gruppo come nella Ricerca rapida (… and IdGruppo:10663) e anni di apertura
+  assert.equal(
+    buildArQuery({ text: "detassazione", idCenSer: "PAOW", groups: ["10663"] }),
+    "IdCenSer:PAOW and ( Testi:(detassazione or detassazione*) or Oggetto:(detassazione or detassazione*) ) and IdGruppo:10663"
+  );
+  assert.match(buildArQuery({ text: "x", groups: ["10663", "10552"] }), /\( IdGruppo:10663 or IdGruppo:10552 \)$/);
+  assert.match(buildArQuery({ text: "cud", dateFrom: "2020-01-01", dateTo: "2026-12-31" }), /^\( \(IdAnnoA:2020 \) or .*\(IdAnnoA:2026 \) \) and /);
+});
+
+test("ar: loadTicket apre solo il ticket con quel numero; senza collegamento non riprova a ogni ricerca", async () => {
+  const portlet = "this.splResults.m_cID='f0f7834fde6879c8685311c282f6734a';";
+  const seen = [];
+  let answer = arPage([arRow({ num: "8916529", code: "000000008920147", subject: "cita 8900042 nel testo", date: "2026-05-07", testi: "vedi 8900042" })]);
+  const fetchImpl = async (url, init = {}) => {
+    seen.push(url.replace(/^.*areariservata\//, "") + (init.body && init.body.startsWith("pKeyword=") ? " " + decodeURIComponent(init.body.split("&")[0].slice(9)) : ""));
+    const body = /portlet\.jsp$/.test(url) ? portlet : /spsl_fquery_mc$/.test(url) ? answer : "<html></html>";
+    return { ok: true, status: 200, text: async () => body };
+  };
+  const ar = makeAr({ fetch: fetchImpl });
+  // la ricerca larga trova solo un ALTRO ticket che cita il numero: non va aperto al posto di 8900042
+  await assert.rejects(() => ar.loadTicket("8900042"), /non trovato/);
+  assert.ok(seen.some((s) => s.endsWith("NumTic:8900042")));
+
+  answer = arPage([arRow({ num: "8900042", code: "000000008903653", subject: "detassazione", date: "2026-04-21", testi: "Richiesta  Risposta" })]);
+  const full = await ar.loadTicket("8900042");
+  assert.equal(full.id, "8900042");
+  assert.equal(full.source, "ar");
+
+  // nessuna sessione: il primo tentativo cerca il collegamento, quelli subito dopo no
+  const calls = [];
+  const offline = makeAr({ fetch: async (url) => (calls.push(url), { ok: true, status: 200, text: async () => "<html>login</html>" }) });
+  await assert.rejects(() => offline.search({ text: "cud" }), /non collegato/);
+  const n = calls.length;
+  await assert.rejects(() => offline.search({ text: "cud" }), /non collegato/);
+  assert.equal(calls.length, n, "nessuna richiesta in più entro un minuto");
+});
+
+// ---------------------------------------------------------------- correzioni della revisione
+
+test("splitQuoted: righe citate con '>' in una sola scansione (messaggi molto lunghi restano veloci)", () => {
+  const long = ["Risposta nuova", ...Array.from({ length: 20000 }, (_, i) => (i % 50 === 0 ? "" : "> riga citata " + i))].join("\n");
+  const t0 = Date.now();
+  const r = splitQuoted(long);
+  assert.ok(Date.now() - t0 < 500, "troppo lento");
+  assert.equal(r.main, "Risposta nuova");
+  assert.ok(r.quoted.startsWith("> riga citata 1"));
+  assert.deepEqual(splitQuoted("a\n> b\nc\n> d"), { main: "a\n> b\nc", quoted: "> d" });
+});
+
+test("stati sconosciuti: 'In attesa di chiusura' è in attesa, non chiuso", async () => {
+  const { mergePortalStatuses, statusInfo } = await import("../lib/statuses.js");
+  mergePortalStatuses([{ ID: "X91", Description: "In attesa di chiusura" }, { ID: "X92", Description: "Closed by customer" }]);
+  assert.equal(statusInfo("X91").group, "waiting");
+  assert.equal(statusInfo("X92").group, "closed");
+  assert.equal(statusInfo("S5").group, "closed");
+});
+
+test("lookups: un solo caricamento dell'elenco completo alla volta e segno 'completo' salvato", async () => {
+  const { makeLookups } = await import("../lib/lookups.js");
+  const kv = {};
+  let calls = 0;
+  const hda = { async projection() { calls++; await new Promise((r) => setTimeout(r, 30)); return [{ ID: "U1", FullName: "Laura Verdi", Active: true }]; } };
+  const lk = makeLookups(hda, { kvGet: async (k, d) => kv[k] ?? d, kvSet: async (k, v) => { kv[k] = v; } });
+  const [a, b] = await Promise.all([lk.loadFull("users"), lk.loadFull("users")]);
+  assert.equal(a && b, true);
+  assert.equal(calls, 1);
+  await new Promise((r) => setTimeout(r, 1700)); // salvataggio rimandato di 1,5 s
+  assert.equal(kv.lookups.full.loaded.users, true);
+  const again = makeLookups(hda, { kvGet: async (k, d) => kv[k] ?? d, kvSet: async (k, v) => { kv[k] = v; } });
+  await again.restore();
+  await again.loadFull("users");
+  assert.equal(calls, 1, "dopo il riavvio l'elenco completo non si riscarica");
 });
