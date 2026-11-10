@@ -328,6 +328,19 @@
     }
   }
 
+  // Richiesta di sola lettura a una pagina dell'Area Riservata (Storico): stessa sessione della scheda
+  async function plainFetch({ path, method = "GET", body = null }) {
+    if (!/^\/(jsp|servlet)\//.test(String(path || ""))) return { error: "percorso-non-ammesso" };
+    const base = location.origin + "/areariservata";
+    const r = await fetch(base + path, {
+      method,
+      credentials: "include",
+      headers: body != null ? { "Content-Type": "application/x-www-form-urlencoded; charset=UTF-8" } : {},
+      body: body != null ? body : undefined,
+    });
+    return { ok: true, status: r.status, text: await r.text() };
+  }
+
   chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
     if (!msg || msg.type !== "ar-cmd") return;
     const run = async () => {
@@ -337,6 +350,7 @@
       }
       if (msg.cmd === "search") return await runSearch(msg);
       if (msg.cmd === "read") return await readDetail(msg.url);
+      if (msg.cmd === "fetch") return await plainFetch(msg);
       return { error: "comando-sconosciuto" };
     };
     run().then(sendResponse, (e) => sendResponse({ error: String((e && e.message) || e) }));

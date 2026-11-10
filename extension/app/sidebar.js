@@ -194,13 +194,71 @@ function uncertain(ctx, key) {
   return null;
 }
 
+/** Filtri della scheda Storico: quelli della Ricerca avanzata dell'Area Riservata (che non cerca per parole). */
+function renderStoricoSidebar(ctx) {
+  const f = ctx.S.storico.filters;
+  const el = clear(document.getElementById("sidebar"));
+  el.dataset.source = "storico";
+  el.appendChild(h("div", { class: "side-head" }, h("h2", null, "Filtri dello Storico"), h("button", { class: "linkbtn", onclick: () => ctx.storicoReset() }, "Azzera tutto")));
+  el.appendChild(h("div", { class: "side-note src-storico" },
+    "Lo Storico è la Ricerca avanzata dell'Area Riservata: contiene tutti i ticket del Vecchio Cruscotto, anche prima del 2024. Non cerca per parole."));
+
+  const text = (key, placeholder, clean = (v) => v.trim()) => {
+    const inp = h("input", { class: "input", type: "text", inputmode: key === "number" || key === "clientCode" ? "numeric" : null, value: f[key] || "", placeholder });
+    const apply = () => clean(inp.value) !== (f[key] || "") && ctx.storicoSetFilter(key, clean(inp.value));
+    inp.addEventListener("change", apply);
+    inp.addEventListener("keydown", (e) => e.key === "Enter" && (e.preventDefault(), apply()));
+    return inp;
+  };
+  const okDay = (v) => v === "" || /^(19[89]\d|20\d\d)-\d\d-\d\d$/.test(v);
+  const day = (key, label) => {
+    const inp = h("input", { class: "input", type: "date", value: f[key] || "", "aria-label": label });
+    inp.addEventListener("change", () => okDay(inp.value) && inp.value !== (f[key] || "") && ctx.storicoSetFilter(key, inp.value));
+    return inp;
+  };
+  const year = new Date().getFullYear();
+  const presets = [
+    ["Fino al 2023", { dateFrom: "", dateTo: "2023-12-31" }],
+    ...[2023, 2022, 2021, 2020].map((y) => [String(y), { dateFrom: `${y}-01-01`, dateTo: `${y}-12-31` }]),
+    ["Tutti gli anni", { dateFrom: "", dateTo: `${year}-12-31` }],
+  ];
+  const one = (v) => (v ? [v] : []);
+
+  el.appendChild(h("div", { class: "fbody plain" },
+    field("Numero ticket", text("number", "es. 5123456", (v) => v.replace(/\D/g, ""))),
+    field("Periodo (dal – al)",
+      h("div", null,
+        h("div", { class: "row2" }, day("dateFrom", "dal"), day("dateTo", "al")),
+        h("div", { class: "presets" }, presets.map(([name, val]) =>
+          h("button", { type: "button", class: "preset" + (f.dateFrom === val.dateFrom && f.dateTo === val.dateTo ? " on" : ""), onclick: () => ctx.storicoSetFilter(val) }, name))))),
+    field("Cliente (codice)", text("clientCode", "es. 1234", (v) => v.replace(/\D/g, "")), "Il codice del cliente, come nella Ricerca avanzata del portale."),
+    field("Gruppo", tokenInput({
+      values: one(f.group ? { id: f.group, label: ctx.S.stLookups.groups[f.group] || f.groupLabel || f.group } : null),
+      placeholder: "es. Paghe Web P…",
+      onChange: (v) => { const g = v[v.length - 1]; ctx.storicoSetFilter({ group: g ? g.id : "", groupLabel: g ? g.label : "" }); },
+      search: (q) => ctx.storicoLookup("groups", q),
+    })),
+    field("Operatore", tokenInput({
+      values: one(f.operator),
+      placeholder: "Nome operatore…",
+      onChange: (v) => ctx.storicoSetFilter("operator", v[v.length - 1] || null),
+      search: (q) => ctx.storicoLookup("operators", q),
+    }), "Si possono scegliere gli operatori già comparsi nei risultati dello Storico.")));
+}
+
 export function renderSidebar(ctx) {
   const { S, ui } = ctx;
+  if (S.tab === "storico") return renderStoricoSidebar(ctx);
   const f = S.filters;
   const el = clear(document.getElementById("sidebar"));
+  el.dataset.source = S.tab === "ar" ? "ar" : "touch";
   const n = (...keys) => keys.reduce((a, k) => a + (Array.isArray(f[k]) ? f[k].length : f[k] ? 1 : 0), 0);
 
   el.appendChild(h("div", { class: "side-head" }, h("h2", null, "Filtri"), h("button", { class: "linkbtn", onclick: () => ctx.resetFilters() }, "Azzera tutto")));
+  if (S.tab === "ar") {
+    el.appendChild(h("div", { class: "side-note src-ar" },
+      "Nel Vecchio Cruscotto valgono le parole della casella in alto, «L'oggetto contiene», la data di apertura e il Gruppo di lavoro. Gli altri filtri esistono solo in HDA Touch."));
+  }
 
   if (S.saved.length) {
     el.appendChild(section("saved", "Ricerche salvate", 0, ui.openSections.saved ?? true,

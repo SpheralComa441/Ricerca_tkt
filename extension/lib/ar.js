@@ -683,6 +683,26 @@ export function makeAr({ log = () => {}, fetch: fetchImpl = globalThis.fetch } =
     return buildArTicket({ id: num, row, detail });
   }
 
+  /**
+   * Richiesta di sola lettura a una pagina dell'Area Riservata (usata dallo Storico): prima dalla scheda
+   * dell'Area Riservata aperta (stessa sessione del portale), altrimenti direttamente dall'estensione.
+   * path: "/jsp/…" o "/servlet/…". Ritorna il testo della risposta.
+   */
+  async function request(path, { method = "GET", body = null } = {}) {
+    if (!/^\/(jsp|servlet)\//.test(String(path || ""))) throw new Error("Percorso non ammesso");
+    const viaTab = await sendBridge({ cmd: "fetch", path, method, body });
+    if (viaTab && viaTab.ok && typeof viaTab.text === "string" && viaTab.status < 400) return viaTab.text;
+    if (!fetchImpl) throw new Error("Area Riservata non raggiungibile");
+    const r = await fetchImpl(`${AR_BASE}${path}`, {
+      method,
+      credentials: "include",
+      headers: body != null ? { "Content-Type": "application/x-www-form-urlencoded; charset=UTF-8" } : {},
+      body: body != null ? body : undefined,
+    });
+    if (!r.ok) throw new Error(`L'Area Riservata ha risposto ${r.status}`);
+    return await r.text();
+  }
+
   function openHome(url) {
     const target = resolveArUrl(url) || AR_SEARCH_URL;
     if (inExt && chrome.tabs) chrome.tabs.create({ url: target });
@@ -696,6 +716,7 @@ export function makeAr({ log = () => {}, fetch: fetchImpl = globalThis.fetch } =
     checkStatus,
     search,
     loadTicket,
+    request,
     openHome,
   };
 }

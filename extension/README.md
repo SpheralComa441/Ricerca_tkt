@@ -1,4 +1,4 @@
-# Ricerca TKT — Estensione Chrome / Edge (v4)
+# Ricerca TKT — Estensione Chrome / Edge (v4.2)
 
 Applicazione dedicata in una scheda del browser per cercare e leggere i ticket di **HDA TOUCH** (`https://zucchetti.support/HDAPortal/`) senza toccare i componenti ExtJS della pagina.
 
@@ -34,6 +34,23 @@ Dopo un aggiornamento del codice basta premere il pulsante **Ricarica** (↻) ne
    - Con **Archivia risultati** puoi salvare in blocco i ticket della ricerca corrente (2 alla volta con pausa, saltando quelli non modificati).
    - Nella scheda **Archivio locale** la ricerca trova le parole anche dentro tutti i messaggi e le note interne.
 
+## Le tre fonti: HDA Touch, Vecchio Cruscotto, Storico
+
+Sopra l'elenco ci sono tre schede, ognuna con il suo colore e il numero di ticket trovati. Lo stesso colore segna la riga del ticket (striscia a sinistra) e l'etichetta nel lettore, così si vede sempre da dove viene un ticket.
+
+| Scheda | Che cos'è | Come si cerca |
+|---|---|---|
+| **HDA Touch** (blu) | I ticket di HDA TOUCH | Parole, numero e tutti i filtri a sinistra |
+| **Vecchio Cruscotto** (arancio) | La ricerca per parole dell'Area Riservata (anni recenti) | Parole, numero, oggetto, data di apertura, gruppo |
+| **Storico** (viola) | La *Ricerca avanzata* dell'Area Riservata: tutti i ticket, anche prima del 2024 | Numero ticket, periodo, codice cliente, gruppo, operatore. **Non cerca per parole** (nel portale i campi oggetto e testo sono disattivati) |
+
+- **Numero ticket** nella casella in alto: si cerca nelle tre fonti insieme. Il ticket si apre da solo e la scheda passa a quella della sua fonte. Se il ticket c'è solo nello Storico si apre da lì.
+- **Parole** nella casella in alto: si cercano in HDA Touch e nel Vecchio Cruscotto. La scheda Storico lo dice e propone i suoi filtri.
+- **Scheda Storico**: a sinistra compaiono i suoi filtri. Di partenza il periodo è «fino al 2023» (i ticket che il Vecchio Cruscotto non mostra più); con *Tutti gli anni* si cerca su tutto. Senza nessun filtro non parte nessuna ricerca.
+- Se la scheda aperta resta vuota e un'altra fonte ha trovato qualcosa, l'app passa da sola a quella.
+- Per lo Storico serve l'accesso all'Area Riservata (come per il Vecchio Cruscotto). Gli allegati dei ticket dello Storico si aprono dalla scheda del ticket nell'Area Riservata.
+- Nelle schede *Archivio locale*, *Preferiti* e *Recenti* ogni riga porta l'etichetta della sua fonte.
+
 ## Se non si collega a Touch
 
 L'app prova prima a chiamare Touch direttamente. Se Touch risponde con un errore del suo collegamento interno (per esempio «An error occourred on the webservice underlying connection…» o «Si è verificato un errore durante il caricamento dei dati»), ripete la stessa richiesta dalla **scheda di HDA TOUCH aperta**, con i suoi cookie e lo stesso server, e da quel momento passa sempre da lì. In alto compare *Connesso a Touch (tramite scheda)*.
@@ -52,7 +69,7 @@ Scrivi il numero nella barra principale (vanno bene anche `#`, `tk`, `ticket n.`
 | `9876543` (7 cifre) | `9876543` (migrato) e `9876543Z` (nativo), in parallelo | `NumTic:9876543` |
 | `9876543Z` (Z scritta) | solo `9876543Z` | non interrogato |
 
-- I ticket di Touch **con la Z** e quelli del **Vecchio Cruscotto** con le stesse cifre sono ticket diversi: compaiono entrambi nell'elenco (le righe del Vecchio Cruscotto hanno l'etichetta *Vecchio cruscotto*) e un avviso lo segnala. Un ticket di Touch **senza Z** (migrato) che c'è anche nel Vecchio Cruscotto diventa una riga sola.
+- I ticket di Touch **con la Z** e quelli del **Vecchio Cruscotto** con le stesse cifre sono ticket diversi: ognuno compare nella scheda della sua fonte e un avviso lo segnala. Un ticket di Touch **senza Z** (migrato) che c'è anche nel Vecchio Cruscotto diventa una riga sola.
 - Si apre da solo il ticket nella forma scritta (7 cifre senza Z → prima il ticket senza Z, poi quello di Touch con la Z); con la Z scritta, sempre quello di Touch.
 - Cliccando una riga del Vecchio Cruscotto si legge quel ticket (non un ticket di Touch con le stesse cifre).
 - Un numero ticket nella casella porta solo a quel ticket e **non tiene conto dei filtri a sinistra**: quando scegli un filtro (gruppo, stato, cliente…) il numero rimasto da una ricerca precedente si toglie da solo, e se scrivi un numero con dei filtri già scelti un avviso lo ricorda (*Togli il numero*).

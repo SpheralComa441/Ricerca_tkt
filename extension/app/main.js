@@ -10,6 +10,7 @@ import { openDiag } from "./diag.js";
 import { makeTransport, AuthError, PORTAL_BASE } from "../lib/transport.js";
 import { makeHda } from "../lib/hda.js";
 import { makeAr } from "../lib/ar.js";
+import { makeStorico, emptyStoricoFilters, hasStoricoFilter } from "../lib/storico.js";
 import { makeRowReader } from "../lib/rows.js";
 import { emptyFilters, buildConditions, describeFilters, ruleFor, DEF, DOMAIN_CONDITION, OPEN_STATUS_IDS, FILTER_DEFS, isEmptyFilter, isUnconstrained, hasNarrowingFilter } from "../lib/filters.js";
 import { statusInfo, mergePortalStatuses } from "../lib/statuses.js";
@@ -55,7 +56,10 @@ const S = {
   pending: new Set(),
   error: null,
   notices: [],
-  tab: "results",
+  tab: "touch", // touch | ar | storico (le tre fonti) | archive | favorites | recent
+  touchTotal: 0,
+  storico: { filters: emptyStoricoFilters(), results: [], total: 0, loading: false, error: null, key: "" },
+  stLookups: { groups: {}, operators: {} },
   archiveHits: [],
   archiveCount: 0,
   archived: new Map(),
@@ -76,7 +80,7 @@ const S = {
 };
 const ui = { openSections: {}, statusDetail: false, showInternal: true, newestFirst: false, readerSearch: "", showFilters: true };
 
-let transport, hda, ar, lookups;
+let transport, hda, ar, storico, lookups;
 let rowReader = makeRowReader(null);
 let searchAbort = null;
 let openSeq = 0;
@@ -105,6 +109,9 @@ const ctx = {
   saveSettings,
   reloadCalibration,
   refreshArchiveCount,
+  storicoSetFilter,
+  storicoReset,
+  storicoLookup,
 };
 
 // ---------------------------------------------------------------- utilità
@@ -611,7 +618,7 @@ function sameNumberNotice(rows, tid) {
   const exact = (rows || []).filter((r) => ticketNumber(r.id) === num);
   if (exact.length < 2) return null;
   const labels = exact.map((r) => (r.source === "ar" ? `#${num} del Vecchio Cruscotto` : `${r.id} di HDA TOUCH`));
-  return `Il numero ${num} corrisponde a ${exact.length} ticket diversi (${labels.join(", ")}): li trovi tutti nell'elenco.`;
+  return `Il numero ${num} corrisponde a ${exact.length} ticket diversi (${labels.join(", ")}): ognuno è nella scheda della sua fonte.`;
 }
 
 /** Testo nella casella + filtri: si cercano le parole SOLO nei ticket dei filtri. Lo si dice, con il modo per toglierlo. */
@@ -674,23 +681,37 @@ async function search({ more = false, fresh = false } = {}) {
       Object.assign(S, { page: 1, cursor: -1, error: null, loading: false, pending: new Set() });
       S.results = hit.results;
       S.total = hit.total;
+      S.touchTotal = hit.touchTotal || 0;
+      const stCached = runStorico();
+      stCached.then(() => { autoPickTab(); renderResults(); });
       S.notices = [...hit.notices];
       S.activeEffectiveFilters = hit.eff;
       runArchiveSearch(f.text);
       log(`ricerca dalla memoria: ${hit.results.length} ticket`);
+      autoPickTab();
       renderResults();
       if (tid) {
         const exact = pickExactTicket(hit.results, f.text);
-        if (exact) openTicket(exact.id, exact);
+        if (exact) openFound(exact);
+        else {
+          // il ticket c'è solo nello Storico: si apre da lì, come alla prima ricerca
+          stCached.then((rows) => {
+            const st = (rows || []).find((r) => r.id === ticketNumber(tid));
+            if (st && S.filters.text === f.text && searchAbort === ac) openFound(st);
+          });
+        }
       }
       return;
     }
   }
 
+  // lo Storico cerca per conto suo (numero della casella o i suoi filtri): non rallenta le altre due fonti
+  const storicoPromise = more ? Promise.resolve(S.storico.results) : runStorico({ fresh });
   if (!more) {
     S.page = 1;
     S.results = [];
     S.total = 0;
+    S.touchTotal = 0;
     S.cursor = -1;
     S.notices = [];
     runArchiveSearch(f.text);
@@ -786,12 +807,14 @@ async function search({ more = false, fresh = false } = {}) {
   try {
     let rows = [];
     let total = 0;
+    let touchTotal = 0; // quanti ticket ha in tutto Touch per questa ricerca (per «Mostra altri»)
 
     if (more && S.activeEffectiveFilters) {
       const res = await run(S.activeEffectiveFilters, size);
       if (ac.signal.aborted) return;
       rows = await verifyTouchRowsAllWords(readRawRows(res.rows), f);
       total = res.total;
+      touchTotal = res.total || 0;
     } else if (isUnconstrained(f)) {
       // Un'interrogazione senza alcun filtro su 10+ anni di storico scade a 25s su SQL Server nelle ore di punta:
       // mostriamo i ticket negli stati aperti (come fa Touch all'avvio) e, se anche quello andasse in timeout, restringiamo al gruppo dell'operatore.
@@ -828,6 +851,7 @@ async function search({ more = false, fresh = false } = {}) {
       if (ac.signal.aborted) return;
       rows = readRawRows(res.rows);
       total = res.total;
+      touchTotal = res.total || 0;
     } else if (f.text && !tid) {
       // Ricerca nei messaggi sempre attiva. In parallelo:
       //  1) FullText/eq[INCLUDECONVERSATIONITEM] su HDA TOUCH (cerca dentro i messaggi delle conversazioni e nell'oggetto)
@@ -892,6 +916,7 @@ async function search({ more = false, fresh = false } = {}) {
       if (ac.signal.aborted) return;
       rows = sortUnifiedRows(mergeRowLists(ftRes.rows, subRows, arRows));
       total = multiWord ? rows.length : Math.max(ftRes.total || 0, rows.length);
+      touchTotal = multiWord ? 0 : ftRes.total || 0;
       if (hasNarrowingFilter(f) && rows.length < size) S.notices.push(textNarrowsNotice(f));
     } else if (tid) {
       // Ricerca per numero ticket: su HDA TOUCH tutte le varianti dell'ID in parallelo (es. "9876543" e "9876543Z",
@@ -936,7 +961,7 @@ async function search({ more = false, fresh = false } = {}) {
       let openedId = null;
       if (early && ticketNumber(early.id) === exactNum) {
         openedId = early.id;
-        openTicket(early.id, early);
+        openFound(early);
       }
 
       const [arRows, refRows] = await Promise.all([arPromise, refPromise]);
@@ -955,17 +980,29 @@ async function search({ more = false, fresh = false } = {}) {
           actionLabel: "Togli il numero",
         });
       }
-      if (!openedId) {
+      let opened = !!openedId;
+      if (!opened) {
         const exact = pickExactTicket(rows, f.text);
-        if (exact) openTicket(exact.id, exact);
+        if (exact) {
+          opened = true;
+          openFound(exact);
+        }
       }
-      if (!rows.length) {
+      // lo Storico ha tutti i ticket del Vecchio Cruscotto, anche degli anni che lì non si cercano più:
+      // se le altre due fonti non hanno il ticket, si apre quello dello Storico
+      const stRows = isLegacyNum ? await Promise.race([storicoPromise, sleep(8000).then(() => [])]) : [];
+      if (ac.signal.aborted) return;
+      const stExact = (stRows || []).find((r) => r.id === exactNum);
+      if (stExact && !opened) openFound(stExact);
+      if (!rows.length && stExact) {
+        S.notices.push(`Il ticket ${exactNum} non è in HDA TOUCH né nella ricerca del Vecchio Cruscotto: l'ho trovato nello Storico.`);
+      } else if (!rows.length) {
         S.notices.push(
           isLegacyNum && S.arConnected !== true
             ? `Il ticket ${exactNum} non è su HDA TOUCH (cercati ${variants.join(" e ")}). Clicca su «Collega vecchio cruscotto» in alto a destra ed esegui l'accesso all'Area Riservata per cercarlo anche nel Vecchio Cruscotto.`
             : typedZ
               ? `Il ticket ${tid} non risulta su HDA TOUCH.`
-              : `Il ticket ${exactNum} non risulta né in HDA TOUCH (cercati ${variants.join(" e ")}) né nel Vecchio Cruscotto.`
+              : `Il ticket ${exactNum} non risulta né in HDA TOUCH (cercati ${variants.join(" e ")}) né nel Vecchio Cruscotto${isLegacyNum && S.storico.error ? "" : isLegacyNum ? " né nello Storico" : ""}.`
         );
       }
     } else {
@@ -993,11 +1030,13 @@ async function search({ more = false, fresh = false } = {}) {
       if (ac.signal.aborted) return;
       rows = sortUnifiedRows(mergeRowLists(touchRows, arRows));
       total = multiWord ? rows.length : Math.max(res.total || 0, rows.length);
+      touchTotal = multiWord ? 0 : res.total || 0;
     }
 
     if (ac.signal.aborted) return;
     S.results = more ? mergeRowLists(S.results, rows) : rows;
     S.total = Math.max(total, S.results.length);
+    S.touchTotal = Math.max(touchTotal, touchRows().length);
     log(`ricerca completata: ${S.results.length} ticket in ${Date.now() - t0} ms`);
     const firstTouch = rows.find((r) => r.source !== "ar" && r.id && r.subject);
     if (!S.sampleTicket && firstTouch) {
@@ -1006,7 +1045,7 @@ async function search({ more = false, fresh = false } = {}) {
     lookups.harvest(rows.filter((r) => r.source !== "ar"));
     harvestTypes(rows.filter((r) => r.source !== "ar"));
     if (S.connected !== true) setConn(true);
-    if (cacheKey) cachePut(cacheKey, { results: S.results, total: S.total, notices: S.notices, eff: S.activeEffectiveFilters && JSON.parse(JSON.stringify(S.activeEffectiveFilters)) });
+    if (cacheKey) cachePut(cacheKey, { results: S.results, total: S.total, touchTotal: S.touchTotal, notices: S.notices, eff: S.activeEffectiveFilters && JSON.parse(JSON.stringify(S.activeEffectiveFilters)) });
     archivedMap(rows.map((r) => r.id))
       .then((m) => { for (const [k, v] of m) S.archived.set(k, v); renderResults(); })
       .catch(() => {});
@@ -1032,6 +1071,7 @@ async function search({ more = false, fresh = false } = {}) {
   } finally {
     if (searchAbort === ac) {
       S.loading = false;
+      autoPickTab();
       renderResults();
     }
   }
@@ -1074,9 +1114,173 @@ async function refreshArchiveCount() {
   }
 }
 
+// ---------------------------------------------------------------- le tre fonti
+
+const SOURCES = {
+  touch: { label: "HDA Touch", title: "Ticket di HDA TOUCH" },
+  ar: { label: "Vecchio Cruscotto", title: "Ticket del Vecchio Cruscotto (Area Riservata), cercati per parole: anni recenti" },
+  storico: { label: "Storico", title: "Ricerca avanzata dell'Area Riservata: tutti i ticket, anche prima del 2024 (senza ricerca per parole)" },
+};
+const isSourceTab = (t = S.tab) => t === "touch" || t === "ar" || t === "storico";
+const sourceOf = (r) => (r && (r.source === "ar" || r.source === "storico") ? r.source : "touch");
+const touchRows = () => S.results.filter((r) => r.source !== "ar");
+const arRows = () => S.results.filter((r) => r.source === "ar");
+
+/** Ticket trovati per fonte (per le schede): di Touch il totale del portale, non solo quelli già caricati. */
+function sourceCounts() {
+  const nTouch = touchRows().length;
+  return {
+    touch: S.loading ? nTouch : Math.max(nTouch, S.touchTotal || 0),
+    ar: arRows().length,
+    storico: Math.max(S.storico.total || 0, S.storico.results.length),
+  };
+}
+
+/** Se la scheda aperta è rimasta vuota e un'altra fonte ha trovato qualcosa, si passa a quella. */
+function autoPickTab() {
+  if (!isSourceTab() || S.loading || S.storico.loading) return;
+  const c = sourceCounts();
+  if (c[S.tab]) return;
+  const next = ["touch", "ar", "storico"].find((k) => c[k]);
+  if (next && next !== S.tab) {
+    S.tab = next;
+    S.cursor = -1;
+    refreshSidebar();
+  }
+}
+
+// ---------------------------------------------------------------- Storico (ricerca avanzata dell'Area Riservata)
+
+/** Cosa cercare nello Storico: il numero scritto nella casella in alto, altrimenti i filtri della scheda Storico. */
+function storicoQuery() {
+  const text = String(S.filters.text || "").trim();
+  if (ticketIdFrom(text) && isLegacyTicketNumber(text)) return { ...emptyStoricoFilters(), dateTo: "", number: ticketNumber(ticketIdFrom(text)), fromBox: true };
+  if (hasStoricoFilter(S.storico.filters)) return { ...S.storico.filters };
+  return null;
+}
+
+let storicoSeq = 0;
+async function runStorico({ more = false, fresh = false } = {}) {
+  const st = S.storico;
+  if (!storico) return [];
+  const q = storicoQuery();
+  const key = q ? JSON.stringify(q) : "";
+  if (!q) {
+    storicoSeq++;
+    Object.assign(st, { results: [], total: 0, error: null, key: "", loading: false });
+    return [];
+  }
+  if (!more && !fresh && key === st.key && !st.error) return st.results;
+  const my = ++storicoSeq;
+  if (!more) Object.assign(st, { results: [], total: 0 });
+  Object.assign(st, { loading: true, error: null, key });
+  renderResults();
+  try {
+    const res = await storico.search(q, { start: more ? st.results.length : 0, rows: Number(S.settings.pageSize) || 50 });
+    if (my !== storicoSeq) return [];
+    const seen = new Set(more ? st.results.map((r) => r.ttCodice) : []);
+    const fresh_ = res.rows.filter((r) => !seen.has(r.ttCodice));
+    st.results = more ? [...st.results, ...fresh_] : fresh_;
+    if (res.total >= 0) st.total = res.total;
+    st.total = Math.max(st.total, st.results.length);
+    harvestStorico(res.rows);
+    if (ar && ar.state.idCenSer && S.caps.arCentro !== ar.state.idCenSer) {
+      S.caps.arCentro = ar.state.idCenSer;
+      kvSet("caps", S.caps);
+    }
+    return st.results;
+  } catch (e) {
+    if (my !== storicoSeq) return [];
+    st.error = e;
+    st.key = "";
+    log("storico: " + e.message);
+    return [];
+  } finally {
+    if (my === storicoSeq) {
+      st.loading = false;
+      autoPickTab();
+      renderResults();
+    }
+  }
+}
+
+/** Gruppi e operatori visti nei risultati dello Storico: servono come suggerimenti dei suoi filtri. */
+function harvestStorico(rows) {
+  let changed = false;
+  for (const r of rows) {
+    if (r.ownerGroupId && r.ownerGroup && S.stLookups.groups[r.ownerGroupId] !== r.ownerGroup) { S.stLookups.groups[r.ownerGroupId] = r.ownerGroup; changed = true; }
+    if (r.assignedId && r.assigned && S.stLookups.operators[r.assignedId] !== r.assigned) { S.stLookups.operators[r.assignedId] = r.assigned; changed = true; }
+  }
+  if (changed) kvSet("stLookups", S.stLookups);
+}
+
+/** Suggerimenti per i filtri dello Storico. I gruppi di Touch "G10663HR" sono i gruppi 10663 dell'Area Riservata. */
+async function storicoLookup(kind, q) {
+  const words = tokens(q);
+  const match = (label, id) => words.every((w) => tokens(label + " " + id).some((t) => t.includes(w)));
+  const out = new Map();
+  for (const [id, label] of Object.entries(S.stLookups[kind === "groups" ? "groups" : "operators"])) if (match(label, id)) out.set(id, { id, label });
+  if (kind === "groups" && lookups) {
+    try {
+      for (const g of await lookups.search("groups", q)) {
+        const m = /^G(\d+)/i.exec(String(g.id || ""));
+        if (m && !out.has(m[1])) out.set(m[1], { id: m[1], label: g.label });
+      }
+    } catch {
+      /* elenco di Touch non disponibile: restano i gruppi visti nello Storico */
+    }
+  }
+  return [...out.values()].slice(0, 20);
+}
+
+function storicoChanged() {
+  kvSet("storicoFilters", S.storico.filters);
+  refreshSidebar();
+  runStorico();
+  renderResults();
+}
+
+/** storicoSetFilter("group", "10663") oppure storicoSetFilter({ group: "10663", groupLabel: "Paghe Web P" }) */
+function storicoSetFilter(key, val) {
+  if (key && typeof key === "object") Object.assign(S.storico.filters, key);
+  else S.storico.filters[key] = val;
+  storicoChanged();
+}
+
+function storicoReset() {
+  S.storico.filters = emptyStoricoFilters();
+  storicoChanged();
+}
+
+function describeStorico() {
+  const f = S.storico.filters;
+  const q = storicoQuery();
+  if (q && q.fromBox) return [{ key: "box", label: `Numero ${q.number} (dalla casella di ricerca)` }];
+  const day = (d) => d.split("-").reverse().join("/");
+  const chips = [];
+  if (f.number) chips.push({ key: "number", label: `Numero ${f.number}` });
+  if (f.dateFrom || f.dateTo) chips.push({ key: "dates", label: `Periodo: ${f.dateFrom ? "dal " + day(f.dateFrom) : "dall'inizio"} ${f.dateTo ? "al " + day(f.dateTo) : "a oggi"}` });
+  if (f.clientCode) chips.push({ key: "clientCode", label: `Cliente cod. ${f.clientCode}` });
+  if (f.group) chips.push({ key: "group", label: `Gruppo: ${S.stLookups.groups[f.group] || f.groupLabel || f.group}` });
+  if (f.operator && f.operator.id) chips.push({ key: "operator", label: `Operatore: ${f.operator.label || f.operator.id}` });
+  return chips;
+}
+
+function clearStoricoKey(key) {
+  if (key === "box") return clearFilterKey("text");
+  const empty = emptyStoricoFilters();
+  if (key === "dates") Object.assign(S.storico.filters, { dateFrom: "", dateTo: empty.dateTo });
+  else if (key === "group") Object.assign(S.storico.filters, { group: "", groupLabel: "" });
+  else S.storico.filters[key] = empty[key];
+  storicoChanged();
+}
+
 // ---------------------------------------------------------------- elenco risultati
 
 function visibleItems() {
+  if (S.tab === "touch") return touchRows().map((row) => ({ row }));
+  if (S.tab === "ar") return arRows().map((row) => ({ row }));
+  if (S.tab === "storico") return S.storico.results.map((row) => ({ row }));
   if (S.tab === "archive") return S.archiveHits.map((x) => ({ row: x.row, snippet: x.snippet }));
   if (S.tab === "favorites") return S.favorites.map((x) => ({ row: reviveRow(x.row) || { id: x.id } }));
   if (S.tab === "recent") return S.recent.map((x) => ({ row: reviveRow(x.row) || { id: x.id } }));
@@ -1093,15 +1297,16 @@ function itemEl(it, i) {
   const meta = [r.account, r.ownerGroup, r.assigned && `→ ${r.assigned}`].filter(Boolean);
   const snip = it.snippet || snippetOf(r);
   const el = h("div", {
-    class: "item" + (r.id === S.current ? " sel" : "") + (seen ? " seen" : ""),
+    class: `item src-${sourceOf(r)}` + (r.id === S.current ? " sel" : "") + (seen ? " seen" : ""),
     tabindex: "0",
-    dataset: { id: r.id, i: String(i) },
+    dataset: { id: r.id, i: String(i), source: sourceOf(r) },
     onclick: () => { S.cursor = i; openTicket(r.id, r); },
   },
     h("div", { class: "item-l1" },
       r.statusId || r.statusText ? h("span", { class: `pill ${st.group}`, title: r.statusId || "" }, st.label) : null,
-      h("span", { class: "num", title: r.source === "ar" ? `Ticket #${ticketNumber(r.id)} del Vecchio Cruscotto` : `ID HDA TOUCH ${r.id}` }, ticketNumber(r.id)),
-      r.source === "ar" ? h("span", { class: "tag-mini src-ar", title: "Ticket del Vecchio Cruscotto (Area Riservata)" }, "Vecchio cruscotto") : null,
+      h("span", { class: "num", title: `${SOURCES[sourceOf(r)].title}: ${r.id}` }, ticketNumber(r.id)),
+      // nelle schede miste (archivio, preferiti, recenti) ogni riga dice da dove viene
+      !isSourceTab() ? h("span", { class: `src-badge src-${sourceOf(r)}`, title: SOURCES[sourceOf(r)].title }, SOURCES[sourceOf(r)].label) : null,
       h("span", { class: "subj", title: r.subject || "" }, r.subject || "(senza oggetto)"),
       arch ? h("span", { class: "tag-mini", title: `Nell'archivio locale (salvato il ${fmtDateTime(arch.savedAt)})` }, icon("archive")) : null,
       fav ? h("span", { class: "star-on", title: "Preferito" }, icon("star")) : null,
@@ -1112,7 +1317,44 @@ function itemEl(it, i) {
 }
 
 function tabBtn(key, label, n) {
-  return h("button", { class: "tab" + (S.tab === key ? " on" : ""), onclick: () => { S.tab = key; S.cursor = -1; renderResults(); } }, label, n != null ? h("span", { class: "n" }, String(n)) : null);
+  return h("button", { class: "tab" + (S.tab === key ? " on" : ""), onclick: () => pickTab(key) }, label, n != null ? h("span", { class: "n" }, String(n)) : null);
+}
+
+/** Cercando dalla casella in alto si torna alle schede delle fonti (nello Storico le parole non si cercano). */
+function leaveTabForSearch(text) {
+  if (S.tab === "archive") return;
+  // dallo Storico si riparte da Touch: se il ticket o i risultati sono altrove, la scheda giusta si apre da sola
+  if (!isSourceTab() || S.tab === "storico") S.tab = "touch";
+}
+
+const sidebarMode = (t) => (t === "storico" || t === "ar" ? t : "touch");
+
+function pickTab(key) {
+  const sidebarChanges = sidebarMode(S.tab) !== sidebarMode(key);
+  S.tab = key;
+  S.cursor = -1;
+  if (sidebarChanges) renderSidebar(ctx);
+  renderResults();
+}
+
+/** Apre da solo il ticket cercato per numero e porta sulla scheda della sua fonte. */
+function openFound(row) {
+  if (isSourceTab() && S.tab !== sourceOf(row)) {
+    S.tab = sourceOf(row);
+    refreshSidebar();
+  }
+  openTicket(row.id, row);
+}
+
+/** Le tre schede delle fonti: ognuna con il suo colore e il numero di ticket trovati. */
+function sourceTabs(fmtN) {
+  const c = sourceCounts();
+  const busy = { touch: S.loading, ar: S.loading && S.pending && S.pending.has("Vecchio Cruscotto"), storico: S.storico.loading };
+  return h("div", { class: "src-tabs", role: "tablist" },
+    Object.entries(SOURCES).map(([key, src]) =>
+      h("button", { class: `src-tab src-${key}` + (S.tab === key ? " on" : ""), role: "tab", title: src.title, dataset: { source: key }, onclick: () => pickTab(key) },
+        h("span", { class: "lbl" }, src.label),
+        h("span", { class: "n" }, busy[key] && !c[key] ? "…" : fmtN(c[key])))));
 }
 
 function renderResults() {
@@ -1120,55 +1362,66 @@ function renderResults() {
   const top = el.scrollTop;
   clear(el);
   const fmtN = (n) => Number(n || 0).toLocaleString("it-IT");
+  const src = isSourceTab();
+  const st = S.storico;
+  const items = visibleItems();
+  const counts = sourceCounts();
+  const busy = S.tab === "storico" ? st.loading : src && S.loading;
 
   // intestazione
   const sortSel = h("select", { class: "input", title: "Ordina per", onchange: (e) => { S.sort.key = e.target.value; kvSet("sort", S.sort); search(); } },
     Object.entries(SORTS).map(([k, s]) => h("option", { value: k, selected: S.sort.key === k ? true : null }, s.label)));
-  const dirBtn = h("button", { class: "btn btn-small", title: "Inverti l'ordine", onclick: () => { S.sort.dir = S.sort.dir === "DESC" ? "ASC" : "DESC"; kvSet("sort", S.sort); search(); } },
-    icon("sort"), S.sort.dir === "DESC" ? "Dal più recente" : "Dal più vecchio");
-  const countText = S.tab === "results"
-    ? (S.loading && !S.results.length ? "Cerco…" : S.loading ? `${fmtN(S.total)} ticket finora…` : `${fmtN(S.total)} ticket`)
-    : S.tab === "archive" ? `${fmtN(S.archiveHits.length)} nell'archivio` : S.tab === "favorites" ? `${S.favorites.length} preferiti` : `${S.recent.length} recenti`;
+  const dirBtn = h("button", { class: "btn btn-small", title: S.sort.dir === "DESC" ? "Dal più recente (clicca per invertire)" : "Dal più vecchio (clicca per invertire)", onclick: () => { S.sort.dir = S.sort.dir === "DESC" ? "ASC" : "DESC"; kvSet("sort", S.sort); search(); } },
+    icon("sort"), S.sort.dir === "DESC" ? "Recenti" : "Vecchi");
+  const total = src ? counts[S.tab] : items.length;
+  const what = { archive: "nell'archivio", favorites: "preferiti", recent: "recenti" }[S.tab];
+  const countText = src
+    ? (busy && !items.length ? "Cerco…" : busy ? `${fmtN(items.length)} ticket finora…` : `${fmtN(total)} ticket`)
+    : `${fmtN(items.length)} ${what}`;
 
   const head = h("div", { class: "res-head" },
+    sourceTabs(fmtN),
     h("div", { class: "res-top" },
       h("button", { class: "btn btn-small" + (ui.showFilters ? " on" : ""), title: "Mostra/nascondi i filtri", onclick: toggleFilters }, icon("filter"), "Filtri"),
       h("div", { class: "res-count" }, countText,
-        S.tab === "results" && S.results.length && S.total > S.results.length ? h("small", null, ` · ne vedi ${fmtN(S.results.length)}`) : null),
-      S.tab === "results" ? [sortSel, dirBtn] : null),
-    h("div", { class: "res-top", style: { marginTop: "6px" } },
-      h("button", { class: "btn btn-small", onclick: saveSearchDialog, title: "Salva questi filtri per riusarli" }, icon("save"), "Salva ricerca"),
-      h("button", { class: "btn btn-small", onclick: exportCsv, disabled: !S.total || S.job ? true : null, title: "Scarica i risultati in un file per Excel (max 1000)" }, icon("download"), "Excel (CSV)"),
-      h("button", { class: "btn btn-small", onclick: archiveResults, disabled: !S.total || S.job ? true : null, title: "Salva nel browser i ticket trovati con tutta la conversazione, per cercare nel testo dei messaggi" }, icon("archive"), "Archivia risultati"),
-      h("button", { class: "btn btn-small", onclick: () => search({ fresh: true }), title: "Aggiorna (rifà la ricerca sul portale)" }, icon("reload"))),
-    h("div", { class: "tabs" },
-      tabBtn("results", "Risultati", S.total ? fmtN(S.total) : null),
-      tabBtn("archive", "Archivio locale", S.filters.text ? S.archiveHits.length : null),
-      tabBtn("favorites", "Preferiti", S.favorites.length || null),
-      tabBtn("recent", "Recenti", S.recent.length || null)));
+        src && !busy && items.length && total > items.length ? h("small", null, ` · ne vedi ${fmtN(items.length)}`) : null),
+      S.tab === "touch" || S.tab === "ar" ? [sortSel, dirBtn] : null,
+      S.tab === "storico" ? h("span", { class: "hint" }, "dal più recente") : null,
+      src ? h("button", { class: "btn btn-small btn-icon", onclick: () => (S.tab === "storico" ? runStorico({ fresh: true }) : search({ fresh: true })), title: "Aggiorna (rifà la ricerca sul portale)" }, icon("reload")) : null),
+    h("div", { class: "res-tools" },
+      S.tab === "touch" || S.tab === "ar"
+        ? [
+            h("button", { class: "linkbtn", onclick: saveSearchDialog, title: "Salva questi filtri per riusarli" }, icon("save"), "Salva ricerca"),
+            h("button", { class: "linkbtn", onclick: exportCsv, disabled: !S.total || S.job ? true : null, title: "Scarica i risultati in un file per Excel (max 1000)" }, icon("download"), "Excel"),
+            h("button", { class: "linkbtn", onclick: archiveResults, disabled: !S.total || S.job ? true : null, title: "Salva nel browser i ticket trovati con tutta la conversazione, per cercare nel testo dei messaggi" }, icon("archive"), "Archivia risultati"),
+          ]
+        : null,
+      h("span", { class: "grow" }),
+      h("div", { class: "tabs" },
+        tabBtn("archive", "Archivio locale", S.filters.text ? S.archiveHits.length : null),
+        tabBtn("favorites", "Preferiti", S.favorites.length || null),
+        tabBtn("recent", "Recenti", S.recent.length || null))));
 
-  const chips = describeFilters(S.filters);
-  if (chips.length && (S.tab === "results" || S.tab === "archive")) {
+  const chips = S.tab === "storico" ? describeStorico() : describeFilters(S.filters);
+  if (chips.length && (src || S.tab === "archive")) {
+    const drop = S.tab === "storico" ? clearStoricoKey : clearFilterKey;
     head.appendChild(h("div", { class: "chips" },
       chips.map((c) => h("span", { class: "chip", title: c.label }, h("span", null, c.label),
-        h("button", { title: "Togli questo filtro", onclick: () => clearFilterKey(c.key) }, "×"))),
-      chips.length > 1 ? h("button", { class: "linkbtn", onclick: resetFilters }, "Azzera tutto") : null));
+        h("button", { title: "Togli questo filtro", onclick: () => drop(c.key) }, "×"))),
+      chips.length > 1 ? h("button", { class: "linkbtn", onclick: S.tab === "storico" ? storicoReset : resetFilters }, "Azzera tutto") : null));
   }
   el.appendChild(head);
 
   // avvisi, lavori in corso, errori
   if (S.job) el.appendChild(jobBox());
-  if (S.tab === "results") {
-    for (const n of S.notices) {
-      if (n && typeof n === "object" && n.text) {
-        el.appendChild(
-          h("div", { class: "notice", style: { display: "flex", gap: "8px", alignItems: "center", justifyContent: "space-between", flexWrap: "wrap" } },
-            h("span", { style: { flex: "1", minWidth: "200px" } }, n.text),
-            n.action ? h("button", { class: "btn btn-small", onclick: n.action }, n.actionLabel || "Riprova") : null)
-        );
-      } else {
-        el.appendChild(h("div", { class: "notice" }, n));
-      }
+  const noticeEl = (n) =>
+    n && typeof n === "object" && n.text
+      ? h("div", { class: "notice with-action" }, h("span", null, n.text), n.action ? h("button", { class: "btn btn-small", onclick: n.action }, n.actionLabel || "Riprova") : null)
+      : h("div", { class: "notice" }, n);
+  if (S.tab === "touch" || S.tab === "ar") {
+    for (const n of S.notices) el.appendChild(noticeEl(n));
+    if (S.tab === "ar" && S.arConnected !== true) {
+      el.appendChild(noticeEl({ text: "Il Vecchio Cruscotto non è collegato: apri l'Area Riservata ed esegui l'accesso, poi torna qui.", action: () => openArHome(), actionLabel: "Collega vecchio cruscotto" }));
     }
     if (S.error) {
       const auth = S.error instanceof AuthError;
@@ -1181,6 +1434,18 @@ function renderResults() {
           h("button", { class: "btn", onclick: () => search({ fresh: true }) }, "Riprova"))));
     }
   }
+  if (S.tab === "storico") {
+    const text = String(S.filters.text || "").trim();
+    if (text && !ticketIdFrom(text) && !storicoQuery()) {
+      el.appendChild(noticeEl(`Nello Storico non si può cercare per parole («${text}»): scrivi un numero ticket nella casella in alto oppure usa i filtri a sinistra.`));
+    }
+    if (st.error) {
+      el.appendChild(h("div", { class: "err-box" }, st.error.message,
+        h("div", null,
+          h("button", { class: "btn", onclick: () => openArHome() }, icon("external"), "Apri l'Area Riservata"), " ",
+          h("button", { class: "btn", onclick: () => runStorico({ fresh: true }) }, "Riprova"))));
+    }
+  }
   if (S.tab === "archive") {
     el.appendChild(h("div", { class: "notice" },
       S.archiveCount
@@ -1188,31 +1453,39 @@ function renderResults() {
         : "L'archivio locale è vuoto. Ogni ticket che apri viene salvato qui con tutta la conversazione; con «Archivia risultati» puoi salvarne molti insieme. Poi puoi cercare dentro il testo dei messaggi."));
   }
 
-  const items = visibleItems();
   const list = h("div", { class: "list" });
   items.forEach((it, i) => list.appendChild(itemEl(it, i)));
-  if (!items.length && !S.loading && !S.error) {
+  if (!items.length && !busy && !(src && S.tab !== "storico" && S.error) && !(S.tab === "storico" && st.error)) {
     const empty = {
-      results: ["Nessun ticket trovato", "Prova a togliere qualche filtro o a cambiare le parole."],
+      touch: ["Nessun ticket trovato in HDA Touch", "Prova a togliere qualche filtro o a cambiare le parole."],
+      ar: ["Nessun ticket trovato nel Vecchio Cruscotto", S.filters.text || S.filters.subject ? "Qui si cercano le parole negli anni più recenti: per i ticket più vecchi guarda la scheda Storico." : "Scrivi un numero ticket o delle parole nella casella in alto."],
+      storico: storicoQuery()
+        ? ["Nessun ticket trovato nello Storico", "Prova ad allargare il periodo o a togliere un filtro."]
+        : ["Storico: tutti i ticket del Vecchio Cruscotto, anche prima del 2024", "Qui non si cerca per parole. Scrivi un numero ticket nella casella in alto, oppure scegli a sinistra un periodo, un cliente, un gruppo o un operatore."],
       archive: [S.filters.text ? "Nessun ticket dell'archivio contiene queste parole" : "Scrivi una o più parole nella casella in alto", ""],
       favorites: ["Nessun preferito", "Apri un ticket e premi la stella per ritrovarlo qui."],
       recent: ["Nessun ticket aperto di recente", ""],
     }[S.tab];
     list.appendChild(h("div", { class: "empty-state" }, h("h3", null, empty[0]), empty[1]));
   }
-  if (S.loading && S.tab === "results") {
-    const still = S.pending && S.pending.size ? [...S.pending].join(", ") : "";
-    const msg = still
-      ? (S.results.length ? `Sto ancora cercando in: ${still}…` : `Cerco in: ${still}…`)
-      : S.results.length ? "Carico altri…" : "Cerco i ticket…";
+  if (busy) {
+    const still = S.tab !== "storico" && S.pending && S.pending.size ? [...S.pending].join(", ") : "";
+    const msg = S.tab === "storico"
+      ? (items.length ? "Carico altri…" : "Cerco nello Storico…")
+      : still
+        ? (S.results.length ? `Sto ancora cercando in: ${still}…` : `Cerco in: ${still}…`)
+        : S.results.length ? "Carico altri…" : "Cerco i ticket…";
     list.appendChild(h("div", { class: "loading" }, h("span", { class: "spinner" }), msg));
   }
-  if (S.tab === "results" && !S.loading && S.results.length < S.total)
-    list.appendChild(h("button", { class: "btn more", onclick: () => search({ more: true }) }, `Mostra altri (${fmtN(S.total - S.results.length)} rimanenti)`));
+  if (S.tab === "touch" && !S.loading && items.length < counts.touch)
+    list.appendChild(h("button", { class: "btn more", onclick: () => search({ more: true }) }, `Mostra altri (${fmtN(counts.touch - items.length)} rimanenti)`));
+  if (S.tab === "storico" && !st.loading && items.length && items.length < counts.storico)
+    list.appendChild(h("button", { class: "btn more", onclick: () => runStorico({ more: true }) }, `Mostra altri (${fmtN(counts.storico - items.length)} rimanenti)`));
   el.appendChild(list);
 
   const words = tokens(S.filters.text);
-  if (words.length && !ticketIdFrom(S.filters.text)) highlight(list, words);
+  if (src && S.tab !== "storico" && words.length && !ticketIdFrom(S.filters.text)) highlight(list, words);
+  else if (S.tab === "archive" && words.length) highlight(list, words);
   el.scrollTop = top;
 }
 
@@ -1235,7 +1508,7 @@ async function openTicket(id, row, { force = false } = {}) {
   if (!row && id) {
     // prima la riga con lo stesso ID esatto, poi quella con lo stesso numero (mai un ticket con la Z al posto di uno senza)
     const want = String(id).trim();
-    row = S.results.find((r) => r.id === want) || (ticketIdFrom(want) ? pickExactTicket(S.results, want, { allowSingle: false }) : null) || null;
+    row = S.results.find((r) => r.id === want) || (ticketIdFrom(want) ? pickExactTicket(S.results, want, { allowSingle: false }) : null) || S.storico.results.find((r) => r.id === want) || null;
   }
   id = row && row.id ? String(row.id) : ticketIdFrom(id) || String(id || "").trim();
   if (!id) return;
@@ -1247,7 +1520,9 @@ async function openTicket(id, row, { force = false } = {}) {
   ui.readerSearch = "";
   renderReaderLoading(ctx, id, row);
   try {
-    const full = await loadTicket(hda, id, { row, rowReader, conditionsFor: conditionsForId, caps: S.caps, ar, log });
+    const full = row && row.source === "storico"
+      ? await storico.loadTicket(id, { row })
+      : await loadTicket(hda, id, { row, rowReader, conditionsFor: conditionsForId, caps: S.caps, ar, log });
     if (full.source === "ar") setArConn(true);
     S.current = full.id || id;
     kvSet("caps", S.caps);
@@ -1474,11 +1749,13 @@ function onKey(e) {
 // ---------------------------------------------------------------- avvio
 
 async function init() {
-  const [settings, savedUi, lastFilters, sort, saved, favorites, recent, learned, captures, caps, typesSeen, touchLang, transportMode, openAllSlowAt] = await Promise.all([
+  const [settings, savedUi, lastFilters, sort, saved, favorites, recent, learned, captures, caps, typesSeen, touchLang, transportMode, openAllSlowAt, storicoFilters, stLookups] = await Promise.all([
     kvGet("settings", null), kvGet("ui", null), kvGet("lastFilters", null), kvGet("sort", null), kvGet("saved", []),
     kvGet("favorites", []), kvGet("recent", []), kvGet("learned", {}), kvGet("captures", []), kvGet("caps", {}), kvGet("typesSeen", {}),
-    kvGet("touchLang", null), kvGet("transportMode", null), kvGet("openAllSlowAt", 0),
+    kvGet("touchLang", null), kvGet("transportMode", null), kvGet("openAllSlowAt", 0), kvGet("storicoFilters", null), kvGet("stLookups", null),
   ]);
+  if (storicoFilters) S.storico.filters = { ...emptyStoricoFilters(), ...storicoFilters };
+  if (stLookups) S.stLookups = { groups: stLookups.groups || {}, operators: stLookups.operators || {} };
   S.openAllSlowAt = Number(openAllSlowAt) || 0;
   Object.assign(S.settings, settings || {});
   Object.assign(ui, savedUi || {});
@@ -1507,6 +1784,7 @@ async function init() {
   hda = makeHda(transport, { lang: portalLang(S.settings, touchLang) });
   log(`lingua del portale: ${hda.lang}${touchLang ? " (come Touch)" : ""}, richieste ${transport.mode === "proxy" ? "dalla scheda di Touch" : "dirette"}`);
   ar = makeAr({ log });
+  storico = makeStorico({ log, request: (path, o) => ar.request(path, o), centro: () => ar.state.idCenSer || S.caps.arCentro || "" });
   lookups = makeLookups(hda, { kvGet, kvSet, log });
   await lookups.restore();
   refreshArchiveCount();
@@ -1536,7 +1814,7 @@ async function init() {
     if (v && v.length < 3 && !ticketIdFrom(v)) return;
     if (v !== S.filters.text) {
       S.filters.text = v;
-      if (S.tab !== "results" && S.tab !== "archive") S.tab = "results";
+      leaveTabForSearch(v);
       filtersChanged(true);
     }
   }, 700);
@@ -1544,7 +1822,7 @@ async function init() {
   $("#searchForm").addEventListener("submit", (e) => {
     e.preventDefault();
     S.filters.text = $("#q").value.trim();
-    if (S.tab !== "results" && S.tab !== "archive") S.tab = "results";
+    leaveTabForSearch(S.filters.text);
     filtersChanged(true);
   });
   $("#conn").addEventListener("click", () => { if (S.connected === false) openTouchHome(); });
@@ -1574,6 +1852,7 @@ async function init() {
     else if (S.arConnected !== true && (await checkArConnection())) {
       if (S.current && isLegacyTicketNumber(S.current)) openTicket(S.current, null, { force: true });
       else if (S.filters.text || S.filters.subject) search();
+      if (S.storico.error) runStorico({ fresh: true });
     }
   });
 

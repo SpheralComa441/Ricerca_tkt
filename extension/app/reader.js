@@ -468,7 +468,7 @@ export function renderReaderError(ctx, id, row, err) {
   const body = el.querySelector(".rd-body") || el.appendChild(h("div", { class: "rd-body" }));
   const ld = body.querySelector(".loading");
   if (ld) ld.remove();
-  const isLegacy = (err && err.isLegacyTicket) || (row && row.source === "ar") || (isLegacyTicketNumber(id) && !(row && row.source !== "ar" && row.id));
+  const isLegacy = (err && err.isLegacyTicket) || (row && (row.source === "ar" || row.source === "storico")) || (isLegacyTicketNumber(id) && !(row && row.source !== "ar" && row.id));
   const num = ticketNumber(id);
   body.appendChild(
     h("div", { class: "err-box" },
@@ -486,7 +486,9 @@ export function renderReaderError(ctx, id, row, err) {
 
 function header(ctx, id, row, full) {
   const fav = ctx.isFavorite(id);
-  const isAr = (row && row.source === "ar") || (full && full.source === "ar");
+  const source = (full && full.source) || (row && row.source) || "touch";
+  const isStorico = source === "storico";
+  const isAr = source === "ar" || isStorico;
   const t = (full && full.ticket) || {};
   const subject = (row && row.subject) || t.Subject || "";
   const statusId = (row && row.statusId) || t.TicketStatusID || "";
@@ -502,13 +504,13 @@ function header(ctx, id, row, full) {
     h("div", { class: "rd-top" },
       h("span", { class: "rd-num", title: "Copia il numero", onclick: () => { navigator.clipboard.writeText(ticketNumber(id)); toast("Numero copiato", "ok", 1500); } }, "#" + ticketNumber(id)),
       statusId || (row && row.statusText) ? pill(statusId, row && row.statusText) : null,
-      isAr ? h("span", { class: "tag-mini src-ar", title: "Ticket del Vecchio Cruscotto (Area Riservata)" }, "Vecchio cruscotto") : null,
-      row && row.typeText && !isAr ? h("span", { class: "tag-mini" }, row.typeText) : null,
+      h("span", { class: `src-badge src-${isStorico ? "storico" : isAr ? "ar" : "touch"}`, title: isStorico ? "Ticket dello Storico (Ricerca avanzata dell'Area Riservata)" : isAr ? "Ticket del Vecchio Cruscotto (Area Riservata)" : "Ticket di HDA TOUCH" }, isStorico ? "Storico" : isAr ? "Vecchio Cruscotto" : "HDA Touch"),
+      row && row.typeText && source !== "ar" ? h("span", { class: "tag-mini" }, row.typeText) : null,
       h("div", { class: "rd-actions" },
         favBtn,
         full ? h("button", { class: "btn", title: "Copia tutto il ticket come testo (le note interne solo se visibili)", onclick: copyText }, icon("copy"), "Copia") : null,
         isAr
-          ? h("button", { class: "btn", title: "Apri questo ticket nel Vecchio Cruscotto (Area Riservata)", onclick: () => ctx.openArHome && ctx.openArHome(arUrl) }, icon("external"), "Apri nel vecchio cruscotto")
+          ? h("button", { class: "btn", title: "Apri questo ticket nell'Area Riservata", onclick: () => ctx.openArHome && ctx.openArHome(arUrl) }, icon("external"), isStorico ? "Apri nell'Area Riservata" : "Apri nel vecchio cruscotto")
           : h("button", { class: "btn", title: "Apri questo ticket in HDA TOUCH", onclick: () => ctx.openInTouch(id) }, icon("external"), "Apri in Touch"),
         h("button", { class: "btn btn-icon", title: "Chiudi (Esc)", onclick: () => ctx.closeReader() }, icon("close")))),
     h("h1", { class: "rd-title" }, subject || "Ticket " + ticketNumber(id)));
@@ -524,7 +526,7 @@ function facts(row, ticket, extraFacts = []) {
     ["Responsabile", row.ownerUser],
     ["Prodotto", t.CTITMDESC || row.catalog],
     ["Classificazione", row.classCli],
-    ["Priorità", row.priorityText],
+    ["Priorità", row.priorityText || (row.source === "storico" ? row.priority : "")],
     ["Aperto il", fmtDateTime(row.date || t.Date)],
     ["Ultimo aggiornamento", fmtDateTime(row.lastChange || t.LastChange)],
     ["Chiuso il", fmtDateTime(t.ClosureDate || row.closureDate)],
@@ -613,6 +615,8 @@ function entryEl(ctx, e, ticketId, allAttachments) {
       h("div", { class: "msg-h" },
         h("span", { class: "role" }, role),
         who ? h("span", { class: "who" }, who) : null,
+        e.to ? h("span", { class: "hint" }, "→ " + e.to) : null,
+        e.label ? h("span", { class: "tag-mini", title: "Causale del movimento" }, e.label) : null,
         e.role === "customer" && e.account && e.account !== who ? h("span", { class: "hint" }, e.account) : null,
         e.internal ? h("span", { class: "tag-mini", title: "Non visibile al cliente" }, icon("lock"), " interna") : null,
         h("span", { class: "at", title: e.date ? e.date.toLocaleString("it-IT") : "" }, fmtDateTime(e.date))),
