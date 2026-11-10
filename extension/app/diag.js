@@ -134,7 +134,7 @@ function settingsSection(ctx) {
     h("div", { class: "settings" },
       sel("pageSize", [[50, "50"], [100, "100"], [200, "200"]], "Ticket per pagina"),
       sel("archiveCap", [[100, "100"], [300, "300"], [1000, "1000"], [3000, "3000"]], "Massimo per «Archivia risultati»", "Tanti ticket = tante richieste al portale: meglio a blocchi."),
-      sel("lang", [["en", "Inglese (come Touch)"], ["it", "Italiano"]], "Lingua delle descrizioni del portale", "Ricarica la pagina dopo averla cambiata."),
+      sel("portalLang", [["auto", "Automatica (la stessa di Touch)"], ["it", "Italiano"], ["en", "Inglese"]], "Lingua del portale", "Automatica usa la lingua delle richieste della pagina di Touch. Ricarica la pagina dopo averla cambiata."),
       h("div", { class: "field" }, h("label", null, "Archivio"), h("label", { class: "check" }, cb, "Salva nell'archivio locale ogni ticket che apro"))));
 }
 

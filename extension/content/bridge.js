@@ -19,7 +19,7 @@
     if (req.body != null) headers["Content-Type"] = "application/x-www-form-urlencoded; charset=UTF-8";
     // _rtkt=1: così il service worker non scambia queste letture per filtri scelti in Touch
     const path = String(req.path) + (String(req.path).includes("?") ? "&" : "?") + "_rtkt=1";
-    fetch(location.origin + "/HDAPortal" + path, { method: req.method || "GET", credentials: "same-origin", headers, body: req.body ?? undefined })
+    fetch(location.origin + "/HDAPortal" + path, { method: req.method || "GET", credentials: "same-origin", cache: "no-store", headers, body: req.body ?? undefined })
       .then(async (r) => sendResponse({ status: r.status, url: r.url, redirected: r.redirected, contentType: r.headers.get("content-type") || "", text: await r.text() }))
       .catch((e) => sendResponse({ error: String((e && e.message) || e) }));
     return true; // risposta asincrona

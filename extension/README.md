@@ -34,6 +34,14 @@ Dopo un aggiornamento del codice basta premere il pulsante **Ricarica** (↻) ne
    - Con **Archivia risultati** puoi salvare in blocco i ticket della ricerca corrente (2 alla volta con pausa, saltando quelli non modificati).
    - Nella scheda **Archivio locale** la ricerca trova le parole anche dentro tutti i messaggi e le note interne.
 
+## Se non si collega a Touch
+
+L'app prova prima a chiamare Touch direttamente. Se Touch risponde con un errore del suo collegamento interno (per esempio «An error occourred on the webservice underlying connection…» o «Si è verificato un errore durante il caricamento dei dati»), ripete la stessa richiesta dalla **scheda di HDA TOUCH aperta**, con i suoi cookie e lo stesso server, e da quel momento passa sempre da lì. In alto compare *Connesso a Touch (tramite scheda)*.
+
+- Tieni aperta una scheda di HDA TOUCH con l'accesso fatto: tornando sull'app riprova da sola.
+- Se l'errore arriva anche dalla scheda, il problema è della sessione di Touch: ricarica la pagina di Touch (se serve esci e rientra) e premi *Riprova*.
+- La lingua delle richieste (`_pl`) è la stessa che usa la pagina di Touch (Impostazioni → *Lingua del portale* → *Automatica*).
+
 ## Ricerca per numero ticket (HDA TOUCH e Vecchio Cruscotto)
 
 Scrivi il numero nella barra principale (vanno bene anche `#`, `tk`, `ticket n.` davanti):

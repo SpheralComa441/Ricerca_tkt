@@ -223,9 +223,29 @@ async function remember(entry, conditions) {
   await chrome.storage.local.set(upd);
 }
 
+const TOUCH_ORIGIN = "https://zucchetti.support";
+// Solo le richieste fatte dalla pagina di Touch: quelle dell'app (scheda dell'estensione) o del ponte (_rtkt=1)
+// non devono diventare "filtri appresi da Touch".
+const fromTouchPage = (details) => details.tabId >= 0 && (!details.initiator || details.initiator === TOUCH_ORIGIN) && !/[?&]_rtkt=1/.test(details.url);
+
+// Lingua del portale (_pl) usata da Touch: l'app usa la stessa, come le richieste della pagina.
+let lastTouchLang = null;
 chrome.webRequest.onBeforeRequest.addListener(
   (details) => {
-    if (details.tabId < 0 || details.method !== "POST" || /[?&]_rtkt=1/.test(details.url)) return;
+    if (!fromTouchPage(details)) return;
+    const pl = new URL(details.url).searchParams.get("_pl");
+    if (!pl || !/^[a-z]{2}(-[A-Za-z]{2})?$/.test(pl) || pl === lastTouchLang) return;
+    lastTouchLang = pl;
+    chrome.storage.local.get("touchLang").then((st) => {
+      if (st.touchLang !== pl) chrome.storage.local.set({ touchLang: pl });
+    });
+  },
+  { urls: ["https://zucchetti.support/HDAPortal/*"], types: ["xmlhttprequest"] },
+);
+
+chrome.webRequest.onBeforeRequest.addListener(
+  (details) => {
+    if (!fromTouchPage(details) || details.method !== "POST") return;
     const u = new URL(details.url);
     const m = /\/HDAPortal\/WSCView\/ListData\/([^/?]+)/.exec(u.pathname);
     if (m) {

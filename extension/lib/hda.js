@@ -16,7 +16,7 @@ import { parseListConfig } from "./listconfig.js";
 import { filterPayload } from "./filters.js";
 
 export function makeHda(transport, opts = {}) {
-  const pl = opts.lang || "en";
+  let pl = opts.lang || "it"; // lingua del portale (_pl): la stessa che usa la pagina di Touch
   let lastUserId = null;
 
   function noteToken(data) {
@@ -46,6 +46,14 @@ export function makeHda(transport, opts = {}) {
   return {
     get currentUserId() {
       return lastUserId;
+    },
+
+    get lang() {
+      return pl;
+    },
+    /** Cambia la lingua del portale (_pl) per le richieste successive */
+    setLang(l) {
+      if (l && /^[a-z]{2}(-[A-Za-z]{2})?$/.test(l)) pl = l;
     },
 
     /** Elenco filtrato. conditions = array di condizioni; sort = [{property:"c20",direction:"DESC"}] */

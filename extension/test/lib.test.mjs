@@ -320,7 +320,11 @@ test("hda: listData invia il formato verificato e legge l'utente dal token", asy
   assert.equal(rows.length, 1);
   assert.equal(hda.currentUserId, "U123");
   const call = f.calls[0];
-  assert.match(call.url, /^https:\/\/x\/HDAPortal\/WSCView\/ListData\/Incidents\?_pl=en&_dc=\d+$/);
+  // lingua del portale come la pagina di Touch (_pl=it nelle richieste reali)
+  assert.match(call.url, /^https:\/\/x\/HDAPortal\/WSCView\/ListData\/Incidents\?_pl=it&_dc=\d+$/);
+  hda.setLang("en");
+  await hda.listData("Incidents", {});
+  assert.match(f.calls[1].url, /\?_pl=en&/);
   const body = new URLSearchParams(call.init.body);
   assert.equal(body.get("ViewID"), "Default");
   assert.equal(body.get("limit"), "50");
@@ -602,4 +606,54 @@ test("lookups: un solo caricamento dell'elenco completo alla volta e segno 'comp
   await again.restore();
   await again.loadFull("users");
   assert.equal(calls, 1, "dopo il riavvio l'elenco completo non si riscarica");
+});
+
+// ---------------------------------------------------------------- trasporto: errore del collegamento del portale
+
+const INFRA = JSON.stringify({ success: false, result: { desc: "An error occourred on the webservice underlying connection. Check webservice URL and server configuration parameters!" } });
+const LOADERR = JSON.stringify({ success: false, result: { desc: "Si è verificato un errore durante il caricamento dei dati." } });
+const OK = JSON.stringify({ success: true, data: [{ ID: "S1" }], total: 1 });
+
+test("transport: errore del collegamento del portale in diretta → stessa richiesta dalla scheda di Touch, poi resta lì", async () => {
+  const fetch = fakeFetch(() => ({ body: INFRA }));
+  const sent = [];
+  const modes = [];
+  const t = makeTransport({ base: "https://x/HDAPortal", fetch, sendMessage: async (m) => (sent.push(m), { status: 200, contentType: "application/json", text: OK }), onModeChange: (m) => modes.push(m) });
+  const d = await t.request({ path: "/WSCView/GetStaticList?_pl=it&entity=TicketStatuses", expect: "json" });
+  assert.equal(d.data[0].ID, "S1");
+  assert.equal(fetch.calls[0].init.cache, "no-store", "un errore memorizzabile 60 s non deve restare nella cache del browser");
+  assert.equal(sent[0].type, "hda-proxy");
+  assert.equal(t.mode, "proxy");
+  assert.deepEqual(modes, ["proxy"]);
+  await t.request({ path: "/WSCView/GetStaticList", expect: "json" });
+  assert.equal(fetch.calls.length, 1, "le richieste successive passano subito dalla scheda");
+});
+
+test("transport: errore del collegamento senza scheda di Touch → AuthError che spiega di aprirla", async () => {
+  const t = makeTransport({ base: "https://x/HDAPortal", fetch: fakeFetch(() => ({ body: INFRA })), sendMessage: async () => ({ error: "no-tab" }) });
+  await assert.rejects(() => t.request({ path: "/WSCView/GetStaticList", expect: "json" }), (e) => e instanceof AuthError && /underlying connection/.test(e.message) && /Apri HDA TOUCH/.test(e.message));
+  assert.equal(t.mode, "direct");
+});
+
+test("transport: errore anche dalla scheda → messaggio che dice di ricaricare Touch", async () => {
+  const t = makeTransport({ base: "https://x/HDAPortal", fetch: fakeFetch(() => ({ body: INFRA })), sendMessage: async () => ({ status: 200, contentType: "application/json", text: INFRA }) });
+  await assert.rejects(() => t.request({ path: "/WSCView/GetStaticList", expect: "json" }), (e) => e instanceof HdaError && /ricarica la pagina di HDA TOUCH/.test(e.message));
+});
+
+test("transport: dalla scheda (modo ricordato) ma scheda chiusa → diretta", async () => {
+  const fetch = fakeFetch(() => ({ body: OK }));
+  const t = makeTransport({ base: "https://x/HDAPortal", mode: "proxy", fetch, sendMessage: async () => ({ error: "no-tab" }) });
+  const d = await t.request({ path: "/WSCView/GetStaticList", expect: "json" });
+  assert.equal(d.total, 1);
+  assert.equal(t.mode, "direct");
+});
+
+test("transport: 'errore durante il caricamento dei dati' dopo che la strada ha già funzionato è un errore della ricerca, non si ripete", async () => {
+  let n = 0;
+  const fetch = fakeFetch(() => ({ body: n++ === 0 ? OK : LOADERR }));
+  let proxied = 0;
+  const t = makeTransport({ base: "https://x/HDAPortal", fetch, sendMessage: async () => (proxied++, { status: 200, contentType: "application/json", text: OK }) });
+  await t.request({ path: "/a", expect: "json" });
+  await assert.rejects(() => t.request({ path: "/b", expect: "json" }), /caricamento dei dati/);
+  assert.equal(proxied, 0);
 });

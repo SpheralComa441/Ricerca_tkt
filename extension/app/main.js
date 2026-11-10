@@ -21,7 +21,14 @@ import { ticketIdFrom, ticketIdVariants, ticketNumber, isLegacyTicketNumber, isT
 
 const inExtension = typeof chrome !== "undefined" && !!(chrome.runtime && chrome.runtime.id);
 const DAY = 86400000;
-const DEFAULT_SETTINGS = { pageSize: 50, lang: "en", archiveOnRead: true, archiveCap: 300 };
+// portalLang "auto": la stessa lingua (_pl) che usa la pagina di Touch (registrata dal service worker)
+const DEFAULT_SETTINGS = { pageSize: 50, portalLang: "auto", archiveOnRead: true, archiveCap: 300 };
+
+function portalLang(settings, touchLang) {
+  const chosen = settings && settings.portalLang;
+  if (chosen && chosen !== "auto") return chosen;
+  return touchLang || "it";
+}
 const SORTS = {
   date: { label: "Data di apertura", field: "date", fb: "c20" },
   lastChange: { label: "Ultimo aggiornamento", field: "lastChange", fb: "c26" },
@@ -211,6 +218,9 @@ async function checkConnection() {
   } catch (e) {
     log("connessione: " + e.message);
     setConn(false, e instanceof AuthError ? null : "Touch non raggiungibile — clicca per aprirlo");
+    // il motivo si vede anche nell'elenco (prima restava solo nella Diagnostica)
+    S.error = e;
+    renderResults();
     return false;
   }
 }
@@ -1093,7 +1103,9 @@ function renderResults() {
     if (S.error) {
       const auth = S.error instanceof AuthError;
       el.appendChild(h("div", { class: "err-box" },
-        auth ? "Non vedo una sessione attiva di HDA TOUCH. Apri il portale, esegui l'accesso e poi premi Riprova." : "La ricerca non è riuscita: " + S.error.message,
+        auth
+          ? (S.error.message && S.error.message !== new AuthError().message ? S.error.message : "Non vedo una sessione attiva di HDA TOUCH. Apri il portale, esegui l'accesso e poi premi Riprova.")
+          : "La ricerca non è riuscita: " + S.error.message,
         h("div", null,
           auth ? h("button", { class: "btn", onclick: openTouchHome }, icon("external"), "Apri HDA TOUCH") : null, " ",
           h("button", { class: "btn", onclick: () => search({ fresh: true }) }, "Riprova"))));
@@ -1392,9 +1404,10 @@ function onKey(e) {
 // ---------------------------------------------------------------- avvio
 
 async function init() {
-  const [settings, savedUi, lastFilters, sort, saved, favorites, recent, learned, captures, caps, typesSeen] = await Promise.all([
+  const [settings, savedUi, lastFilters, sort, saved, favorites, recent, learned, captures, caps, typesSeen, touchLang, transportMode] = await Promise.all([
     kvGet("settings", null), kvGet("ui", null), kvGet("lastFilters", null), kvGet("sort", null), kvGet("saved", []),
     kvGet("favorites", []), kvGet("recent", []), kvGet("learned", {}), kvGet("captures", []), kvGet("caps", {}), kvGet("typesSeen", {}),
+    kvGet("touchLang", null), kvGet("transportMode", null),
   ]);
   Object.assign(S.settings, settings || {});
   Object.assign(ui, savedUi || {});
@@ -1411,14 +1424,30 @@ async function init() {
   }
   if (S.caps.fullTextRule) S.calib.overrides.text = { ...S.caps.fullTextRule, source: "calibrato" };
 
-  transport = makeTransport({ log });
-  hda = makeHda(transport, { lang: S.settings.lang });
+  // strada che ha funzionato l'ultima volta (diretta o dalla scheda di Touch): si riparte da quella
+  transport = makeTransport({
+    log,
+    mode: transportMode === "proxy" ? "proxy" : "direct",
+    onModeChange: (m) => {
+      kvSet("transportMode", m);
+      if (S.connected === true) setConn(true, `Connesso a Touch${m === "proxy" ? " (tramite scheda)" : ""}`);
+    },
+  });
+  hda = makeHda(transport, { lang: portalLang(S.settings, touchLang) });
+  log(`lingua del portale: ${hda.lang}${touchLang ? " (come Touch)" : ""}, richieste ${transport.mode === "proxy" ? "dalla scheda di Touch" : "dirette"}`);
   ar = makeAr({ log });
   lookups = makeLookups(hda, { kvGet, kvSet, log });
   await lookups.restore();
   refreshArchiveCount();
 
   onKvChange((ch) => {
+    if (ch.touchLang && ch.touchLang.newValue) {
+      const l = portalLang(S.settings, ch.touchLang.newValue);
+      if (l !== hda.lang) {
+        hda.setLang(l);
+        log(`lingua del portale: ${l} (come Touch)`);
+      }
+    }
     if (ch.learned) S.calib.learned = ch.learned.newValue || {};
     if (ch.captures) S.captures = ch.captures.newValue || [];
     if (ch.learned || ch.captures) refreshSidebar();
@@ -1480,7 +1509,7 @@ async function init() {
   if (await checkConnection()) {
     await start();
   } else {
-    S.error = new AuthError();
+    if (!S.error) S.error = new AuthError();
     renderResults();
   }
 }
