@@ -9,7 +9,7 @@ import { renderReader, renderReaderLoading, renderReaderError } from "./reader.j
 import { openDiag } from "./diag.js";
 import { makeTransport, AuthError, PORTAL_BASE } from "../lib/transport.js";
 import { makeHda } from "../lib/hda.js";
-import { makeAr } from "../lib/ar.js";
+import { makeAr, emptyArFilters, hasArFilter } from "../lib/ar.js";
 import { makeStorico, emptyStoricoFilters, hasStoricoFilter, enrichArTicket, movePeople } from "../lib/storico.js";
 import { makeRowReader } from "../lib/rows.js";
 import { emptyFilters, buildConditions, describeFilters, ruleFor, DEF, DOMAIN_CONDITION, OPEN_STATUS_IDS, FILTER_DEFS, isEmptyFilter, isUnconstrained, hasNarrowingFilter } from "../lib/filters.js";
@@ -58,6 +58,8 @@ const S = {
   notices: [],
   tab: "touch", // touch | ar | storico (le tre fonti) | archive | favorites | recent
   touchTotal: 0,
+  // Vecchio Cruscotto: ricerca a sé, con i suoi filtri (quelli della Ricerca rapida dell'Area Riservata)
+  arS: { filters: emptyArFilters(), results: [], loading: false, error: null, key: "", at: 0, notices: [] },
   storico: { filters: emptyStoricoFilters(), results: [], total: 0, loading: false, error: null, key: "" },
   stLookups: { groups: {}, operators: {}, clients: {} },
   archiveHits: [],
@@ -112,6 +114,8 @@ const ctx = {
   storicoSetFilter,
   storicoReset,
   storicoLookup,
+  arSetFilter,
+  arReset,
   arCentre: () => (ar && ar.state.idCenSer) || S.caps.arCentro || "",
 };
 
@@ -636,30 +640,11 @@ function textNarrowsNotice(f) {
   };
 }
 
-// Filtri che esistono anche nel Vecchio Cruscotto: testo, oggetto, data di apertura e gruppo
-// (il gruppo di Touch "G10663HR" è il gruppo 10663 del Vecchio Cruscotto, come nelle ricerche reali).
-const AR_COMPATIBLE = new Set(["text", "subject", "dateFrom", "dateTo", "ownerGroups"]);
-
-/** Come cercare nel Vecchio Cruscotto con questi filtri: null se ci sono filtri che lì non esistono. */
-function arSearchPlan(f) {
-  const blocked = FILTER_DEFS.filter((d) => !AR_COMPATIBLE.has(d.key) && !isEmptyFilter(f[d.key])).map((d) => d.label);
-  if (!isEmptyFilter(f.touch)) blocked.push("filtri da Touch");
-  const groups = [];
-  for (const g of f.ownerGroups || []) {
-    const m = /^G(\d+)/i.exec(String((g && g.id) || g || ""));
-    if (m) groups.push(m[1]);
-    else blocked.push("Gruppo");
-  }
-  if (blocked.length) return { blocked: [...new Set(blocked)] };
-  return { groups };
-}
-
 async function search({ more = false, fresh = false } = {}) {
   if (!hda) return;
   if (searchAbort) searchAbort.abort();
   const ac = new AbortController();
   searchAbort = ac;
-  if (!more) names.queue.length = 0; // i nomi in coda erano per l'elenco di prima
 
   // Se l'utente ha scritto nella casella #q senza premere Invio e ha cliccato Riprova / Aggiorna, sincronizziamo subito il testo.
   const qEl = $("#q");
@@ -670,6 +655,11 @@ async function search({ more = false, fresh = false } = {}) {
   }
 
   const f = S.filters;
+  // solo una nuova ricerca dalla casella in alto può far passare da sola alla scheda che ha trovato qualcosa
+  if (!more && f.text !== lastBoxText) {
+    lastBoxText = f.text;
+    pickPending = true;
+  }
   const size = Number(S.settings.pageSize) || 50;
   const tid = ticketIdFrom(f.text);
   const typedZ = !!tid && /z$/i.test(String(f.text || "").trim());
@@ -689,6 +679,7 @@ async function search({ more = false, fresh = false } = {}) {
       S.total = hit.total;
       S.touchTotal = hit.touchTotal || 0;
       const stCached = runStorico();
+      const arCached = runAr();
       stCached.then(() => { autoPickTab(); renderResults(); });
       S.notices = [...hit.notices];
       S.activeEffectiveFilters = hit.eff;
@@ -697,15 +688,16 @@ async function search({ more = false, fresh = false } = {}) {
       autoPickTab();
       renderResults();
       if (tid) {
-        const exact = pickExactTicket(hit.results, f.text);
-        if (exact) openFound(exact);
-        else {
+        arCached.then((arFound) => {
+          if (S.filters.text !== f.text || searchAbort !== ac) return;
+          const exact = pickExactTicket(mergeRowLists(hit.results, arFound || []), f.text);
+          if (exact) return openFound(exact);
           // il ticket c'è solo nello Storico: si apre da lì, come alla prima ricerca
           stCached.then((rows) => {
             const st = (rows || []).find((r) => r.id === ticketNumber(tid));
             if (st && S.filters.text === f.text && searchAbort === ac) openFound(st);
           });
-        }
+        });
       }
       return;
     }
@@ -713,6 +705,8 @@ async function search({ more = false, fresh = false } = {}) {
 
   // lo Storico cerca per conto suo (numero della casella o i suoi filtri): non rallenta le altre due fonti
   const storicoPromise = more ? Promise.resolve(S.storico.results) : runStorico({ fresh });
+  // anche il Vecchio Cruscotto: parole o numero della casella in alto più i suoi filtri
+  const arPromise = more ? Promise.resolve(S.arS.results) : runAr({ fresh });
   if (!more) {
     S.page = 1;
     S.results = [];
@@ -775,45 +769,6 @@ async function search({ more = false, fresh = false } = {}) {
     return rawRows.map((r) => rowReader.read(r));
   };
 
-  // Vecchio Cruscotto (Area Riservata) in parallelo, quando si cercano parole o numeri e i filtri esistono anche lì.
-  // Con la "Z" scritta si vuole il ticket nativo di Touch: lì il Vecchio Cruscotto non serve.
-  let arPromise = Promise.resolve([]);
-  if (!more && ar && (f.text || f.subject) && !typedZ) {
-    // con un numero ticket i filtri non contano (come su Touch): nel Vecchio Cruscotto si cerca solo il numero
-    const plan = tid ? { groups: [] } : arSearchPlan(f);
-    if (plan.blocked) {
-      log(`vecchio cruscotto non interrogato: filtri solo di Touch (${plan.blocked.join(", ")})`);
-      if (S.arConnected === true) {
-        S.notices.push(`Nel Vecchio Cruscotto non esistono i filtri ${plan.blocked.join(", ")}: con questi filtri cerco solo in HDA TOUCH.`);
-      }
-    } else {
-      arPromise = track(
-        "Vecchio Cruscotto",
-        ensureCentre()
-          .then(() => ar.search({
-            text: tid ? "" : f.text,
-            subject: tid ? "" : f.subject,
-            ticketId: tid ? ticketNumber(tid) : "",
-            dateFrom: tid ? "" : f.dateFrom,
-            dateTo: tid ? "" : f.dateTo,
-            groups: plan.groups,
-          }))
-          .then((r) => {
-            if (ar.state.connected) setArConn(true);
-            // senza centro servizi le parole si cercano in tutti i centri: lo si dice
-            if (!tid && !ac.signal.aborted && ar.state.connected && !ar.state.idCenSer && r && r.length) {
-              S.notices.push("Vecchio Cruscotto: non conosco il tuo centro servizi, quindi questi risultati comprendono anche i ticket degli altri centri (partner compresi). Scrivilo in Diagnostica → Impostazioni → «Centro servizi dell'Area Riservata».");
-            }
-            return r || [];
-          })
-          .catch((e) => {
-            log(`vecchio cruscotto: ${e.message}`);
-            return [];
-          }),
-      );
-    }
-  }
-
   try {
     let rows = [];
     let total = 0;
@@ -866,11 +821,9 @@ async function search({ more = false, fresh = false } = {}) {
       // Ricerca nei messaggi sempre attiva. In parallelo:
       //  1) FullText/eq[INCLUDECONVERSATIONITEM] su HDA TOUCH (cerca dentro i messaggi delle conversazioni e nell'oggetto)
       //  2) Subject su HDA TOUCH (veloce: mostra subito i primi risultati mentre FullText completa la scansione dei messaggi)
-      //  3) Vecchio Cruscotto (spsl_fquery_mc su Testi + Oggetto)
-      // Ogni fonte compare nell'elenco appena risponde.
+      // Ogni ricerca compare nell'elenco appena risponde. (Il Vecchio Cruscotto cerca per conto suo, nella sua scheda.)
       parts.set("ft", []);
       parts.set("sub", []);
-      parts.set("ar", []);
       const subF = fallbackToSubject(f);
       // La ricerca sull'oggetto serve solo a mostrare presto i primi risultati: quando quella nei messaggi
       // (che copre anche l'oggetto) ha risposto su tutto lo storico, non la si aspetta più (su tutto lo
@@ -887,7 +840,6 @@ async function search({ more = false, fresh = false } = {}) {
           }),
       );
       subPromise.then((r) => show("sub", r));
-      arPromise.then((r) => show("ar", r));
 
       const ftPromise = track(
         "messaggi di Touch",
@@ -906,7 +858,7 @@ async function search({ more = false, fresh = false } = {}) {
               S.activeEffectiveFilters = recentF;
               S.notices.push(
                 !f.dateFrom
-                  ? "La ricerca nei messaggi su tutto lo storico ha superato il limite di 25 secondi del portale: i messaggi sono cercati negli ultimi 24 mesi (oggetti e Vecchio Cruscotto su tutto lo storico)."
+                  ? "La ricerca nei messaggi su tutto lo storico ha superato il limite di 25 secondi del portale: i messaggi sono cercati negli ultimi 24 mesi (gli oggetti su tutto lo storico)."
                   : "La ricerca nei messaggi ha superato il limite di 25 secondi del portale: i messaggi sono cercati nei ticket aperti."
               );
               return { rows: await verifyTouchRowsAllWords(readRawRows(r2.rows), f), total: r2.total };
@@ -922,9 +874,9 @@ async function search({ more = false, fresh = false } = {}) {
 
       const ftRes = await ftPromise;
       if (ftRes.complete) subAc.abort();
-      const [subRows, arRows] = await Promise.all([subPromise, arPromise]);
+      const subRows = await subPromise;
       if (ac.signal.aborted) return;
-      rows = sortUnifiedRows(mergeRowLists(ftRes.rows, subRows, arRows));
+      rows = sortUnifiedRows(mergeRowLists(ftRes.rows, subRows));
       total = multiWord ? rows.length : Math.max(ftRes.total || 0, rows.length);
       touchTotal = multiWord ? 0 : ftRes.total || 0;
       if (hasNarrowingFilter(f) && rows.length < size) S.notices.push(textNarrowsNotice(f));
@@ -933,7 +885,6 @@ async function search({ more = false, fresh = false } = {}) {
       // "11943797Z" e "11943797"), nel Vecchio Cruscotto il numero (NumTic), su Touch i ticket che citano il numero
       // vecchio nell'oggetto. Il ticket esatto si apre appena Touch e il Vecchio Cruscotto hanno risposto.
       parts.set("id", []);
-      parts.set("ar", []);
       parts.set("ref", []);
       const variants = ticketIdVariants(f.text);
       const idPromise = track(
@@ -952,7 +903,6 @@ async function search({ more = false, fresh = false } = {}) {
         ).then((lists) => lists.flat()),
       );
       idPromise.then((r) => show("id", r), () => {});
-      arPromise.then((r) => show("ar", r));
       const refPromise = isLegacyNum
         ? track(
             "riferimenti in Touch",
@@ -974,14 +924,16 @@ async function search({ more = false, fresh = false } = {}) {
         openFound(early);
       }
 
-      const [arRows, refRows] = await Promise.all([arPromise, refPromise]);
+      const [arFound, refRows] = await Promise.all([arPromise, refPromise]);
       if (ac.signal.aborted) return;
       S.activeEffectiveFilters = f;
-      const exactAr = arRows.filter((r) => ticketNumber(r.id) === exactNum);
-      const otherAr = arRows.filter((r) => ticketNumber(r.id) !== exactNum);
-      rows = sortUnifiedRows(mergeRowLists(idRows, exactAr, refRows, otherAr), exactNum);
+      const exactAr = arFound.filter((r) => ticketNumber(r.id) === exactNum);
+      const otherAr = arFound.filter((r) => ticketNumber(r.id) !== exactNum);
+      // in elenco qui vanno i ticket di Touch; quelli del Vecchio Cruscotto sono nella loro scheda
+      rows = sortUnifiedRows(mergeRowLists(idRows, refRows), exactNum);
       total = rows.length;
-      const note = sameNumberNotice(rows, tid);
+      const all = sortUnifiedRows(mergeRowLists(idRows, exactAr, refRows, otherAr), exactNum);
+      const note = sameNumberNotice(all, tid);
       if (note) S.notices.push(note);
       if (hasNarrowingFilter(f)) {
         S.notices.push({
@@ -992,7 +944,7 @@ async function search({ more = false, fresh = false } = {}) {
       }
       let opened = !!openedId;
       if (!opened) {
-        const exact = pickExactTicket(rows, f.text);
+        const exact = pickExactTicket(all, f.text);
         if (exact) {
           opened = true;
           openFound(exact);
@@ -1004,9 +956,9 @@ async function search({ more = false, fresh = false } = {}) {
       if (ac.signal.aborted) return;
       const stExact = (stRows || []).find((r) => r.id === exactNum);
       if (stExact && !opened) openFound(stExact);
-      if (!rows.length && stExact) {
+      if (!all.length && stExact) {
         S.notices.push(`Il ticket ${exactNum} non è in HDA TOUCH né nella ricerca del Vecchio Cruscotto: l'ho trovato nello Storico.`);
-      } else if (!rows.length) {
+      } else if (!all.length) {
         S.notices.push(
           isLegacyNum && S.arConnected !== true
             ? `Il ticket ${exactNum} non è su HDA TOUCH (cercati ${variants.join(" e ")}). Clicca su «Collega vecchio cruscotto» in alto a destra ed esegui l'accesso all'Area Riservata per cercarlo anche nel Vecchio Cruscotto.`
@@ -1017,8 +969,6 @@ async function search({ more = false, fresh = false } = {}) {
       }
     } else {
       parts.set("touch", []);
-      parts.set("ar", []);
-      arPromise.then((r) => show("ar", r));
       let res;
       try {
         res = await track("HDA TOUCH", run(f, fetchLimit));
@@ -1034,11 +984,10 @@ async function search({ more = false, fresh = false } = {}) {
         );
       }
       if (ac.signal.aborted) return;
-      const touchRows = await verifyTouchRowsAllWords(readRawRows(res.rows), f);
-      show("touch", touchRows);
-      const arRows = await arPromise;
+      const found = await verifyTouchRowsAllWords(readRawRows(res.rows), f);
+      show("touch", found);
       if (ac.signal.aborted) return;
-      rows = sortUnifiedRows(mergeRowLists(touchRows, arRows));
+      rows = sortUnifiedRows(found);
       total = multiWord ? rows.length : Math.max(res.total || 0, rows.length);
       touchTotal = multiWord ? 0 : res.total || 0;
     }
@@ -1063,21 +1012,15 @@ async function search({ more = false, fresh = false } = {}) {
     if (e.name === "AbortError" || ac.signal.aborted) return;
     log("ricerca: " + e.message);
     if (more) S.page -= 1;
-    // Se Touch è andato in errore ma il Vecchio Cruscotto ha trovato risultati, li mostriamo comunque
+    S.error = e;
+    if (e instanceof AuthError) setConn(false);
+    // Touch è andato in errore: il Vecchio Cruscotto ha comunque la sua scheda; un numero trovato lì si apre lo stesso
     const arFallback = await arPromise.catch(() => []);
     if (ac.signal.aborted) return;
-    if (arFallback && arFallback.length) {
-      S.results = sortUnifiedRows(arFallback, exactNum);
-      S.total = S.results.length;
-      S.notices.push(`HDA TOUCH non ha risposto (${e.message}): mostro solo i risultati del Vecchio Cruscotto.`);
-      if (tid) {
-        const exact = pickExactTicket(S.results, f.text);
-        if (exact) openTicket(exact.id, exact);
-      }
-    } else {
-      S.error = e;
+    if (tid && arFallback && arFallback.length) {
+      const exact = pickExactTicket(arFallback, f.text);
+      if (exact) openFound(exact);
     }
-    if (e instanceof AuthError) setConn(false);
   } finally {
     if (searchAbort === ac) {
       S.loading = false;
@@ -1134,7 +1077,7 @@ const SOURCES = {
 const isSourceTab = (t = S.tab) => t === "touch" || t === "ar" || t === "storico";
 const sourceOf = (r) => (r && (r.source === "ar" || r.source === "storico") ? r.source : "touch");
 const touchRows = () => S.results.filter((r) => r.source !== "ar");
-const arRows = () => S.results.filter((r) => r.source === "ar");
+const arRows = () => S.arS.results;
 
 /** Ticket trovati per fonte (per le schede): di Touch il totale del portale, non solo quelli già caricati. */
 function sourceCounts() {
@@ -1146,9 +1089,15 @@ function sourceCounts() {
   };
 }
 
-/** Se la scheda aperta è rimasta vuota e un'altra fonte ha trovato qualcosa, si passa a quella. */
+/**
+ * Dopo una nuova ricerca dalla casella in alto: se la scheda aperta è rimasta vuota e un'altra fonte ha trovato
+ * qualcosa, si passa a quella. Cambiando un filtro dentro una scheda, invece, si resta dove si è.
+ */
+let pickPending = false;
+let lastBoxText = null;
 function autoPickTab() {
-  if (!isSourceTab() || S.loading || S.storico.loading) return;
+  if (!pickPending || !isSourceTab() || S.loading || S.storico.loading || S.arS.loading) return;
+  pickPending = false;
   const c = sourceCounts();
   if (c[S.tab]) return;
   const next = ["touch", "ar", "storico"].find((k) => c[k]);
@@ -1218,6 +1167,129 @@ function withArNames(r) {
   const client = r.customerCode && L.clients[r.customerCode];
   if (!group && !oper && !client) return r;
   return { ...r, ownerGroup: group || r.ownerGroup, assigned: oper || r.assigned, account: client || r.account };
+}
+
+// ---------------------------------------------------------------- Vecchio Cruscotto (ricerca rapida dell'Area Riservata)
+
+/**
+ * Cosa cercare nel Vecchio Cruscotto: il numero o le parole della casella in alto, più i filtri della sua scheda.
+ * Con un numero i filtri non contano; con la "Z" scritta si vuole il ticket nativo di Touch e qui non si cerca.
+ */
+function arQuery() {
+  const text = String(S.filters.text || "").trim();
+  const tid = ticketIdFrom(text);
+  if (tid) return /z$/i.test(text) ? null : { ticketId: ticketNumber(tid) };
+  const filters = S.arS.filters;
+  if (!text && !hasArFilter(filters)) return null;
+  return { text, filters: { ...filters } };
+}
+
+const AR_RESULT_TTL = 2 * 60 * 1000;
+let arSeq = 0;
+let arInflight = null; // { key, promise }: la stessa ricerca non si rifà mentre è in corso
+function runAr({ fresh = false } = {}) {
+  const st = S.arS;
+  const q = ar ? arQuery() : null;
+  const key = q ? JSON.stringify(q) : "";
+  const exactNum = (q && q.ticketId) || "";
+  if (!q) {
+    arSeq++;
+    arInflight = null;
+    names.queue.length = 0;
+    Object.assign(st, { results: [], loading: false, error: null, key: "", notices: [] });
+    return Promise.resolve([]);
+  }
+  if (!fresh && arInflight && arInflight.key === key) return arInflight.promise;
+  if (!fresh && key === st.key && !st.error && Date.now() - st.at < AR_RESULT_TTL) {
+    st.results = sortUnifiedRows(st.results, exactNum); // l'ordinamento può essere cambiato
+    return Promise.resolve(st.results);
+  }
+  const my = ++arSeq;
+  names.queue.length = 0; // i nomi in coda erano per l'elenco di prima
+  Object.assign(st, { results: [], loading: true, error: null, key: "", notices: [] });
+  renderResults();
+  const info = {};
+  const promise = ensureCentre()
+    .then(() => ar.search(q, info))
+    .then((rows) => {
+      if (ar.state.connected) setArConn(true);
+      if (my !== arSeq) return rows || [];
+      st.results = sortUnifiedRows(rows || [], exactNum);
+      st.key = key;
+      st.at = Date.now();
+      if (!exactNum && info.max && info.raw >= info.max) {
+        st.notices.push(`Il Vecchio Cruscotto restituisce al massimo ${info.max} ticket per ricerca (i più rilevanti): per vedere gli altri restringi il periodo o aggiungi un filtro.`);
+      }
+      // senza centro servizi si cerca in tutti i centri: lo si dice
+      if (!exactNum && ar.state.connected && !ar.state.idCenSer && st.results.length) {
+        st.notices.push("Vecchio Cruscotto: non conosco il tuo centro servizi, quindi questi risultati comprendono anche i ticket degli altri centri (partner compresi). Scrivilo in Diagnostica → Impostazioni → «Centro servizi dell'Area Riservata».");
+      }
+      return st.results;
+    })
+    .catch((e) => {
+      log(`vecchio cruscotto: ${e.message}`);
+      if (my === arSeq) st.error = e;
+      return [];
+    })
+    .finally(() => {
+      if (arInflight && arInflight.promise === promise) arInflight = null;
+      if (my !== arSeq) return;
+      st.loading = false;
+      autoPickTab();
+      renderResults();
+    });
+  arInflight = { key, promise };
+  return promise;
+}
+
+// I filtri del Vecchio Cruscotto valgono finché l'app resta aperta: alla riapertura si riparte senza,
+// così un filtro dimenticato non restringe di nascosto le ricerche per parole.
+function arChanged() {
+  refreshSidebar();
+  runAr();
+  renderResults();
+}
+
+/** arSetFilter("statoBase", "C") oppure arSetFilter({ group: "10663", groupLabel: "Paghe Web P" }) */
+function arSetFilter(key, val) {
+  if (key && typeof key === "object") Object.assign(S.arS.filters, key);
+  else S.arS.filters[key] = val;
+  arChanged();
+}
+
+function arReset() {
+  S.arS.filters = emptyArFilters();
+  arChanged();
+}
+
+/** Etichette dei filtri attivi nella scheda Vecchio Cruscotto. */
+function describeAr() {
+  const f = S.arS.filters;
+  const text = String(S.filters.text || "").trim();
+  const day = (d) => d.split("-").reverse().join("/");
+  const chips = [];
+  if (text) chips.push({ key: "text", label: ticketIdFrom(text) ? `Numero ${ticketNumber(ticketIdFrom(text))}` : `Testo: “${text}”` });
+  if (ticketIdFrom(text)) return chips; // con un numero i filtri non contano
+  if (text && f.searchIn !== "2") chips.push({ key: "searchIn", label: f.searchIn === "1" ? "Solo nell'oggetto" : "Solo nel testo dei messaggi" });
+  if (f.dateFrom || f.dateTo) {
+    chips.push({ key: "period", label: `${f.dateRef === "2" ? "Apertura" : "Ultimo aggiornamento"}${f.dateFrom ? " dal " + day(f.dateFrom) : ""}${f.dateTo ? " al " + day(f.dateTo) : ""}` });
+  }
+  if (f.statoBase) chips.push({ key: "statoBase", label: f.statoBase === "A" ? "Stato: aperti" : "Stato: chiusi" });
+  if (f.group) chips.push({ key: "group", label: `Gruppo: ${f.groupLabel || S.stLookups.groups[f.group] || f.group}` });
+  if (f.operator) chips.push({ key: "operator", label: `Operatore: ${f.operator.label || f.operator.id}` });
+  if (String(f.clientCode || "").trim()) chips.push({ key: "clientCode", label: `Cliente cod. ${f.clientCode}${S.stLookups.clients[f.clientCode] ? " (" + S.stLookups.clients[f.clientCode] + ")" : ""}` });
+  if (f.groupIn) chips.push({ key: "groupIn", label: `Ha partecipato il gruppo: ${f.groupInLabel || S.stLookups.groups[f.groupIn] || f.groupIn}` });
+  if (f.operatorIn) chips.push({ key: "operatorIn", label: `Ha partecipato: ${f.operatorIn.label || f.operatorIn.id}` });
+  return chips;
+}
+
+function clearArKey(key) {
+  if (key === "text") return clearFilterKey("text");
+  const e = emptyArFilters();
+  if (key === "period") return arSetFilter({ dateFrom: "", dateTo: "" });
+  if (key === "group") return arSetFilter({ group: "", groupLabel: "" });
+  if (key === "groupIn") return arSetFilter({ groupIn: "", groupInLabel: "" });
+  arSetFilter(key, e[key]);
 }
 
 // ---------------------------------------------------------------- Storico (ricerca avanzata dell'Area Riservata)
@@ -1366,7 +1438,7 @@ function refreshArNamesSoon() {
 
 /** Aggiorna sul posto la riga "cliente · gruppo → operatore" dei ticket del Vecchio Cruscotto già in elenco (senza ridisegnare tutto). */
 function refreshArNames() {
-  const byId = new Map(S.results.filter((r) => r.source === "ar").map((r) => [r.id, r]));
+  const byId = new Map(arRows().map((r) => [r.id, r]));
   for (const n of document.querySelectorAll('#results .item[data-source="ar"]')) {
     const r = byId.get(n.dataset.id);
     if (!r) continue;
@@ -1500,6 +1572,7 @@ function leaveTabForSearch(text) {
 const sidebarMode = (t) => (t === "storico" || t === "ar" ? t : "touch");
 
 function pickTab(key) {
+  pickPending = false; // la scheda l'ha scelta l'operatore
   const sidebarChanges = sidebarMode(S.tab) !== sidebarMode(key);
   S.tab = key;
   S.cursor = -1;
@@ -1519,7 +1592,7 @@ function openFound(row) {
 /** Le tre schede delle fonti: ognuna con il suo colore e il numero di ticket trovati. */
 function sourceTabs(fmtN) {
   const c = sourceCounts();
-  const busy = { touch: S.loading, ar: S.loading && S.pending && S.pending.has("Vecchio Cruscotto"), storico: S.storico.loading };
+  const busy = { touch: S.loading, ar: S.arS.loading, storico: S.storico.loading };
   return h("div", { class: "src-tabs", role: "tablist" },
     Object.entries(SOURCES).map(([key, src]) =>
       h("button", { class: `src-tab src-${key}` + (S.tab === key ? " on" : ""), role: "tab", title: src.title, dataset: { source: key }, onclick: () => pickTab(key) },
@@ -1536,7 +1609,8 @@ function renderResults() {
   const st = S.storico;
   const items = visibleItems();
   const counts = sourceCounts();
-  const busy = S.tab === "storico" ? st.loading : src && S.loading;
+  const arS = S.arS;
+  const busy = S.tab === "storico" ? st.loading : S.tab === "ar" ? arS.loading : src && S.loading;
 
   // intestazione
   const sortSel = h("select", { class: "input", title: "Ordina per", onchange: (e) => { S.sort.key = e.target.value; kvSet("sort", S.sort); search(); } },
@@ -1557,28 +1631,30 @@ function renderResults() {
         src && !busy && items.length && total > items.length ? h("small", null, ` · ne vedi ${fmtN(items.length)}`) : null),
       S.tab === "touch" || S.tab === "ar" ? [sortSel, dirBtn] : null,
       S.tab === "storico" ? h("span", { class: "hint" }, "dal più recente") : null,
-      src ? h("button", { class: "btn btn-small btn-icon", onclick: () => (S.tab === "storico" ? runStorico({ fresh: true }) : search({ fresh: true })), title: "Aggiorna (rifà la ricerca sul portale)" }, icon("reload")) : null),
+      src ? h("button", { class: "btn btn-small btn-icon", onclick: () => (S.tab === "storico" ? runStorico({ fresh: true }) : S.tab === "ar" ? runAr({ fresh: true }) : search({ fresh: true })), title: "Aggiorna (rifà la ricerca sul portale)" }, icon("reload")) : null),
     h("div", { class: "res-tools" },
-      S.tab === "touch" || S.tab === "ar"
+      S.tab === "touch"
         ? [
             h("button", { class: "linkbtn", onclick: saveSearchDialog, title: "Salva questi filtri per riusarli" }, icon("save"), "Salva ricerca"),
             h("button", { class: "linkbtn", onclick: exportCsv, disabled: !S.total || S.job ? true : null, title: "Scarica i risultati in un file per Excel (max 1000)" }, icon("download"), "Excel"),
             h("button", { class: "linkbtn", onclick: archiveResults, disabled: !S.total || S.job ? true : null, title: "Salva nel browser i ticket trovati con tutta la conversazione, per cercare nel testo dei messaggi" }, icon("archive"), "Archivia risultati"),
           ]
-        : null,
+        : S.tab === "ar"
+          ? h("button", { class: "linkbtn", onclick: exportCsv, disabled: !items.length || S.job ? true : null, title: "Scarica in un file per Excel i ticket del Vecchio Cruscotto in elenco" }, icon("download"), "Excel")
+          : null,
       h("span", { class: "grow" }),
       h("div", { class: "tabs" },
         tabBtn("archive", "Archivio locale", S.filters.text ? S.archiveHits.length : null),
         tabBtn("favorites", "Preferiti", S.favorites.length || null),
         tabBtn("recent", "Recenti", S.recent.length || null))));
 
-  const chips = S.tab === "storico" ? describeStorico() : describeFilters(S.filters);
+  const chips = S.tab === "storico" ? describeStorico() : S.tab === "ar" ? describeAr() : describeFilters(S.filters);
   if (chips.length && (src || S.tab === "archive")) {
-    const drop = S.tab === "storico" ? clearStoricoKey : clearFilterKey;
+    const drop = S.tab === "storico" ? clearStoricoKey : S.tab === "ar" ? clearArKey : clearFilterKey;
     head.appendChild(h("div", { class: "chips" },
       chips.map((c) => h("span", { class: "chip", title: c.label }, h("span", null, c.label),
         h("button", { title: "Togli questo filtro", onclick: () => drop(c.key) }, "×"))),
-      chips.length > 1 ? h("button", { class: "linkbtn", onclick: S.tab === "storico" ? storicoReset : resetFilters }, "Azzera tutto") : null));
+      chips.length > 1 ? h("button", { class: "linkbtn", onclick: S.tab === "storico" ? storicoReset : S.tab === "ar" ? () => { arReset(); if (S.filters.text) clearFilterKey("text"); } : resetFilters }, "Azzera tutto") : null));
   }
   el.appendChild(head);
 
@@ -1588,11 +1664,19 @@ function renderResults() {
     n && typeof n === "object" && n.text
       ? h("div", { class: "notice with-action" }, h("span", null, n.text), n.action ? h("button", { class: "btn btn-small", onclick: n.action }, n.actionLabel || "Riprova") : null)
       : h("div", { class: "notice" }, n);
-  if (S.tab === "touch" || S.tab === "ar") {
-    for (const n of S.notices) el.appendChild(noticeEl(n));
-    if (S.tab === "ar" && S.arConnected !== true) {
+  if (S.tab === "ar") {
+    for (const n of arS.notices) el.appendChild(noticeEl(n));
+    if (S.arConnected !== true) {
       el.appendChild(noticeEl({ text: "Il Vecchio Cruscotto non è collegato: apri l'Area Riservata ed esegui l'accesso, poi torna qui.", action: () => openArHome(), actionLabel: "Collega vecchio cruscotto" }));
+    } else if (arS.error) {
+      el.appendChild(h("div", { class: "err-box" }, "La ricerca nel Vecchio Cruscotto non è riuscita: " + arS.error.message,
+        h("div", null,
+          h("button", { class: "btn", onclick: () => openArHome() }, icon("external"), "Apri l'Area Riservata"), " ",
+          h("button", { class: "btn", onclick: () => runAr({ fresh: true }) }, "Riprova"))));
     }
+  }
+  if (S.tab === "touch") {
+    for (const n of S.notices) el.appendChild(noticeEl(n));
     if (S.error) {
       const auth = S.error instanceof AuthError;
       el.appendChild(h("div", { class: "err-box" },
@@ -1625,10 +1709,12 @@ function renderResults() {
 
   const list = h("div", { class: "list" });
   items.forEach((it, i) => list.appendChild(itemEl(it, i)));
-  if (!items.length && !busy && !(src && S.tab !== "storico" && S.error) && !(S.tab === "storico" && st.error)) {
+  if (!items.length && !busy && !(S.tab === "touch" && S.error) && !(S.tab === "ar" && arS.error) && !(S.tab === "storico" && st.error)) {
     const empty = {
       touch: ["Nessun ticket trovato in HDA Touch", "Prova a togliere qualche filtro o a cambiare le parole."],
-      ar: ["Nessun ticket trovato nel Vecchio Cruscotto", S.filters.text || S.filters.subject ? "Qui si cercano le parole negli anni più recenti: per i ticket più vecchi guarda la scheda Storico." : "Scrivi un numero ticket o delle parole nella casella in alto."],
+      ar: arQuery()
+        ? ["Nessun ticket trovato nel Vecchio Cruscotto", "Prova a togliere un filtro o ad allargare il periodo. Qui ci sono solo gli anni più recenti: per i ticket più vecchi guarda la scheda Storico."]
+        : ["Vecchio Cruscotto: la Ricerca rapida dell'Area Riservata", "Scrivi delle parole o un numero ticket nella casella in alto, oppure scegli a sinistra un filtro (gruppo, operatore, cliente, stato, periodo): si può cercare anche senza parole."],
       storico: storicoQuery()
         ? ["Nessun ticket trovato nello Storico", "Prova ad allargare il periodo o a togliere un filtro."]
         : ["Storico: tutti i ticket del Vecchio Cruscotto, anche prima del 2024", "Qui non si cerca per parole. Scrivi un numero ticket nella casella in alto, oppure scegli a sinistra un periodo, un cliente, un gruppo o un operatore."],
@@ -1639,10 +1725,12 @@ function renderResults() {
     list.appendChild(h("div", { class: "empty-state" }, h("h3", null, empty[0]), empty[1]));
   }
   if (busy) {
-    const still = S.tab !== "storico" && S.pending && S.pending.size ? [...S.pending].join(", ") : "";
+    const still = S.tab === "touch" && S.pending && S.pending.size ? [...S.pending].join(", ") : "";
     const msg = S.tab === "storico"
       ? (items.length ? "Carico altri…" : "Cerco nello Storico…")
-      : still
+      : S.tab === "ar"
+        ? "Cerco nel Vecchio Cruscotto…"
+        : still
         ? (S.results.length ? `Sto ancora cercando in: ${still}…` : `Cerco in: ${still}…`)
         : S.results.length ? "Carico altri…" : "Cerco i ticket…";
     list.appendChild(h("div", { class: "loading" }, h("span", { class: "spinner" }), msg));
@@ -1657,7 +1745,7 @@ function renderResults() {
   if (src && S.tab !== "storico" && words.length && !ticketIdFrom(S.filters.text)) highlight(list, words);
   else if (S.tab === "archive" && words.length) highlight(list, words);
   el.scrollTop = top;
-  if (S.tab === "ar" && !S.loading) queueArNames();
+  if (S.tab === "ar" && !S.arS.loading) queueArNames();
 }
 
 function clearFilterKey(key) {
@@ -1679,7 +1767,7 @@ async function openTicket(id, row, { force = false } = {}) {
   if (!row && id) {
     // prima la riga con lo stesso ID esatto, poi quella con lo stesso numero (mai un ticket con la Z al posto di uno senza)
     const want = String(id).trim();
-    row = S.results.find((r) => r.id === want) || (ticketIdFrom(want) ? pickExactTicket(S.results, want, { allowSingle: false }) : null) || S.storico.results.find((r) => r.id === want) || null;
+    row = S.results.find((r) => r.id === want) || (ticketIdFrom(want) ? pickExactTicket(mergeRowLists(S.results, S.arS.results), want, { allowSingle: false }) : null) || S.arS.results.find((r) => r.id === want) || S.storico.results.find((r) => r.id === want) || null;
   }
   id = row && row.id ? String(row.id) : ticketIdFrom(id) || String(id || "").trim();
   if (!id) return;
@@ -1863,10 +1951,11 @@ async function fetchAllRows(max, job) {
 
 async function exportCsv() {
   if (S.job) return;
-  const job = (S.job = { label: "Preparo il file", done: 0, total: Math.min(S.total, 1000) });
+  const fromAr = S.tab === "ar";
+  const job = (S.job = { label: "Preparo il file", done: 0, total: Math.min(fromAr ? arRows().length : S.total, 1000) });
   renderResults();
   try {
-    const rows = await fetchAllRows(1000, job);
+    const rows = fromAr ? arRows().map(withArNames) : await fetchAllRows(1000, job);
     if (job.cancelled) return;
     const cols = [
       ["Numero", (r) => ticketNumber(r.id)], ["Oggetto", (r) => r.subject], ["Stato", (r) => statusInfo(r.statusId, r.statusText).label],
@@ -1880,7 +1969,7 @@ async function exportCsv() {
     document.body.appendChild(a);
     a.click();
     setTimeout(() => { URL.revokeObjectURL(a.href); a.remove(); }, 2000);
-    toast(`File con ${rows.length} ticket scaricato${S.total > 1000 ? " (limite 1000)" : ""}`, "ok");
+    toast(`File con ${rows.length} ticket scaricato${!fromAr && S.total > 1000 ? " (limite 1000)" : ""}`, "ok");
   } catch (e) {
     toast("Esportazione non riuscita: " + e.message, "err", 5000);
   } finally {

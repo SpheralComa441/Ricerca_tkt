@@ -10,7 +10,7 @@ import { buildConditions, emptyFilters, formatDateValue, learnFromConditions, ru
 import { htmlToText, splitQuoted, linkifyParts, decodeEntities, unescapeIfEscapedHtml, cleanText } from "../lib/richtext.js";
 import { makeTransport, AuthError, HdaError, formBody, abortable } from "../lib/transport.js";
 import { makeHda, parsePreviewAttachmentResponse, guessMimeFromName } from "../lib/hda.js";
-import { buildArQuery, parseArResponse, buildArTicket, extractMcidFromHtml, extractCentreFromForm, splitArTesti, makeAr } from "../lib/ar.js";
+import { buildArQuery, parseArResponse, buildArTicket, extractMcidFromHtml, extractCentreFromForm, splitArTesti, makeAr, emptyArFilters, hasArFilter } from "../lib/ar.js";
 import { loadTicket, normalizeAttachment } from "../lib/ticket.js";
 
 // ---------------------------------------------------------------- util
@@ -738,4 +738,65 @@ test("ar: centro servizi letto dal modulo di ricerca del portale; i ticket degli
   const rows = await ar.search({ text: "cud" });
   assert.deepEqual(rows.map((r) => r.id), ["8900042"], "il ticket del centro di un partner non compare");
   assert.match(queries[0], /^IdCenSer:PAOW and /);
+});
+
+test("ar: filtri della Ricerca rapida (gruppo, operatore, cliente, stato, chi ha partecipato, periodo) anche senza parole", async () => {
+  assert.equal(hasArFilter(emptyArFilters()), false);
+  assert.equal(hasArFilter({ ...emptyArFilters(), searchIn: "1", dateRef: "2" }), false, "le sole opzioni non sono un filtro");
+  assert.equal(hasArFilter({ ...emptyArFilters(), groupIn: "50454" }), true);
+  assert.equal(buildArQuery({ idCenSer: "PAOW" }), "", "senza parole e senza filtri non si cerca tutto il centro");
+
+  // come nella ricerca reale del portale: … and ( Testi:(x) or Oggetto:(x) ) and IdOperatore:… and IdCliente:…
+  assert.equal(
+    buildArQuery({ text: "cud", idCenSer: "PAOW", operator: "000000000100001", clientCode: "1234" }),
+    "IdCenSer:PAOW and ( Testi:(cud or cud*) or Oggetto:(cud or cud*) ) and IdOperatore:000000000100001 and IdCliente:000000000001234",
+  );
+  // solo filtri: il gruppo che ha partecipato si cerca nelle due forme in cui può essere scritto nell'indice
+  assert.equal(buildArQuery({ idCenSer: "PAOW", groupsIn: ["50454"] }), "IdCenSer:PAOW and ( IdGruppoIn:50454 or IdGruppoIn:50454.0 )");
+  assert.equal(
+    buildArQuery({ idCenSer: "PAOW", groups: ["10663"], statoBase: "C", operatorIn: "100002" }),
+    "IdCenSer:PAOW and IdGruppo:10663 and StatoBase:C and IdOperatoreIn:000000000100002",
+  );
+  // periodo: a mesi, riferito all'ultimo aggiornamento (M) o all'apertura (A)
+  assert.equal(
+    buildArQuery({ idCenSer: "PAOW", dateFrom: "2026-09-01", dateTo: "2026-11-30", dateRef: "1", statoBase: "A" }),
+    "IdCenSer:PAOW and ( (IdMeseM:9 and IdAnnoM:2026) or (IdMeseM:10 and IdAnnoM:2026) or (IdMeseM:11 and IdAnnoM:2026) ) and StatoBase:A",
+  );
+  assert.match(buildArQuery({ dateFrom: "2026-09-01", dateTo: "2026-09-30", dateRef: "2" }), /^\( \(IdMeseA:9 and IdAnnoA:2026\) \)$/);
+  const y = new Date().getFullYear();
+  assert.match(buildArQuery({ text: "cud", dateTo: `${y}-02-10`, dateRef: "1" }), new RegExp(`^\\( \\(IdMeseM:1 and IdAnnoM:${y - 2}\\) or .*\\(IdMeseM:2 and IdAnnoM:${y}\\) \\) and `), "solo «al»: dai due anni prima");
+  assert.match(buildArQuery({ text: "cud", dateFrom: `${y}-01-15` }), new RegExp(`^\\( \\(IdMeseA:1 and IdAnnoA:${y}\\)`), "solo «dal»: fino a oggi");
+  // dove cercare le parole
+  assert.equal(buildArQuery({ text: "cud", searchIn: "1" }), "Oggetto:(cud or cud*)");
+  assert.equal(buildArQuery({ text: "cud", searchIn: "0" }), "Testi:(cud or cud*)");
+  // con un numero ticket i filtri non contano
+  assert.equal(buildArQuery({ ticketId: "8900042", idCenSer: "PAOW", statoBase: "C", groupsIn: ["50454"], dateFrom: "2026-01-01", dateTo: "2026-03-31" }), "IdCenSer:PAOW and NumTic:8900042");
+
+  // il client: filtri → ricerca; limite di risultati del portale riportato a chi chiama
+  const queries = [];
+  const fetchImpl = async (url, init = {}) => {
+    let body = "<html></html>";
+    if (/portlet\.jsp$/.test(url)) body = "this.splResults.m_cID='f0f7834fde6879c8685311c282f6734a';";
+    else if (/spsl_fquery_mc$/.test(url)) {
+      queries.push(decodeURIComponent(init.body.split("&")[0].slice(9)));
+      body = arPage([arRow({ num: "8900042", code: "000000008903653", subject: "cud", date: "2026-04-21", testi: "cud" })]).replace('"maxResults":[210]', '"maxResults":[1]');
+    }
+    return { ok: true, status: 200, text: async () => body };
+  };
+  const logs = [];
+  const ar = makeAr({ fetch: fetchImpl, log: (m) => logs.push(m) });
+  ar.setCentre("PAOW");
+  const info = {};
+  const rows = await ar.search({ text: "", filters: { ...emptyArFilters(), groupIn: "50454", statoBase: "C", operator: { id: "000000000100001", label: "VERDI LAURA" } } }, info);
+  assert.equal(rows.length, 1);
+  assert.equal(queries[0], "IdCenSer:PAOW and IdOperatore:000000000100001 and StatoBase:C and ( IdGruppoIn:50454 or IdGruppoIn:50454.0 )");
+  assert.equal(info.query, queries[0]);
+  assert.equal(info.max, 1);
+  assert.equal(info.raw, 1);
+  assert.ok(logs.some((l) => /IdOperatore:…/.test(l) && !/100001/.test(l)), "nel registro la ricerca compare senza i codici delle persone");
+  // con un numero i filtri della scheda non si mandano
+  await ar.search({ ticketId: "8900042", filters: { ...emptyArFilters(), statoBase: "C" } });
+  assert.equal(queries[1], "IdCenSer:PAOW and NumTic:8900042");
+  assert.deepEqual(await ar.search({ text: "", filters: emptyArFilters() }), [], "niente parole e niente filtri: nessuna richiesta");
+  assert.equal(queries.length, 2);
 });

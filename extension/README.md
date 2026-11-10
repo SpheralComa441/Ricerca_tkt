@@ -41,11 +41,13 @@ Sopra l'elenco ci sono tre schede, ognuna con il suo colore e il numero di ticke
 | Scheda | Che cos'è | Come si cerca |
 |---|---|---|
 | **HDA Touch** (blu) | I ticket di HDA TOUCH | Parole, numero e tutti i filtri a sinistra |
-| **Vecchio Cruscotto** (arancio) | La ricerca per parole dell'Area Riservata (anni recenti) | Parole, numero, oggetto, data di apertura, gruppo |
+| **Vecchio Cruscotto** (arancio) | La *Ricerca rapida* dell'Area Riservata (anni recenti) | Parole e numero dalla casella in alto, più i suoi filtri a sinistra: periodo, stato, gruppo e operatore che hanno in carico il ticket, cliente, gruppo e operatore che hanno partecipato. Si può cercare anche solo con i filtri |
 | **Storico** (viola) | La *Ricerca avanzata* dell'Area Riservata: tutti i ticket, anche prima del 2024 | Numero ticket, periodo (riferito all'ultimo aggiornamento o all'apertura), stato aperto/chiuso, codice cliente, gruppo, operatore. **Non cerca per parole** (nel portale i campi oggetto e testo sono disattivati) |
 
 - **Numero ticket** nella casella in alto: si cerca nelle tre fonti insieme. Il ticket si apre da solo e la scheda passa a quella della sua fonte. Se il ticket c'è solo nello Storico si apre da lì.
 - **Parole** nella casella in alto: si cercano in HDA Touch e nel Vecchio Cruscotto. La scheda Storico lo dice e propone i suoi filtri.
+- **Ogni scheda ha i suoi filtri**: quelli a sinistra cambiano con la scheda e valgono solo per quella fonte. Cambiare un filtro rifà la ricerca solo lì e non fa cambiare scheda. Solo una nuova ricerca dalla casella in alto può portare da sola alla scheda che ha trovato qualcosa.
+- **Scheda Vecchio Cruscotto**: i filtri sono quelli della Ricerca rapida del portale. «Gruppo che ha partecipato» trova i ticket a cui un gruppo ha lavorato anche se ora li ha in carico un altro. Il periodo va a mesi interi e si riferisce all'ultimo aggiornamento o all'apertura. Il portale restituisce al massimo 210 ticket per ricerca (i più rilevanti): quando succede un avviso lo dice. Con un numero ticket nella casella i filtri non contano. *Excel* scarica i ticket in elenco.
 - **Scheda Storico**: a sinistra compaiono i suoi filtri. Di partenza il periodo è «fino al 2023» (i ticket che il Vecchio Cruscotto non mostra più); con *Tutti gli anni* si cerca su tutto. Senza nessun filtro non parte nessuna ricerca.
 - Se la scheda aperta resta vuota e un'altra fonte ha trovato qualcosa, l'app passa da sola a quella.
 - **Centro servizi**: Vecchio Cruscotto e Storico cercano solo tra i ticket del tuo centro (es. `PAOW`); i partner usano lo stesso cruscotto con un loro centro, e i loro ticket non devono comparire. L'app legge il centro dal modulo di ricerca del portale (lo stesso da cui lo prende il portale); di riserva lo ricava dai ticket del tuo gruppo di Touch (`G10663HR` → gruppo 10663), oppure lo si scrive in *Diagnostica → Impostazioni → Centro servizi dell'Area Riservata*. Cercando parole, i ticket di un altro centro vengono comunque scartati. Senza centro le parole si cercherebbero in tutti i centri (ticket dei partner compresi): in quel caso un avviso lo dice. Un numero ticket si cerca comunque anche fuori dal centro.
@@ -72,7 +74,7 @@ Scrivi il numero nella barra principale (vanno bene anche `#`, `tk`, `ticket n.`
 | `9876543` (7 cifre) | `9876543` (migrato) e `9876543Z` (nativo), in parallelo | `NumTic:9876543` |
 | `9876543Z` (Z scritta) | solo `9876543Z` | non interrogato |
 
-- I ticket di Touch **con la Z** e quelli del **Vecchio Cruscotto** con le stesse cifre sono ticket diversi: ognuno compare nella scheda della sua fonte e un avviso lo segnala. Un ticket di Touch **senza Z** (migrato) che c'è anche nel Vecchio Cruscotto diventa una riga sola.
+- I ticket di Touch **con la Z** e quelli del **Vecchio Cruscotto** con le stesse cifre sono ticket diversi: ognuno compare nella scheda della sua fonte e un avviso lo segnala. Un ticket di Touch **senza Z** (migrato) che c'è anche nel Vecchio Cruscotto compare in tutte e due le schede.
 - Si apre da solo il ticket nella forma scritta (7 cifre senza Z → prima il ticket senza Z, poi quello di Touch con la Z); con la Z scritta, sempre quello di Touch.
 - Cliccando una riga del Vecchio Cruscotto si legge quel ticket (non un ticket di Touch con le stesse cifre).
 - Un numero ticket nella casella porta solo a quel ticket e **non tiene conto dei filtri a sinistra**: quando scegli un filtro (gruppo, stato, cliente…) il numero rimasto da una ricerca precedente si toglie da solo, e se scrivi un numero con dei filtri già scelti un avviso lo ricorda (*Togli il numero*).
@@ -91,7 +93,7 @@ Scrivi il numero nella barra principale (vanno bene anche `#`, `tk`, `ticket n.`
 - Quando la ricerca nei messaggi di Touch (che copre anche l'oggetto) ha risposto, quella sull'oggetto non si aspetta più: su tutto lo storico può arrivare al timeout di 25 s.
 - Se all'avvio i ticket aperti di tutti i gruppi vanno in timeout, per 12 ore l'app parte direttamente dai ticket aperti del tuo gruppo (senza aspettare di nuovo i 25 s).
 - Aprendo un ticket dall'elenco, dati, conversazione e allegati si caricano insieme.
-- Nel Vecchio Cruscotto si cerca con testo, oggetto, data di apertura e **Gruppo di lavoro** (il gruppo Touch `G10663HR` è `IdGruppo:10663`); con filtri che lì non esistono (stato, persone, cliente…) si cerca solo in Touch e l'app lo dice.
+- I filtri di HDA Touch non valgono nel Vecchio Cruscotto, che ha i suoi. Nei suoi filtri i gruppi si scelgono per nome: il gruppo di Touch `G10663HR` è il gruppo `10663` dell'Area Riservata.
 
 ## Auto-apprendimento dei filtri e Diagnostica
 

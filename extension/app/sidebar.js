@@ -252,20 +252,79 @@ function renderStoricoSidebar(ctx) {
     }), "Si possono scegliere gli operatori già comparsi nei risultati dello Storico.")));
 }
 
+/** Filtri della scheda Vecchio Cruscotto: quelli della «Ricerca rapida» dell'Area Riservata. Le parole si scrivono nella casella in alto. */
+function renderArSidebar(ctx) {
+  const f = ctx.S.arS.filters;
+  const el = clear(document.getElementById("sidebar"));
+  el.dataset.source = "ar";
+  el.appendChild(h("div", { class: "side-head" }, h("h2", null, "Filtri Vecchio Cruscotto"), h("button", { class: "linkbtn", onclick: () => ctx.arReset() }, "Azzera tutto")));
+  el.appendChild(h("div", { class: "side-note src-ar" },
+    "Sono i filtri della Ricerca rapida dell'Area Riservata. Le parole si scrivono nella casella in alto; si può cercare anche solo con i filtri. Il portale restituisce al massimo 210 ticket per ricerca."));
+
+  const okDay = (v) => v === "" || /^(19[89]\d|20\d\d)-\d\d-\d\d$/.test(v);
+  const day = (key, label) => {
+    const inp = h("input", { class: "input", type: "date", value: f[key] || "", "aria-label": label });
+    inp.addEventListener("change", () => okDay(inp.value) && inp.value !== (f[key] || "") && ctx.arSetFilter(key, inp.value));
+    return inp;
+  };
+  const p2 = (n) => String(n).padStart(2, "0");
+  const iso = (d) => `${d.getFullYear()}-${p2(d.getMonth() + 1)}-${p2(d.getDate())}`;
+  const now = new Date();
+  const y = now.getFullYear();
+  // come nel portale: gli ultimi tre mesi sono il mese in corso e i due precedenti
+  const presets = [
+    ["Ultimi 3 mesi", { dateFrom: iso(new Date(y, now.getMonth() - 2, 1)), dateTo: iso(new Date(y, now.getMonth() + 1, 0)) }],
+    [String(y), { dateFrom: `${y}-01-01`, dateTo: `${y}-12-31` }],
+    [String(y - 1), { dateFrom: `${y - 1}-01-01`, dateTo: `${y - 1}-12-31` }],
+    ["Tutto", { dateFrom: "", dateTo: "" }],
+  ];
+  const seg = (key, options, def) => h("div", { class: "seg" },
+    options.map(([v, name]) => h("button", { type: "button", class: "preset" + ((f[key] || def) === v ? " on" : ""), onclick: () => (f[key] || def) !== v && ctx.arSetFilter(key, v) }, name)));
+  const one = (v) => (v ? [v] : []);
+  const groupField = (key, labelKey, placeholder) => tokenInput({
+    values: one(f[key] ? { id: f[key], label: f[labelKey] || ctx.S.stLookups.groups[f[key]] || f[key] } : null),
+    placeholder,
+    onChange: (v) => { const g = v[v.length - 1]; ctx.arSetFilter({ [key]: g ? g.id : "", [labelKey]: g ? g.label : "" }); },
+    search: (q) => ctx.storicoLookup("groups", q),
+  });
+  const operatorField = (key) => tokenInput({
+    values: one(f[key]),
+    placeholder: "Nome operatore…",
+    onChange: (v) => ctx.arSetFilter(key, v[v.length - 1] || null),
+    search: (q) => ctx.storicoLookup("operators", q),
+  });
+  const client = h("input", { class: "input", type: "text", inputmode: "numeric", value: f.clientCode || "", placeholder: "es. 1234" });
+  const applyClient = () => client.value.replace(/\D/g, "") !== (f.clientCode || "") && ctx.arSetFilter("clientCode", client.value.replace(/\D/g, ""));
+  client.addEventListener("change", applyClient);
+  client.addEventListener("keydown", (e) => e.key === "Enter" && (e.preventDefault(), applyClient()));
+
+  el.appendChild(h("div", { class: "fbody plain" },
+    field("Periodo (dal – al)",
+      h("div", null,
+        h("div", { class: "row2" }, day("dateFrom", "dal"), day("dateTo", "al")),
+        h("div", { class: "presets" }, presets.map(([name, val]) =>
+          h("button", { type: "button", class: "preset" + (f.dateFrom === val.dateFrom && f.dateTo === val.dateTo ? " on" : ""), onclick: () => ctx.arSetFilter(val) }, name)))),
+      "Il portale ragiona a mesi interi: conta il mese delle date scelte. «Tutto» = gli anni che il Vecchio Cruscotto ha ancora."),
+    field("Il periodo si riferisce a", seg("dateRef", [["1", "Ultimo aggiornamento"], ["2", "Apertura"]], "1")),
+    field("Stato", seg("statoBase", [["", "Tutti"], ["A", "Aperti"], ["C", "Chiusi"]], "")),
+    field("Gruppo che ha in carico il ticket", groupField("group", "groupLabel", "es. Paghe Infinity…")),
+    field("Operatore che ha in carico il ticket", operatorField("operator")),
+    field("Cliente (codice)", client, "Il codice dell'azienda, come nella Ricerca rapida del portale."),
+    field("Gruppo che ha partecipato", groupField("groupIn", "groupInLabel", "es. Paghe Infinity - Test…"), "Trova i ticket a cui il gruppo ha lavorato, anche se ora li ha in carico un altro."),
+    field("Operatore che ha partecipato", operatorField("operatorIn"), "Si possono scegliere gli operatori già comparsi nei ticket letti o nello Storico."),
+    field("Le parole si cercano in", seg("searchIn", [["2", "Testo e oggetto"], ["0", "Solo testo"], ["1", "Solo oggetto"]], "2"))));
+}
+
 export function renderSidebar(ctx) {
   const { S, ui } = ctx;
   if (S.tab === "storico") return renderStoricoSidebar(ctx);
+  if (S.tab === "ar") return renderArSidebar(ctx);
   const f = S.filters;
   const el = clear(document.getElementById("sidebar"));
-  el.dataset.source = S.tab === "ar" ? "ar" : "touch";
+  el.dataset.source = "touch";
   const n = (...keys) => keys.reduce((a, k) => a + (Array.isArray(f[k]) ? f[k].length : f[k] ? 1 : 0), 0);
 
   el.appendChild(h("div", { class: "side-head" }, h("h2", null, "Filtri"), h("button", { class: "linkbtn", onclick: () => ctx.resetFilters() }, "Azzera tutto")));
-  if (S.tab === "ar") {
-    el.appendChild(h("div", { class: "side-note src-ar" },
-      "Nel Vecchio Cruscotto valgono le parole della casella in alto, «L'oggetto contiene», la data di apertura e il Gruppo di lavoro. Gli altri filtri esistono solo in HDA Touch."));
-  }
-
   if (S.saved.length) {
     el.appendChild(section("saved", "Ricerche salvate", 0, ui.openSections.saved ?? true,
       h("div", { class: "presets" }, S.saved.map((s, i) => h("span", { class: "chip" },

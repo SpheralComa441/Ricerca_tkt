@@ -52,6 +52,27 @@ export function extractMcidFromHtml(html) {
   };
 }
 
+/**
+ * Filtri della scheda Vecchio Cruscotto: quelli della «Ricerca rapida» dell'Area Riservata.
+ * dateRef: a quale data si riferisce il periodo ("1" ultimo aggiornamento, "2" apertura); statoBase: "" tutti, "A" aperti, "C" chiusi;
+ * group/operator: chi ha in carico il ticket; groupIn/operatorIn: chi vi ha partecipato; searchIn: "2" testo e oggetto, "0" testo, "1" oggetto.
+ */
+export function emptyArFilters() {
+  return { dateFrom: "", dateTo: "", dateRef: "1", statoBase: "", group: "", groupLabel: "", groupIn: "", groupInLabel: "", operator: null, operatorIn: null, clientCode: "", searchIn: "2" };
+}
+
+/** Vero se c'è almeno un filtro: allora si può cercare anche senza parole. */
+export function hasArFilter(f) {
+  if (!f) return false;
+  return !!(f.dateFrom || f.dateTo || f.statoBase || f.group || f.groupIn || (f.operator && f.operator.id) || (f.operatorIn && f.operatorIn.id) || String(f.clientCode || "").trim());
+}
+
+/** Codice di cliente o operatore → identificativo a 15 cifre del portale ("1234" → "000000000001234"). */
+function id15(v) {
+  const d = String(v || "").replace(/\D/g, "");
+  return d ? d.padStart(15, "0").slice(-15) : "";
+}
+
 function fmtSolrTerm(w) {
   const clean = String(w || "").replace(/[()"\\:]/g, " ").trim();
   if (!clean) return "";
@@ -76,6 +97,14 @@ export function buildArQuery({
   groups = [],
   defaultYears = false,
   wideTicketId = false,
+  // filtri della Ricerca rapida (con un numero ticket non contano)
+  dateRef = "2",
+  statoBase = "",
+  operator = "",
+  clientCode = "",
+  groupsIn = [],
+  operatorIn = "",
+  searchIn = "2",
 } = {}) {
   const parts = [];
   const safe = (w) => String(w || "").replace(/[()"\\:]/g, " ").trim();
@@ -84,25 +113,34 @@ export function buildArQuery({
     parts.push(`IdCenSer:${safe(idCenSer)}`);
   }
 
-  if (dateFrom || dateTo) {
+  const D = dateRef === "1" ? "M" : "A";
+  let hasPeriod = false;
+  if (ticketId) {
+    // un numero ticket si cerca su tutti gli anni
+  } else if (dateFrom || dateTo) {
+    hasPeriod = true;
     const df = dateFrom ? new Date(dateFrom) : null;
     const dt = dateTo ? new Date(dateTo) : null;
-    const yStart = df && !isNaN(df) ? df.getFullYear() : dt && !isNaN(dt) ? dt.getFullYear() : null;
-    const mStart = df && !isNaN(df) ? df.getMonth() + 1 : 1;
-    const yEnd = dt && !isNaN(dt) ? dt.getFullYear() : df && !isNaN(df) ? df.getFullYear() : null;
-    const mEnd = dt && !isNaN(dt) ? dt.getMonth() + 1 : 12;
+    // solo «dal»: fino a oggi; solo «al»: dai due anni prima (gli anni che il Vecchio Cruscotto ha ancora)
+    const okFrom = df && !isNaN(df);
+    const okTo = dt && !isNaN(dt);
+    const now = new Date();
+    const yEnd = okTo ? dt.getFullYear() : okFrom ? Math.max(now.getFullYear(), df.getFullYear()) : null;
+    const mEnd = okTo ? dt.getMonth() + 1 : okFrom && df.getFullYear() > now.getFullYear() ? 12 : now.getMonth() + 1;
+    const yStart = okFrom ? df.getFullYear() : okTo ? dt.getFullYear() - 2 : null;
+    const mStart = okFrom ? df.getMonth() + 1 : 1;
     if (yStart && yEnd && (yEnd - yStart) * 12 + (mEnd - mStart) <= 36) {
       const mParts = [];
       for (let y = yStart; y <= yEnd; y++) {
         const m1 = y === yStart ? mStart : 1;
         const m2 = y === yEnd ? mEnd : 12;
-        for (let m = m1; m <= m2; m++) mParts.push(`(IdMeseA:${m} and IdAnnoA:${y})`);
+        for (let m = m1; m <= m2; m++) mParts.push(`(IdMese${D}:${m} and IdAnno${D}:${y})`);
       }
       if (mParts.length) parts.push(`( ${mParts.join(" or ")} )`);
     } else if (yStart && yEnd && yEnd >= yStart) {
-      // periodo lungo: si filtra per anno di apertura (IdAnnoA), come i mesi qui sopra (IdMeseA/IdAnnoA)
+      // periodo lungo: si filtra per anno, come i mesi qui sopra
       const yParts = [];
-      for (let y = Math.max(2015, yStart); y <= yEnd; y++) yParts.push(`(IdAnnoA:${y} )`);
+      for (let y = Math.max(2015, yStart); y <= yEnd; y++) yParts.push(`(IdAnno${D}:${y} )`);
       if (yParts.length) parts.push(`( ${yParts.join(" or ")} )`);
     }
   } else if (defaultYears && !ticketId) {
@@ -119,7 +157,10 @@ export function buildArQuery({
   } else if (text) {
     for (const w of queryTerms(text)) {
       const sw = fmtSolrTerm(w);
-      if (sw) contentParts.push(`( Testi:(${sw}) or Oggetto:(${sw}) )`);
+      if (!sw) continue;
+      if (searchIn === "0") contentParts.push(`Testi:(${sw})`);
+      else if (searchIn === "1") contentParts.push(`Oggetto:(${sw})`);
+      else contentParts.push(`( Testi:(${sw}) or Oggetto:(${sw}) )`);
     }
   }
 
@@ -130,12 +171,26 @@ export function buildArQuery({
     }
   }
 
-  if (!contentParts.length) return "";
-  // gruppo (es. "IdGruppo:10663", lo stesso filtro che usa la Ricerca rapida dell'Area Riservata)
-  const grp = (groups || []).map((g) => String(g || "").replace(/\D/g, "")).filter(Boolean);
-  if (grp.length === 1) contentParts.push(`IdGruppo:${grp[0]}`);
-  else if (grp.length > 1) contentParts.push(`( ${grp.map((g) => `IdGruppo:${g}`).join(" or ")} )`);
-  return [...parts, ...contentParts].join(" and ");
+  // Filtri della Ricerca rapida, con i nomi dei campi del portale. Nella ricerca reale del portale:
+  //   … and ( Testi:(parola) or Oggetto:(parola) ) and IdOperatore:000000000123456 and IdCliente:000000000001234
+  const filterParts = [];
+  const nums = (list) => (list || []).map((g) => String(g || "").replace(/\D/g, "")).filter(Boolean);
+  // gruppo che ha in carico il ticket (es. "IdGruppo:10663")
+  const grp = nums(groups);
+  if (grp.length === 1) filterParts.push(`IdGruppo:${grp[0]}`);
+  else if (grp.length > 1) filterParts.push(`( ${grp.map((g) => `IdGruppo:${g}`).join(" or ")} )`);
+  if (!ticketId) {
+    if (id15(operator)) filterParts.push(`IdOperatore:${id15(operator)}`);
+    if (id15(clientCode)) filterParts.push(`IdCliente:${id15(clientCode)}`);
+    if (statoBase === "A" || statoBase === "C") filterParts.push(`StatoBase:${statoBase}`);
+    // gruppi che hanno partecipato: nell'indice sono scritti come numeri con il decimale ("10663.0 50454.0"), quindi si cercano entrambe le forme
+    const gin = nums(groupsIn).map((g) => `IdGruppoIn:${g} or IdGruppoIn:${g}.0`);
+    if (gin.length) filterParts.push(`( ${gin.join(" or ")} )`);
+    if (id15(operatorIn)) filterParts.push(`IdOperatoreIn:${id15(operatorIn)}`);
+  }
+  // senza parole si cerca solo se c'è almeno un filtro (o un periodo scelto): mai tutto il centro servizi
+  if (!contentParts.length && !filterParts.length && !hasPeriod) return "";
+  return [...parts, ...contentParts, ...filterParts].join(" and ");
 }
 
 function parseArDate(str) {
@@ -595,15 +650,23 @@ export function makeAr({ log = () => {}, fetch: fetchImpl = globalThis.fetch } =
     return { connected: false };
   }
 
-  async function rawQuery(query) {
+  /** info (facoltativo) riceve: max = quanti ticket al massimo restituisce il portale per ricerca, raw = quanti ne ha restituiti. */
+  async function rawQuery(query, info = {}) {
     if (!query) return [];
     const t0 = Date.now();
+    const read = (text) => {
+      const json = extractArJson(text);
+      const rows = parseArResponse(json || text);
+      info.max = Number(json && Array.isArray(json.maxResults) ? json.maxResults[0] : 0) || 0;
+      info.raw = rows.length;
+      return rows;
+    };
     const viaTab = await sendBridge({ cmd: "search", query, pArea: state.pArea });
     if (viaTab && viaTab.ok && viaTab.text) {
       if (viaTab.mcid) state.mcid = viaTab.mcid;
       if (viaTab.pArea) state.pArea = viaTab.pArea;
       if (viaTab.idCenSer) state.idCenSer = viaTab.idCenSer;
-      const rows = parseArResponse(viaTab.text);
+      const rows = read(viaTab.text);
       state.connected = true;
       log(`vecchio cruscotto: ${rows.length} risultati (${Date.now() - t0} ms, scheda)`);
       return rows;
@@ -634,42 +697,46 @@ export function makeAr({ log = () => {}, fetch: fetchImpl = globalThis.fetch } =
       state.mcid = null;
       if (await discoverDirect()) text = await doDirectPost();
     }
-    const rows = parseArResponse(text);
+    const rows = read(text);
     state.connected = true;
     log(`vecchio cruscotto: ${rows.length} risultati (${Date.now() - t0} ms, direct)`);
     return rows;
   }
 
-  async function search({ text = "", subject = "", ticketId = "", dateFrom = "", dateTo = "", groups = [] } = {}) {
-    const q1 = buildArQuery({
+  /**
+   * filters: i filtri della scheda Vecchio Cruscotto (emptyArFilters). Con un numero ticket non contano.
+   * info (facoltativo) riceve la ricerca mandata al portale (query) e il suo limite di risultati (max, raw).
+   */
+  async function search({ text = "", subject = "", ticketId = "", dateFrom = "", dateTo = "", groups = [], filters = null } = {}, info = {}) {
+    const F = filters && !ticketId ? filters : {};
+    const base = {
       text,
       subject,
       ticketId,
-      dateFrom,
-      dateTo,
-      groups,
-      idCenSer: state.idCenSer,
+      dateFrom: F.dateFrom || dateFrom,
+      dateTo: F.dateTo || dateTo,
+      dateRef: filters ? F.dateRef || "1" : "2",
+      groups: F.group ? [F.group] : groups,
+      statoBase: F.statoBase || "",
+      operator: (F.operator && F.operator.id) || "",
+      clientCode: F.clientCode || "",
+      groupsIn: F.groupIn ? [F.groupIn] : [],
+      operatorIn: (F.operatorIn && F.operatorIn.id) || "",
+      searchIn: F.searchIn || "2",
       defaultYears: false,
-    });
+    };
+    const q1 = buildArQuery({ ...base, idCenSer: state.idCenSer });
     if (!q1) return [];
-    let rows = await rawQuery(q1);
+    info.query = q1;
+    if (!ticketId) log(`vecchio cruscotto, ricerca: ${q1.replace(/\b(Id(?:Operatore|OperatoreIn|Cliente)):\d+/g, "$1:…")}`);
+    let rows = await rawQuery(q1, info);
     if (!rows.length && ticketId) {
       // Solo per un numero ticket: si riprova senza il centro servizi e cercando il numero anche nel testo dei messaggi.
       // Per le parole no: fuori dal proprio centro si troverebbero i ticket degli altri centri (partner compresi).
-      const q2 = buildArQuery({
-        text,
-        subject,
-        ticketId,
-        dateFrom,
-        dateTo,
-        groups,
-        idCenSer: "",
-        defaultYears: false,
-        wideTicketId: !!ticketId,
-      });
-      if (q2 && q2 !== q1) rows = await rawQuery(q2);
+      const q2 = buildArQuery({ ...base, idCenSer: "", wideTicketId: true });
+      if (q2 && q2 !== q1) rows = await rawQuery(q2, info);
     }
-    // I partner usano lo stesso cruscotto con un loro centro servizi: cercando parole restano solo i ticket del proprio centro
+    // I partner usano lo stesso cruscotto con un loro centro servizi: senza un numero restano solo i ticket del proprio centro
     if (!ticketId && state.idCenSer) rows = rows.filter((r) => !r.cenSer || r.cenSer === state.idCenSer);
     // Se si cercano più parole, verifichiamo che TUTTE le parole compaiano nel ticket (oggetto, testo completo o riepilogo)
     const allWords = [...queryTerms(text), ...queryTerms(subject)];
