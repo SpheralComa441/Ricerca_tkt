@@ -16,7 +16,9 @@ export async function runProbe(hda, { onStep = () => {}, sampleTicketId = null, 
       s.ok = true;
       s.detail = d || "";
     } catch (e) {
-      s.detail = e.message + (e.info && e.info.sample ? " — " + String(e.info.sample).slice(0, 160) : "");
+      // nel rapporto solo il messaggio d'errore; l'estratto della risposta del portale (può contenere dati) resta nel registro
+      s.detail = e.message;
+      if (e.info && e.info.sample) log(`diagnostica ${name}: risposta ${String(e.info.sample).slice(0, 160)}`);
     }
     s.ms = Date.now() - t0;
     log(`diagnostica ${s.ok ? "✓" : "✗"} ${name}: ${s.detail} (${s.ms} ms)`);
@@ -45,7 +47,8 @@ export async function runProbe(hda, { onStep = () => {}, sampleTicketId = null, 
     if (!rows[0]) throw new Error("nessuna riga");
     ticketId = rows[0].ID;
     sampleSubject = rows[0].Subject || "";
-    return `ID ${ticketId}, richiesta: ${String(rows[0].ProblemHTML || rows[0].Problem || "").length} caratteri`;
+    log(`diagnostica: ticket di prova ${ticketId}`);
+    return `ticket trovato, richiesta: ${String(rows[0].ProblemHTML || rows[0].Problem || "").length} caratteri`;
   });
 
   await step("Elenco ticket (ListData su 1 ticket)", async () => {

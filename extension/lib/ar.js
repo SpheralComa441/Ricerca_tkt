@@ -55,6 +55,7 @@ export function buildArQuery({
   dateFrom = "",
   dateTo = "",
   idCenSer = "",
+  groups = [],
   defaultYears = false,
   wideTicketId = false,
 } = {}) {
@@ -81,8 +82,9 @@ export function buildArQuery({
       }
       if (mParts.length) parts.push(`( ${mParts.join(" or ")} )`);
     } else if (yStart && yEnd && yEnd >= yStart) {
+      // periodo lungo: si filtra per anno di apertura (IdAnnoA), come i mesi qui sopra (IdMeseA/IdAnnoA)
       const yParts = [];
-      for (let y = Math.max(2015, yStart); y <= yEnd; y++) yParts.push(`(IdAnnoM:${y} )`);
+      for (let y = Math.max(2015, yStart); y <= yEnd; y++) yParts.push(`(IdAnnoA:${y} )`);
       if (yParts.length) parts.push(`( ${yParts.join(" or ")} )`);
     }
   } else if (defaultYears && !ticketId) {
@@ -111,6 +113,10 @@ export function buildArQuery({
   }
 
   if (!contentParts.length) return "";
+  // gruppo (es. "IdGruppo:10663", lo stesso filtro che usa la Ricerca rapida dell'Area Riservata)
+  const grp = (groups || []).map((g) => String(g || "").replace(/\D/g, "")).filter(Boolean);
+  if (grp.length === 1) contentParts.push(`IdGruppo:${grp[0]}`);
+  else if (grp.length > 1) contentParts.push(`( ${grp.map((g) => `IdGruppo:${g}`).join(" or ")} )`);
   return [...parts, ...contentParts].join(" and ");
 }
 
@@ -226,7 +232,8 @@ export function parseArResponse(raw) {
       catalog: product,
       date,
       lastChange: date,
-      statusId: isClosed ? "S8" : "AR",
+      // S5 = "Chiuso" di Touch (S8 è "Feedback/Risposta ricevuta", uno stato aperto)
+      statusId: isClosed ? "S5" : "AR",
       statusText,
       typeId: tipologia || "AR",
       typeText: tipologia ? `${tipologia} · Vecchio cruscotto` : "Vecchio cruscotto",
@@ -481,6 +488,10 @@ export function buildArTicket({ id, row = null, detail = null } = {}) {
 export function makeAr({ log = () => {}, fetch: fetchImpl = globalThis.fetch } = {}) {
   const inExt = typeof chrome !== "undefined" && !!(chrome.runtime && chrome.runtime.id);
   const state = { connected: null, mcid: null, pArea: "TICKOPEXXX", idCenSer: "" };
+  // dopo un collegamento diretto fallito non si riprova a ogni ricerca (sono 2-4 richieste in più):
+  // si riprova dopo un minuto, o subito con checkStatus (al ritorno sulla scheda dell'app)
+  const DIRECT_RETRY_MS = 60 * 1000;
+  let directFailedAt = 0;
 
   async function sendBridge(payload) {
     if (!inExt) return { error: "no-ext" };
@@ -532,12 +543,15 @@ export function makeAr({ log = () => {}, fetch: fetchImpl = globalThis.fetch } =
     }
     if (state.mcid) {
       state.connected = true;
+      directFailedAt = 0;
       return true;
     }
+    directFailedAt = Date.now();
     return false;
   }
 
   async function checkStatus() {
+    directFailedAt = 0;
     const res = await sendBridge({ cmd: "status" });
     if (res && res.ok && res.mcid) {
       state.mcid = res.mcid;
@@ -567,7 +581,7 @@ export function makeAr({ log = () => {}, fetch: fetchImpl = globalThis.fetch } =
       return rows;
     }
 
-    if (!state.mcid) await discoverDirect();
+    if (!state.mcid && (!directFailedAt || Date.now() - directFailedAt > DIRECT_RETRY_MS)) await discoverDirect();
     if (!state.mcid || !fetchImpl) {
       state.connected = false;
       throw new Error("Vecchio cruscotto non collegato");
@@ -598,13 +612,14 @@ export function makeAr({ log = () => {}, fetch: fetchImpl = globalThis.fetch } =
     return rows;
   }
 
-  async function search({ text = "", subject = "", ticketId = "", dateFrom = "", dateTo = "" } = {}) {
+  async function search({ text = "", subject = "", ticketId = "", dateFrom = "", dateTo = "", groups = [] } = {}) {
     const q1 = buildArQuery({
       text,
       subject,
       ticketId,
       dateFrom,
       dateTo,
+      groups,
       idCenSer: state.idCenSer,
       defaultYears: false,
     });
@@ -618,6 +633,7 @@ export function makeAr({ log = () => {}, fetch: fetchImpl = globalThis.fetch } =
         ticketId,
         dateFrom,
         dateTo,
+        groups,
         idCenSer: "",
         defaultYears: false,
         wideTicketId: !!ticketId,
@@ -648,8 +664,9 @@ export function makeAr({ log = () => {}, fetch: fetchImpl = globalThis.fetch } =
   async function loadTicket(id, { row = null } = {}) {
     const num = ticketNumber(id);
     if (!row || (!row.fullText && !row.arUrl && !row.problem)) {
+      // solo il ticket con quel numero: gli altri risultati (che citano il numero nel testo) sono ticket diversi
       const found = await search({ ticketId: num });
-      const exact = found.find((r) => r.id === num) || found[0] || null;
+      const exact = found.find((r) => r.id === num) || null;
       if (exact) row = { ...(row || {}), ...exact };
     }
     if (!row) throw new Error(`Ticket #${num} non trovato nel Vecchio Cruscotto`);

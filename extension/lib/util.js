@@ -92,47 +92,85 @@ export function escapeHtml(s) {
   return String(s ?? "").replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" })[c]);
 }
 
+/** Toglie i prefissi con cui si scrive a mano un numero ticket: "#", "tk", "tkt", "ticket", "n.", "nr." e combinazioni. */
+function stripTicketPrefix(q) {
+  return String(q || "")
+    .trim()
+    .replace(/^(?:(?:tkt?|ticket|segnalazione)\.?\s*)?(?:(?:n|nr|num)\.?\s*)?[:#-]?\s*(?=\d)/i, "")
+    .trim();
+}
+
 /**
  * Numero ticket scritto dall'utente → ID principale.
- * Su HDA TOUCH i ticket nativi a 8+ cifre hanno il suffisso "Z" (es. "11943209Z"),
- * mentre i ticket a 5-7 cifre (es. "9042633") hanno l'ID numerico puro senza "Z".
+ * Su HDA TOUCH i ticket nativi hanno il suffisso "Z" (8 cifre come "11943209Z", ma anche i più vecchi a
+ * 7 cifre come "9876543Z"); i ticket migrati dal Vecchio Cruscotto hanno l'ID numerico puro (es. "9042633").
+ *  - "11943209" (8+ cifre senza Z)  → "11943209Z"
+ *  - "9042633"  (5-7 cifre senza Z) → "9042633" (si provano comunque anche "9042633Z" e il Vecchio Cruscotto)
+ *  - "9876543Z" (Z scritta)         → "9876543Z" (la Z scritta dall'utente non si perde)
  */
 export function ticketIdFrom(q) {
-  const s = String(q || "").trim().replace(/^#/, "");
+  const s = stripTicketPrefix(q);
   const m = /^(\d{5,10})([A-Za-z]?)$/.exec(s);
   if (!m) return null;
   const suffix = m[2].toUpperCase();
-  if (suffix && suffix !== "Z") return m[1] + suffix;
+  if (suffix) return m[1] + suffix;
   return m[1].length >= 8 ? m[1] + "Z" : m[1];
 }
 
 /** "10500123Z" → "10500123" (come lo scrivono le persone) */
 export function ticketNumber(id) {
-  return String(id || "").trim().replace(/^#/, "").replace(/Z$/i, "");
+  return stripTicketPrefix(id).replace(/Z$/i, "");
 }
 
-/** Restituisce le varianti dell'ID (senza e con "Z") nell'ordine più probabile per HDA TOUCH. */
+/** Vero se l'ID è quello di un ticket nativo di HDA TOUCH (cifre + "Z"). */
+export function isTouchNativeId(id) {
+  return /^\d{5,10}Z$/i.test(String(id || "").trim());
+}
+
+/**
+ * Varianti dell'ID da provare su HDA TOUCH, nell'ordine di preferenza.
+ * Senza "Z" scritta si provano sia "num" sia "numZ" (i ticket Touch a 7 cifre esistono in entrambe le forme);
+ * con la "Z" scritta dall'utente si cerca solo quella (chi la scrive vuole il ticket nativo di Touch).
+ */
 export function ticketIdVariants(idOrQuery) {
   const tid = ticketIdFrom(idOrQuery);
   if (!tid) return [];
+  const typed = stripTicketPrefix(idOrQuery);
   const num = ticketNumber(tid);
   const withZ = `${num}Z`;
+  if (/z$/i.test(typed)) return [withZ];
+  if (!/^\d+$/.test(num) || /[A-Y]$/i.test(tid)) return [tid];
   return tid === withZ ? [withZ, num] : [num, withZ];
 }
 
-/** Vero se il numero di ticket ha 5-7 cifre (tipico del vecchio cruscotto / Area Riservata o migrato senza Z). */
+/**
+ * Vero se il numero (senza "Z") può essere un ticket storico del Vecchio Cruscotto: 5-7 cifre (es. "8900042").
+ * Un numero con la "Z" (es. "9876543Z") è invece un ticket nativo di HDA TOUCH.
+ */
 export function isLegacyTicketNumber(idOrQuery) {
-  const s = String(idOrQuery || "").trim().replace(/^#/, "");
-  const m = /^(\d{5,7})([Zz]?)$/.exec(s);
-  return !!m;
+  return /^\d{5,7}$/.test(stripTicketPrefix(idOrQuery));
 }
 
+/**
+ * Chiave per riconoscere lo stesso ticket nei due cruscotti: i ticket con la "Z" sono nativi di Touch e
+ * restano distinti; un numero puro (Touch migrato o Vecchio Cruscotto) si unisce per numero.
+ */
+export function ticketMergeKey(row) {
+  const id = String((row && row.id) || "").trim();
+  if (!id) return "";
+  if (row && row.source !== "ar" && isTouchNativeId(id)) return "touch:" + id.toUpperCase();
+  return "num:" + ticketNumber(id);
+}
+
+/** Rimanda fn finché non passano ms senza chiamate; .cancel() annulla quella in attesa. */
 export function debounce(fn, ms) {
   let t;
-  return (...a) => {
+  const d = (...a) => {
     clearTimeout(t);
     t = setTimeout(() => fn(...a), ms);
   };
+  d.cancel = () => clearTimeout(t);
+  return d;
 }
 
 export const sleep = (ms) => new Promise((r) => setTimeout(r, ms));

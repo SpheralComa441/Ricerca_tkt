@@ -30,6 +30,11 @@ function tokenInput({ values, onChange, search, placeholder }) {
   }
   function drawSug(loading) {
     clear(sug);
+    // risposta arrivata dopo che si è cliccato altrove: l'elenco non deve riaprirsi da solo
+    if (document.activeElement !== input) {
+      sug.hidden = true;
+      return;
+    }
     sug.hidden = false;
     if (loading && !opts.length) {
       sug.appendChild(h("div", { class: "empty" }, "Cerco…"));
@@ -101,7 +106,11 @@ function textField(ctx, key, placeholder) {
   const inp = h("input", { class: "input", type: "text", value: ctx.S.filters[key] || "", placeholder });
   const apply = debounce(() => ctx.setFilter(key, inp.value), 600);
   inp.addEventListener("input", apply);
-  inp.addEventListener("keydown", (e) => e.key === "Enter" && ctx.setFilter(key, inp.value, true));
+  inp.addEventListener("keydown", (e) => {
+    if (e.key !== "Enter") return;
+    apply.cancel(); // altrimenti la stessa ricerca ripartirebbe dopo 600 ms
+    ctx.setFilter(key, inp.value, true);
+  });
   return inp;
 }
 
@@ -109,8 +118,10 @@ function dateRange(ctx, kFrom, kTo, presets) {
   const f = ctx.S.filters;
   const a = h("input", { class: "input", type: "date", value: f[kFrom] || "", "aria-label": "dal" });
   const b = h("input", { class: "input", type: "date", value: f[kTo] || "", "aria-label": "al" });
-  a.addEventListener("change", () => ctx.setFilter(kFrom, a.value));
-  b.addEventListener("change", () => ctx.setFilter(kTo, b.value));
+  // Chrome manda "change" a ogni cifra dell'anno: si cerca solo con una data completa (anno 1990-2099) o vuota
+  const okDay = (v) => !v || /^(19[89]\d|20\d\d)-\d\d-\d\d$/.test(v);
+  a.addEventListener("change", () => okDay(a.value) && a.value !== (ctx.S.filters[kFrom] || "") && ctx.setFilter(kFrom, a.value));
+  b.addEventListener("change", () => okDay(b.value) && b.value !== (ctx.S.filters[kTo] || "") && ctx.setFilter(kTo, b.value));
   const now = new Date();
   const P = {
     "7 giorni": () => [isoDay(new Date(now.getTime() - 7 * 864e5)), ""],

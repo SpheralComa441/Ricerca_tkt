@@ -1,7 +1,7 @@
 // Lettore del ticket: intestazione, scheda dei dati, allegati (anteprima e scarico), timeline unica della conversazione.
 
 import { h, clear, icon, highlight, toast } from "./dom.js";
-import { fmtDateTime, fmtDate, ticketNumber, tokens, isLegacyTicketNumber, sleep } from "../lib/util.js";
+import { fmtDateTime, fmtDate, ticketNumber, tokens, isLegacyTicketNumber, sleep, debounce } from "../lib/util.js";
 import { statusInfo } from "../lib/statuses.js";
 import { sanitizeHtml, textToFragment, splitQuoted, htmlToText } from "../lib/richtext.js";
 import { timelineText } from "../lib/ticket.js";
@@ -12,6 +12,10 @@ const ROLE_LABEL = { customer: "Cliente", operator: "Operatore", system: "Sistem
 // Cache in memoria degli allegati già scaricati nella sessione (evita di riscaricare se si fa prima Visualizza e poi Scarica)
 const attCache = new Map();
 let activePreviewUrl = null;
+let previewSeq = 0; // anteprima più recente: una risposta lenta di un'anteprima precedente viene scartata
+
+/** Solo indirizzi web veri (gli allegati del Vecchio Cruscotto sono link alla sua pagina) */
+const isWebUrl = (u) => /^https?:\/\//i.test(String(u || ""));
 
 function revokePreviewUrl() {
   if (activePreviewUrl) {
@@ -108,7 +112,7 @@ function triggerBlobDownload(bytes, fileName, contentType) {
 async function downloadAttachment(ctx, att, ticketId, btn = null) {
   if (!att) return;
   if (att.url) {
-    window.open(att.url, "_blank", "noopener");
+    if (isWebUrl(att.url)) window.open(att.url, "_blank", "noopener");
     return;
   }
   const origDisabled = btn ? btn.disabled : false;
@@ -173,10 +177,12 @@ function parseCsvPreview(text, maxRows = 250) {
 
 async function openAttachmentPreview(ctx, att, ticketId) {
   if (!att) return;
-  if (att.url && !ctx.hda) {
-    window.open(att.url, "_blank", "noopener");
+  // allegato del Vecchio Cruscotto: è un link alla sua pagina, non un allegato di Touch
+  if (att.url) {
+    if (isWebUrl(att.url)) window.open(att.url, "_blank", "noopener");
     return;
   }
+  const my = ++previewSeq;
   const dlg = document.getElementById("attDlg");
   if (!dlg) {
     await downloadAttachment(ctx, att, ticketId);
@@ -234,6 +240,7 @@ async function openAttachmentPreview(ctx, att, ticketId) {
 
   try {
     const data = await fetchAttachmentData(ctx, att, ticketId);
+    if (my !== previewSeq || !dlg.open) return; // nel frattempo è stata chiusa o aperta un'altra anteprima
     sizeSpan.textContent = fmtBytes(data.bytes.byteLength);
     clear(viewer);
 
@@ -249,10 +256,13 @@ async function openAttachmentPreview(ctx, att, ticketId) {
       /\.(txt|log|xml|json|sql|ini|cfg|md|properties|inf|rpt)$/.test(fname);
     const isVideo = ["video/mp4", "video/webm", "video/ogg"].includes(mime) || /\.(mp4|webm|ogg)$/.test(fname);
 
-    const blobType = isPdf ? "application/pdf" : data.contentType || "application/octet-stream";
-    activePreviewUrl = URL.createObjectURL(new Blob([data.bytes], { type: blobType }));
+    // HTML e SVG si aprono come testo: un file allegato non deve poter eseguire script
+    const isActive = isHtml || /svg/.test(mime) || fname.endsWith(".svg");
+    const blobType = isPdf ? "application/pdf" : isActive ? "text/plain" : data.contentType || "application/octet-stream";
+    const url = URL.createObjectURL(new Blob([data.bytes], { type: blobType }));
+    activePreviewUrl = url;
     openTabBtn.hidden = false;
-    openTabBtn.onclick = () => window.open(activePreviewUrl, "_blank", "noopener");
+    openTabBtn.onclick = () => window.open(url, "_blank", "noopener");
 
     if (isPdf) {
       viewer.appendChild(
@@ -339,6 +349,7 @@ async function openAttachmentPreview(ctx, att, ticketId) {
     }
   } catch (e) {
     ctx.log && ctx.log(`anteprima allegato ${att.id}: ${e.message}`);
+    if (my !== previewSeq) return;
     clear(viewer);
     viewer.appendChild(
       h(
@@ -457,7 +468,7 @@ export function renderReaderError(ctx, id, row, err) {
   const body = el.querySelector(".rd-body") || el.appendChild(h("div", { class: "rd-body" }));
   const ld = body.querySelector(".loading");
   if (ld) ld.remove();
-  const isLegacy = (err && err.isLegacyTicket) || isLegacyTicketNumber(id) || (row && row.source === "ar");
+  const isLegacy = (err && err.isLegacyTicket) || (row && row.source === "ar") || (isLegacyTicketNumber(id) && !(row && row.source !== "ar" && row.id));
   const num = ticketNumber(id);
   body.appendChild(
     h("div", { class: "err-box" },
@@ -476,21 +487,31 @@ export function renderReaderError(ctx, id, row, err) {
 function header(ctx, id, row, full) {
   const fav = ctx.isFavorite(id);
   const isAr = (row && row.source === "ar") || (full && full.source === "ar");
+  const t = (full && full.ticket) || {};
+  const subject = (row && row.subject) || t.Subject || "";
+  const statusId = (row && row.statusId) || t.TicketStatusID || "";
+  // la copia segue il pulsante «Note interne»: le note nascoste non finiscono negli appunti (e magari in una mail al cliente)
+  const copyText = () => {
+    const entries = (full.timeline || []).filter((e) => ctx.ui.showInternal || !e.internal);
+    navigator.clipboard.writeText(timelineText(entries, `Ticket ${ticketNumber(id)}${subject ? " — " + subject : ""}`));
+    toast(ctx.ui.showInternal ? "Ticket copiato negli appunti" : "Ticket copiato negli appunti (senza note interne)", "ok", 1800);
+  };
   const arUrl = (full && full.arUrl) || (row && row.arUrl) || "";
   const favBtn = h("button", { class: "btn btn-icon" + (fav ? " star-on" : ""), title: fav ? "Togli dai preferiti" : "Aggiungi ai preferiti", onclick: () => { ctx.toggleFavorite(id, row); favBtn.classList.toggle("star-on"); } }, icon("star"));
   return h("div", { class: "rd-head" },
     h("div", { class: "rd-top" },
       h("span", { class: "rd-num", title: "Copia il numero", onclick: () => { navigator.clipboard.writeText(ticketNumber(id)); toast("Numero copiato", "ok", 1500); } }, "#" + ticketNumber(id)),
-      row ? pill(row.statusId, row.statusText) : null,
-      row && row.typeText ? h("span", { class: "tag-mini" }, row.typeText) : null,
+      statusId || (row && row.statusText) ? pill(statusId, row && row.statusText) : null,
+      isAr ? h("span", { class: "tag-mini src-ar", title: "Ticket del Vecchio Cruscotto (Area Riservata)" }, "Vecchio cruscotto") : null,
+      row && row.typeText && !isAr ? h("span", { class: "tag-mini" }, row.typeText) : null,
       h("div", { class: "rd-actions" },
         favBtn,
-        full ? h("button", { class: "btn", title: "Copia tutto il ticket come testo", onclick: () => { navigator.clipboard.writeText(timelineText(full.timeline, `Ticket ${ticketNumber(id)} — ${row ? row.subject : ""}`)); toast("Ticket copiato negli appunti", "ok", 1800); } }, icon("copy"), "Copia") : null,
+        full ? h("button", { class: "btn", title: "Copia tutto il ticket come testo (le note interne solo se visibili)", onclick: copyText }, icon("copy"), "Copia") : null,
         isAr
           ? h("button", { class: "btn", title: "Apri questo ticket nel Vecchio Cruscotto (Area Riservata)", onclick: () => ctx.openArHome && ctx.openArHome(arUrl) }, icon("external"), "Apri nel vecchio cruscotto")
           : h("button", { class: "btn", title: "Apri questo ticket in HDA TOUCH", onclick: () => ctx.openInTouch(id) }, icon("external"), "Apri in Touch"),
         h("button", { class: "btn btn-icon", title: "Chiudi (Esc)", onclick: () => ctx.closeReader() }, icon("close")))),
-    h("h1", { class: "rd-title" }, (row && row.subject) || (full && full.ticket && full.ticket.Subject) || "Ticket " + ticketNumber(id)));
+    h("h1", { class: "rd-title" }, subject || "Ticket " + ticketNumber(id)));
 }
 
 function facts(row, ticket, extraFacts = []) {
@@ -635,7 +656,19 @@ export function renderReader(ctx, full, { fromArchive = null } = {}) {
     const hits = highlight(tl, words.length ? words : tokens(ctx.S.filters.text));
     if (search.value.trim()) search.title = hits ? `${hits} occorrenze` : "Nessuna occorrenza";
   }
-  search.addEventListener("input", () => { ui.readerSearch = search.value; draw(); const m = tl.querySelector("mark"); if (m && search.value.trim()) m.scrollIntoView({ block: "center" }); });
+  // si ridisegna dopo una breve pausa (non a ogni tasto) e si apre il testo citato che contiene la parola trovata
+  const searchNow = debounce(() => {
+    ui.readerSearch = search.value;
+    draw();
+    const marks = [...tl.querySelectorAll("mark")];
+    const m = marks.find((x) => !x.closest("[hidden]")) || marks[0];
+    if (m && search.value.trim()) {
+      const q = m.closest("[hidden]");
+      if (q) q.hidden = false;
+      m.scrollIntoView({ block: "center" });
+    }
+  }, 200);
+  search.addEventListener("input", searchNow);
 
   const btnInternal = h("button", { class: "btn btn-small" + (ui.showInternal ? " on" : ""), title: "Note visibili solo agli operatori", onclick: () => { ui.showInternal = !ui.showInternal; btnInternal.classList.toggle("on", ui.showInternal); ctx.saveUi(); draw(); } }, `Note interne (${nInternal})`);
   const btnOrder = h("button", { class: "btn btn-small", title: "Cambia l'ordine", onclick: () => { ui.newestFirst = !ui.newestFirst; btnOrder.textContent = ui.newestFirst ? "Dal più recente" : "Dal più vecchio"; ctx.saveUi(); draw(); } }, ui.newestFirst ? "Dal più recente" : "Dal più vecchio");

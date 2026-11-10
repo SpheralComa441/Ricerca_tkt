@@ -154,6 +154,7 @@ select.input { height: 30px; width: auto; padding: 0 6px; }
 .pill.waiting { background: var(--waiting-bg); color: var(--waiting); }
 .pill.closed { background: var(--closed-bg); color: var(--closed); }
 .tag-mini { font-size: 11px; color: var(--faint); border: 1px solid var(--line); border-radius: 4px; padding: 0 4px; }
+.tag-mini.src-ar { color: #8a5a00; border-color: #e3c27a; background: #fff8e6; white-space: nowrap; }
 .star-on { color: #e2a400; }
 .more { margin: 10px auto 0; display: flex; }
 .empty-state { text-align: center; color: var(--muted); padding: 60px 20px; }

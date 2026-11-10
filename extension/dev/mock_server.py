@@ -78,6 +78,12 @@ for i in range(237):
         "NextExpirationDate": last + timedelta(days=2),
         "SolutionHTML": "<p>Corretto il parametro nella tabella voci. Rielaborare il cedolino.</p>" if st[0] in ("S6", "S5") else "",
     })
+# Ticket a 7 cifre: uno nativo di Touch con la Z e uno migrato dal Vecchio Cruscotto (ID senza Z)
+for _tid, _subj, _days in (("9876543Z", "Detassazione premi di risultato (ticket Touch a 7 cifre)", 900), ("9042633", "Allineamento voci retributive (ticket migrato)", 1100)):
+    _t = dict(TICKETS[0])
+    _t.update({"ID": _tid, "Subject": _subj, "Date": NOW - timedelta(days=_days), "LastChange": NOW - timedelta(days=_days - 3),
+               "TicketStatusID": "S5", "TicketStatus.Description": "Closed"})
+    TICKETS.append(_t)
 BY_ID = {t["ID"]: t for t in TICKETS}
 
 def conversation(t):

@@ -1,8 +1,9 @@
 // Ticket completo: dati, richiesta, conversazione, soluzione, allegati → una sola timeline ordinata.
 
-import { parseMsDate, norm, ticketNumber, ticketIdVariants, isLegacyTicketNumber } from "./util.js";
+import { parseMsDate, norm, ticketNumber, ticketIdVariants, isLegacyTicketNumber, isTouchNativeId } from "./util.js";
 import { htmlToText, cleanText, isProbablyHtml, unescapeIfEscapedHtml } from "./richtext.js";
 import { guessMimeFromName } from "./hda.js";
+import { buildArTicket } from "./ar.js";
 
 // Colonne della conversazione (nomi verificati dalla configurazione "Storico conversazioni" + TextHTML verificato via Projection)
 export const CONV_COLUMNS = ["ID", "Text", "TextHTML", "FirstUpdate", "UserID", "User.FullName", "ContactID", "Contact.FirstName", "Contact.LastName", "Account.CompanyName", "SiteVisible", "MSGDIR", "TicketConversationItemStat.AttachmentCount"];
@@ -158,46 +159,55 @@ export function timelineText(entries, header = "") {
 
 /**
  * Carica tutto ciò che serve per leggere un ticket.
- * Prova entrambe le varianti dell'ID su HDA TOUCH (es. "9042633" senza Z per i 7 cifre e "11943209Z" con Z per gli 8 cifre)
- * e, se il dettaglio completo non è disponibile su HDA TOUCH, interroga automaticamente il Vecchio Cruscotto.
+ *  - riga del Vecchio Cruscotto (source "ar") → si legge dal Vecchio Cruscotto: lo stesso numero con la "Z"
+ *    su HDA TOUCH è un ALTRO ticket, quindi non si cercano varianti su Touch;
+ *  - riga di Touch già nota (dall'elenco) → ID certo: dati del ticket, conversazione e allegati in parallelo
+ *    (una sola attesa invece di due in fila);
+ *  - solo il numero (link, numero citato nel testo) → si provano in parallelo le varianti con/senza "Z"
+ *    e, se su Touch non c'è e il numero non ha la "Z", il Vecchio Cruscotto.
  */
 export async function loadTicket(hda, id, { row = null, rowReader, conditionsFor, caps = {}, ar = null, log = () => {} } = {}) {
   const arRowSeed = (row && row.source === "ar" ? row : row && row.arRow) || null;
-  if (row && row.source === "ar" && ar && !hda) {
-    return await ar.loadTicket(id, { row });
+  if (row && row.source === "ar") {
+    if (ar) return await ar.loadTicket(id, { row });
+    return buildArTicket({ id, row });
   }
 
-  // Costruisce la lista ordinata di ID da provare su HDA TOUCH: prima l'ID esatto della riga (se proviene da Touch), poi le varianti senza/con Z.
-  const idCandidates = [];
-  const pushCand = (c) => {
-    const s = String(c || "").trim();
-    if (s && !idCandidates.includes(s)) idCandidates.push(s);
-  };
-  if (row && row.id && row.source !== "ar") pushCand(row.id);
-  for (const v of ticketIdVariants(id)) pushCand(v);
-  pushCand(id);
-
   const notes = [];
-  // 1. riga con le descrizioni (cliente, gruppo, stato…) se non già nota da HDA TOUCH
-  if ((!row || row.source === "ar") && rowReader && conditionsFor) {
-    for (const candId of idCandidates) {
+  const typedNativeZ = isTouchNativeId(id);
+  let candidates = row && row.id ? [String(row.id)] : ticketIdVariants(id);
+  if (!candidates.length) candidates = [String(id || "").trim()].filter(Boolean);
+
+  // 1. solo il numero: quale variante esiste su Touch? (richieste in parallelo, vince l'ordine di preferenza)
+  if (!row && rowReader && conditionsFor && hda) {
+    const found = await Promise.all(
+      candidates.map((c) =>
+        hda
+          .listData("Incidents", { conditions: conditionsFor(c), limit: 1 })
+          .then((r) => (r.rows && r.rows[0] ? rowReader.read(r.rows[0]) : null))
+          .catch((e) => {
+            if (e && e.name === "AuthError") throw e;
+            return null;
+          }),
+      ),
+    );
+    const k = found.findIndex(Boolean);
+    // numero a 5-7 cifre senza "Z" che su Touch esiste solo con la "Z": prima si guarda se è un ticket del
+    // Vecchio Cruscotto con lo stesso numero (la forma scritta), poi si apre quello di Touch con la "Z"
+    if (k > 0 && ar && !typedNativeZ && isLegacyTicketNumber(id) && ar.state && ar.state.connected === true) {
       try {
-        const { rows } = await hda.listData("Incidents", { conditions: conditionsFor(candId), limit: 1 });
-        if (rows[0]) {
-          const touchRow = rowReader.read(rows[0]);
-          row = arRowSeed ? { ...touchRow, arRow: arRowSeed, arUrl: arRowSeed.arUrl } : touchRow;
-          break;
-        }
-      } catch {
-        /* */
+        return await ar.loadTicket(ticketNumber(id), { row: null });
+      } catch (arErr) {
+        log(`ticket vecchio cruscotto #${ticketNumber(id)}: ${arErr.message}`);
       }
+    }
+    if (k >= 0) {
+      row = found[k];
+      candidates = [String(row.id || candidates[k])];
     }
   }
 
-  // 2. dati completi del ticket (richiesta e soluzione intere) provando le varianti dell'ID (es. "9042633" e "9042633Z")
-  let ticket = null;
-  let resolvedId = (row && row.source !== "ar" && row.id) || idCandidates[0] || id;
-  for (const candId of idCandidates) {
+  const fetchTicket = async (candId) => {
     const tryProjection = async () => {
       const rows = await hda.projection("Incident", [{ property: "ID", op: "eq", value: candId }], TICKET_COLUMNS, 1);
       if (!rows[0]) throw new Error("ticket non trovato");
@@ -207,19 +217,80 @@ export async function loadTicket(hda, id, { row = null, rowReader, conditionsFor
     const order = caps.ticketVia === "get" ? [["get", tryGet], ["projection", tryProjection]] : [["projection", tryProjection], ["get", tryGet]];
     for (const [name, fn] of order) {
       try {
-        ticket = await fn();
+        const t = await fn();
         caps.ticketVia = name;
-        resolvedId = (ticket && ticket.ID) || candId;
-        break;
+        return t;
       } catch (e) {
+        if (e && e.name === "AuthError") throw e;
         log(`ticket ${candId} via ${name}: ${e.message}`);
       }
     }
-    if (ticket) break;
+    return null;
+  };
+
+  const fetchConversation = async (ticketId) => {
+    const cond = [{ property: "TicketID", op: "eq", value: ticketId }];
+    if (caps.convVia !== "list") {
+      try {
+        const rows = await hda.projection("TicketConversationItem", cond, CONV_COLUMNS, 1000);
+        caps.convVia = "projection";
+        return rows.map(normalizeItem);
+      } catch (e) {
+        if (e && e.name === "AuthError") throw e;
+        log("conversazione via Projection: " + e.message);
+      }
+    }
+    const { rows } = await hda.listData("TicketConversationItems", {
+      viewId: "ConversationHistory",
+      conditions: cond,
+      limit: 500,
+      sort: [{ property: "c5", direction: "ASC" }],
+    });
+    const items = rows.map((r) => normalizeItem({ ...Object.fromEntries(Object.entries(CONV_ALIAS).map(([a, e]) => [e, r[a]])), _fromList: true }));
+    caps.convVia = "list";
+    if (items.some((m) => m.truncated)) notes.push("Alcuni messaggi lunghi sono troncati a 500 caratteri (limite dell'elenco di Touch).");
+    return items;
+  };
+
+  const fetchAttachments = (ticketId) =>
+    typeof hda.listAttachments === "function"
+      ? hda
+          .listAttachments(ticketId)
+          .then((rawAtts) => (rawAtts || []).map((r) => normalizeAttachment(r, ticketId)).filter(Boolean))
+          .catch((e) => {
+            log("allegati: " + e.message);
+            return [];
+          })
+      : Promise.resolve([]);
+
+  // 2. dati completi del ticket (richiesta e soluzione intere), conversazione e allegati
+  let ticket = null;
+  let items = [];
+  let attachments = [];
+  let resolvedId = candidates[0] || String(id || "");
+  if (row && candidates.length === 1) {
+    // ID certo (riga di Touch): tutto in parallelo
+    [ticket, items, attachments] = await Promise.all([fetchTicket(resolvedId), fetchConversation(resolvedId), fetchAttachments(resolvedId)]);
+  } else {
+    const tickets = await Promise.all(candidates.map((c) => fetchTicket(c)));
+    const k = tickets.findIndex(Boolean);
+    if (k >= 0) {
+      ticket = tickets[k];
+      resolvedId = String(ticket.ID || candidates[k]);
+    }
+    if (ticket || row) [items, attachments] = await Promise.all([fetchConversation(resolvedId), fetchAttachments(resolvedId)]);
   }
 
-  // Se il dettaglio completo del ticket non è disponibile su HDA TOUCH, carichiamo dal Vecchio Cruscotto (Area Riservata)
-  if (!ticket && ar) {
+  // 3. non su Touch: Vecchio Cruscotto, ma solo per numeri senza "Z" (con la "Z" è un ticket nativo di Touch)
+  if (!ticket && !row && ar && !typedNativeZ) {
+    try {
+      return await ar.loadTicket(ticketNumber(id), { row: arRowSeed });
+    } catch (arErr) {
+      log(`ticket vecchio cruscotto #${ticketNumber(id)}: ${arErr.message}`);
+    }
+  }
+  // riga di Touch senza "Z" (ticket migrato) ma dettaglio non leggibile: si prova il testo del Vecchio Cruscotto
+  if (!ticket && row && ar && arRowSeed && !isTouchNativeId(row.id)) {
     try {
       return await ar.loadTicket(ticketNumber(id), { row: arRowSeed });
     } catch (arErr) {
@@ -230,7 +301,7 @@ export async function loadTicket(hda, id, { row = null, rowReader, conditionsFor
   if (!row && !ticket) {
     if (isLegacyTicketNumber(id)) {
       const err = new Error(
-        `Il ticket #${ticketNumber(id)} appartiene al Vecchio Cruscotto (Area Riservata Zucchetti). Apri e collega il Vecchio Cruscotto per leggerlo qui, oppure cerca i ticket Touch che lo richiamano.`
+        `Il ticket #${ticketNumber(id)} non è su HDA TOUCH e potrebbe appartenere al Vecchio Cruscotto (Area Riservata Zucchetti). Collega il Vecchio Cruscotto per leggerlo qui, oppure cerca i ticket Touch che lo richiamano.`
       );
       err.isLegacyTicket = true;
       err.ticketNum = ticketNumber(id);
@@ -239,52 +310,9 @@ export async function loadTicket(hda, id, { row = null, rowReader, conditionsFor
     throw new Error("ticket non trovato o non visibile con il tuo utente");
   }
 
-  if (row && resolvedId && row.source !== "ar") {
-    row = { ...row, id: resolvedId };
-  }
+  if (row && resolvedId) row = { ...row, id: resolvedId };
   if (!ticket) notes.push("Testo completo della richiesta non disponibile: mostro l'anteprima dell'elenco.");
 
-  // 3. conversazione completa e allegati in parallelo usando l'ID effettivo risolto su HDA TOUCH
-  const cond = [{ property: "TicketID", op: "eq", value: resolvedId }];
-  const attPromise =
-    typeof hda.listAttachments === "function"
-      ? hda
-          .listAttachments(resolvedId)
-          .then((rawAtts) => (rawAtts || []).map((r) => normalizeAttachment(r, resolvedId)).filter(Boolean))
-          .catch((e) => {
-            log("allegati: " + e.message);
-            return [];
-          })
-      : Promise.resolve([]);
-
-  const convPromise = (async () => {
-    let convItems = null;
-    if (caps.convVia !== "list") {
-      try {
-        const rows = await hda.projection("TicketConversationItem", cond, CONV_COLUMNS, 1000);
-        convItems = rows.map(normalizeItem);
-        caps.convVia = "projection";
-      } catch (e) {
-        log("conversazione via Projection: " + e.message);
-      }
-    }
-    if (!convItems) {
-      const { rows } = await hda.listData("TicketConversationItems", {
-        viewId: "ConversationHistory",
-        conditions: cond,
-        limit: 500,
-        sort: [{ property: "c5", direction: "ASC" }],
-      });
-      convItems = rows.map((r) =>
-        normalizeItem({ ...Object.fromEntries(Object.entries(CONV_ALIAS).map(([a, e]) => [e, r[a]])), _fromList: true }),
-      );
-      caps.convVia = "list";
-      if (convItems.some((m) => m.truncated)) notes.push("Alcuni messaggi lunghi sono troncati a 500 caratteri (limite dell'elenco di Touch).");
-    }
-    return convItems;
-  })();
-
-  const [items, attachments] = await Promise.all([convPromise, attPromise]);
   const timeline = buildTimeline({ ticket: ticket || {}, row: row || {}, items, attachments });
   return {
     id: resolvedId,

@@ -7,41 +7,87 @@ import { norm, tokens } from "./util.js";
 import { timelineText } from "./ticket.js";
 
 const DB_NAME = "ricerca-tkt";
-const DB_VER = 1;
+// v2: oltre ai ticket completi ("tickets") c'è un indice leggero ("index": id, riga, testo normalizzato, date)
+// usato per la ricerca nell'archivio e per sapere quali risultati sono già archiviati, senza leggere
+// ogni volta le conversazioni complete con l'HTML.
+const DB_VER = 2;
+
+const indexRec = (rec) => ({ id: rec.id, row: rec.row, text: rec.text || "", savedAt: rec.savedAt, lastChange: rec.lastChange || null });
 
 let dbp = null;
 function db() {
   if (dbp) return dbp;
   dbp = new Promise((resolve, reject) => {
     const req = indexedDB.open(DB_NAME, DB_VER);
-    req.onupgradeneeded = () => {
+    req.onupgradeneeded = (ev) => {
       const d = req.result;
       if (!d.objectStoreNames.contains("tickets")) {
         const s = d.createObjectStore("tickets", { keyPath: "id" });
         s.createIndex("savedAt", "savedAt");
       }
+      if (!d.objectStoreNames.contains("index")) {
+        const ix = d.createObjectStore("index", { keyPath: "id" });
+        if (ev.oldVersion >= 1) {
+          // archivio della versione precedente: si costruisce l'indice una volta sola
+          const cur = req.transaction.objectStore("tickets").openCursor();
+          cur.onsuccess = () => {
+            const c = cur.result;
+            if (!c) return;
+            ix.put(indexRec(c.value));
+            c.continue();
+          };
+        }
+      }
     };
     req.onsuccess = () => resolve(req.result);
-    req.onerror = () => reject(req.error);
+    req.onerror = () => reject(req.error || new Error("archivio locale non disponibile"));
   });
+  dbp.catch(() => (dbp = null));
   return dbp;
 }
 
+/** Transazione su uno o più archivi: fn riceve l'archivio (o l'elenco degli archivi, nello stesso ordine). */
 function tx(store, mode, fn) {
   return db().then(
     (d) =>
       new Promise((resolve, reject) => {
         const t = d.transaction(store, mode);
-        const s = t.objectStore(store);
+        const s = Array.isArray(store) ? store.map((n) => t.objectStore(n)) : t.objectStore(store);
         const p = Promise.resolve().then(() => fn(s));
+        const fail = (ev) => reject((ev && ev.target && ev.target.error) || t.error || new Error("errore dell'archivio locale"));
         t.oncomplete = () => p.then(resolve, reject);
-        t.onerror = () => reject(t.error);
-        t.onabort = () => reject(t.error);
+        t.onerror = fail;
+        t.onabort = fail;
       }),
   );
 }
 
-const reqP = (r) => new Promise((res, rej) => ((r.onsuccess = () => res(r.result)), (r.onerror = () => rej(r.error))));
+const reqP = (r) => new Promise((res, rej) => ((r.onsuccess = () => res(r.result)), (r.onerror = () => rej(r.error || new Error("errore dell'archivio locale")))));
+
+// Indice in memoria (si legge una volta, poi si aggiorna a ogni salvataggio). Oltre ~30 milioni di caratteri
+// non si tiene in memoria e si rilegge dall'archivio a ogni ricerca.
+const INDEX_MEM_LIMIT = 30e6;
+const INDEX_TTL = 5 * 60 * 1000; // un'altra scheda dell'app può aver archiviato altri ticket
+let memIndex = null;
+let memIndexAt = 0;
+
+async function loadIndex() {
+  if (memIndex && Date.now() - memIndexAt < INDEX_TTL) return memIndex;
+  const all = await tx("index", "readonly", (s) => reqP(s.getAll()));
+  const m = new Map();
+  let size = 0;
+  for (const r of all || []) {
+    m.set(r.id, r);
+    size += (r.text || "").length;
+  }
+  if (size <= INDEX_MEM_LIMIT) {
+    memIndex = m;
+    memIndexAt = Date.now();
+  } else {
+    memIndex = null;
+  }
+  return m;
+}
 
 /** Riga dell'elenco senza i dati grezzi, con le date in millisecondi */
 function slimRow(row) {
@@ -88,7 +134,12 @@ export async function saveTicket(full) {
     savedAt: Date.now(),
     lastChange: row.lastChange || null,
   };
-  await tx("tickets", "readwrite", (s) => s.put(rec));
+  const ix = indexRec(rec);
+  await tx(["tickets", "index"], "readwrite", ([s, i]) => {
+    s.put(rec);
+    i.put(ix);
+  });
+  if (memIndex) memIndex.set(ix.id, ix);
   return rec;
 }
 
@@ -109,18 +160,17 @@ export async function getTicket(id) {
 }
 
 export async function archiveInfo() {
-  return tx("tickets", "readonly", (s) => reqP(s.count()));
+  return tx("index", "readonly", (s) => reqP(s.count()));
 }
 
 /** Quali ID sono in archivio (e quando sono stati salvati) */
 export async function archivedMap(ids) {
   const out = new Map();
-  await tx("tickets", "readonly", async (s) => {
-    for (const id of ids) {
-      const r = await reqP(s.get(id));
-      if (r) out.set(id, { savedAt: r.savedAt, lastChange: r.lastChange });
-    }
-  });
+  const index = await loadIndex();
+  for (const id of ids) {
+    const r = index.get(id);
+    if (r) out.set(id, { savedAt: r.savedAt, lastChange: r.lastChange });
+  }
   return out;
 }
 
@@ -132,28 +182,24 @@ export async function searchArchive(q, { limit = 500 } = {}) {
   const words = tokens(q);
   if (!words.length) return [];
   const hits = [];
-  await tx("tickets", "readonly", (s) => {
-    return new Promise((resolve) => {
-      const cur = s.openCursor();
-      cur.onsuccess = () => {
-        const c = cur.result;
-        if (!c) return resolve();
-        const rec = c.value;
-        if (words.every((w) => rec.text.includes(w))) {
-          const i = rec.text.indexOf(words[0]);
-          hits.push({ row: reviveRow(rec.row), snippet: rec.text.slice(Math.max(0, i - 90), i + 160), savedAt: rec.savedAt });
-        }
-        c.continue();
-      };
-      cur.onerror = () => resolve();
-    });
-  });
+  const index = await loadIndex();
+  for (const rec of index.values()) {
+    const text = rec.text || "";
+    if (words.every((w) => text.includes(w))) {
+      const i = text.indexOf(words[0]);
+      hits.push({ row: reviveRow(rec.row) || { id: rec.id }, snippet: text.slice(Math.max(0, i - 90), i + 160), savedAt: rec.savedAt });
+    }
+  }
   hits.sort((a, b) => (b.row.date?.getTime?.() || 0) - (a.row.date?.getTime?.() || 0));
   return hits.slice(0, limit);
 }
 
 export async function clearArchive() {
-  await tx("tickets", "readwrite", (s) => s.clear());
+  await tx(["tickets", "index"], "readwrite", ([s, i]) => {
+    s.clear();
+    i.clear();
+  });
+  memIndex = null;
 }
 
 // ---------------------------------------------------------------- impostazioni
