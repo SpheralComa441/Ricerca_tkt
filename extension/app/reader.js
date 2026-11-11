@@ -5,6 +5,7 @@ import { fmtDateTime, fmtDate, ticketNumber, tokens, isLegacyTicketNumber, sleep
 import { statusInfo } from "../lib/statuses.js";
 import { sanitizeHtml, textToFragment, splitQuoted, htmlToText } from "../lib/richtext.js";
 import { timelineText } from "../lib/ticket.js";
+import { highlightPatterns } from "../lib/relevance.js";
 import { guessMimeFromName } from "../lib/hda.js";
 
 const ROLE_LABEL = { customer: "Cliente", operator: "Operatore", system: "Sistema" };
@@ -657,7 +658,7 @@ export function renderReader(ctx, full, { fromArchive = null } = {}) {
     if (!list.length) tl.appendChild(h("div", { class: "empty-state" }, "Nessun messaggio."));
     for (const e of list) tl.appendChild(entryEl(ctx, e, full.id, attachments));
     const words = tokens(search.value);
-    const hits = highlight(tl, words.length ? words : tokens(ctx.S.filters.text));
+    const hits = highlight(tl, highlightPatterns(words.length ? words : tokens(ctx.S.filters.text)));
     if (search.value.trim()) search.title = hits ? `${hits} occorrenze` : "Nessuna occorrenza";
   }
   // si ridisegna dopo una breve pausa (non a ogni tasto) e si apre il testo citato che contiene la parola trovata

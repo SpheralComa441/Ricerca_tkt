@@ -1,7 +1,8 @@
 // Connettore per il Vecchio Cruscotto (Area Riservata Zucchetti: www.zucchetti.it/areariservata).
 // Permette di cercare e leggere i ticket storici a 5-7 cifre (es. 9018200, 8907717) direttamente in Ricerca TKT.
 
-import { queryTerms, matchesAllTokens, ticketNumber } from "./util.js";
+import { queryTerms, ticketNumber } from "./util.js";
+import { matchesAllTerms } from "./relevance.js";
 import { htmlToText, cleanText } from "./richtext.js";
 
 export const AR_ORIGIN = "https://www.zucchetti.it";
@@ -77,7 +78,12 @@ function fmtSolrTerm(w) {
   const clean = String(w || "").replace(/[()"\\:]/g, " ").trim();
   if (!clean) return "";
   if (/\s/.test(clean)) return `"${clean}"`;
-  if (/^[A-Za-z0-9\u00C0-\u017F]{3,}$/.test(clean)) return `${clean} or ${clean}*`;
+  if (/^[A-Za-z0-9\u00C0-\u017F]{3,}$/.test(clean)) {
+    // Singolare e plurale: si toglie la vocale finale (cedolino → cedolin*: cedolini, cedolino…; premio → premi*),
+    // ma solo se ne restano almeno cinque lettere, per non allargare troppo le parole corte.
+    const root = /^[A-Za-z]{6,}$/.test(clean) && /[aeio]$/i.test(clean) ? clean.slice(0, -1) : clean;
+    return `${clean} or ${root}*`;
+  }
   return clean;
 }
 
@@ -742,7 +748,7 @@ export function makeAr({ log = () => {}, fetch: fetchImpl = globalThis.fetch } =
     const allWords = [...queryTerms(text), ...queryTerms(subject)];
     if (!ticketId && allWords.length > 1) {
       rows = rows.filter((r) =>
-        matchesAllTokens(`${r.subject || ""} ${r.fullText || ""} ${r.problem || ""} ${r.catalog || ""}`, allWords),
+        matchesAllTerms(`${r.subject || ""} ${r.fullText || ""} ${r.problem || ""} ${r.catalog || ""}`, allWords),
       );
     }
     if (ticketId) {
@@ -750,6 +756,55 @@ export function makeAr({ log = () => {}, fetch: fetchImpl = globalThis.fetch } =
       rows.sort((a, b) => (a.id === num ? -1 : b.id === num ? 1 : 0));
     }
     return rows;
+  }
+
+  /**
+   * Oltre il limite del portale (210 ticket per ricerca): la stessa ricerca divisa per periodi e riunita.
+   * Si parte dagli anni; un periodo che torna ancora pieno si divide a metà, fino al singolo mese.
+   * Il periodo si riferisce alla data scelta nei filtri (ultimo aggiornamento o apertura): ogni ticket sta in un mese solo.
+   * → { rows, queries, cappedMonths (mesi ancora troncati), stopped (fermato prima della fine) }
+   */
+  async function searchAll(opts = {}, { onProgress = () => {}, isCancelled = () => false, maxRows = 1500, maxQueries = 45 } = {}) {
+    const F = { ...emptyArFilters(), ...(opts.filters || {}) };
+    const now = new Date();
+    const monthOf = (day, fallback) => {
+      const m = /^(\d{4})-(\d{2})/.exec(String(day || ""));
+      return m ? Number(m[1]) * 12 + Number(m[2]) - 1 : fallback;
+    };
+    // senza periodo: gli anni che il Vecchio Cruscotto ha ancora (i due precedenti e quello in corso)
+    const first = monthOf(F.dateFrom, (now.getFullYear() - 2) * 12);
+    const last = Math.max(first, monthOf(F.dateTo, now.getFullYear() * 12 + now.getMonth()));
+    const p2 = (n) => String(n).padStart(2, "0");
+    const firstDay = (m) => `${Math.floor(m / 12)}-${p2((m % 12) + 1)}-01`;
+    const lastDay = (m) => `${Math.floor(m / 12)}-${p2((m % 12) + 1)}-${p2(new Date(Math.floor(m / 12), (m % 12) + 1, 0).getDate())}`;
+    // dal periodo più recente
+    const queue = [];
+    for (let y = Math.floor(last / 12); y >= Math.floor(first / 12); y--) queue.push([Math.max(first, y * 12), Math.min(last, y * 12 + 11)]);
+    const found = new Map();
+    const cappedMonths = [];
+    let queries = 0;
+    let stopped = false;
+    while (queue.length) {
+      if (isCancelled()) return { rows: [...found.values()], queries, cappedMonths, stopped: true, cancelled: true };
+      if (queries >= maxQueries || found.size >= maxRows) {
+        stopped = true;
+        break;
+      }
+      const [a, b] = queue.shift();
+      const info = {};
+      const rows = await search({ ...opts, ticketId: "", filters: { ...F, dateFrom: firstDay(a), dateTo: lastDay(b) } }, info);
+      queries++;
+      const full = info.max > 0 && info.raw >= info.max;
+      if (full && b > a) {
+        const mid = Math.floor((a + b) / 2);
+        queue.unshift([mid + 1, b], [a, mid]);
+        continue;
+      }
+      if (full) cappedMonths.push(firstDay(a).slice(0, 7));
+      for (const r of rows) if (!found.has(r.id)) found.set(r.id, r);
+      onProgress({ rows: found.size, queries, left: queue.length });
+    }
+    return { rows: [...found.values()], queries, cappedMonths, stopped };
   }
 
   async function readDetail(url) {
@@ -855,6 +910,7 @@ export function makeAr({ log = () => {}, fetch: fetchImpl = globalThis.fetch } =
     },
     checkStatus,
     search,
+    searchAll,
     loadTicket,
     request,
     findCentre,

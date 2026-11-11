@@ -85,6 +85,17 @@ Scrivi il numero nella barra principale (vanno bene anche `#`, `tk`, `ticket n.`
 - Con delle parole nella casella di ricerca e un filtro scelto, si cercano le parole **solo nei ticket del filtro**: sopra l'elenco un avviso lo dice e con *Togli il testo* vedi tutti i ticket del gruppo.
 - Con più parole, i ticket trovati dal portale vengono verificati tutti (anche oltre i primi 60): se i messaggi di un ticket non si possono leggere, il ticket resta nell'elenco.
 
+## Trovare il ticket giusto: attinenza, varianti, filtro in elenco
+
+Tutto calcolato nel browser: nessun testo dei ticket esce dal PC.
+
+- **Ordina per «Attinenza»** (ordinamento di partenza, si cambia dal menu accanto al numero di ticket): in alto i ticket più vicini alle parole cercate. Conta di più una parola nell'oggetto che nel testo, la parola esatta più di una sua variante, le parole vicine tra loro o scritte come frase, e avere tutte le parole invece di alcune. A parità, prima il più recente. Senza parole nella casella l'ordine è dal più recente.
+  - Nel Vecchio Cruscotto l'attinenza guarda tutto il testo dei messaggi. In HDA Touch guarda oggetto e richiesta dei ticket caricati (i primi 150; con *Mostra altri* se ne aggiungono).
+- **Singolare e plurale**: «cedolino» vale anche per «cedolini», «premio» per «premi». Le varianti contano nella verifica «tutte le parole», nell'attinenza e sono evidenziate in giallo. Una "frase tra virgolette" si cerca invece così com'è scritta.
+- **Estratto**: sotto l'oggetto si vede il punto del testo dove compaiono le parole cercate, non l'inizio del messaggio.
+- **Filtra in elenco** (casella sopra i risultati): restringe i ticket già trovati mentre scrivi, senza interrogare il portale. Tutte le parole devono comparire; `-parola` toglie i ticket che la contengono. Cerca anche in numero, cliente, gruppo, operatore e stato. *Esc* la svuota; si azzera a ogni nuova ricerca dalla casella in alto.
+- **Vecchio Cruscotto oltre i 210 ticket**: quando il portale tronca i risultati, l'avviso offre *Cerca tutti*. L'app ripete la ricerca divisa per periodi (anni, poi metà, fino al singolo mese) e riunisce i ticket. Si ferma a 1.500 ticket o 45 richieste, e dice se un mese è rimasto troncato.
+
 ## Velocità
 
 - I risultati compaiono **man mano che arrivano**: prima l'oggetto dei ticket di Touch e il Vecchio Cruscotto, poi la ricerca dentro i messaggi di Touch (la più lenta). Sotto l'elenco si vede dove sta ancora cercando.

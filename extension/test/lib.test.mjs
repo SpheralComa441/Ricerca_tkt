@@ -537,7 +537,7 @@ test("ar: risposta nel formato reale (42 campi, riga sentinella, maxResults) e f
   // gruppo come nella Ricerca rapida (… and IdGruppo:10663) e anni di apertura
   assert.equal(
     buildArQuery({ text: "detassazione", idCenSer: "PAOW", groups: ["10663"] }),
-    "IdCenSer:PAOW and ( Testi:(detassazione or detassazione*) or Oggetto:(detassazione or detassazione*) ) and IdGruppo:10663"
+    "IdCenSer:PAOW and ( Testi:(detassazione or detassazion*) or Oggetto:(detassazione or detassazion*) ) and IdGruppo:10663"
   );
   assert.match(buildArQuery({ text: "x", groups: ["10663", "10552"] }), /\( IdGruppo:10663 or IdGruppo:10552 \)$/);
   assert.match(buildArQuery({ text: "cud", dateFrom: "2020-01-01", dateTo: "2026-12-31" }), /^\( \(IdAnnoA:2020 \) or .*\(IdAnnoA:2026 \) \) and /);
@@ -799,4 +799,108 @@ test("ar: filtri della Ricerca rapida (gruppo, operatore, cliente, stato, chi ha
   assert.equal(queries[1], "IdCenSer:PAOW and NumTic:8900042");
   assert.deepEqual(await ar.search({ text: "", filters: emptyArFilters() }), [], "niente parole e niente filtri: nessuna richiesta");
   assert.equal(queries.length, 2);
+});
+
+// ---------------------------------------------------------------- attinenza (calcolata nel browser)
+
+test("attinenza: radici italiane, tutte le parole con le varianti, punteggio, estratto, filtro dell'elenco", async () => {
+  const { stem, matchesAllTerms, scoreRow, sortByRelevance, bestSnippet, listFilter, highlightPatterns, searchTerms } = await import("../lib/relevance.js");
+  for (const [a, b] of [["cedolino", "cedolini"], ["premio", "premi"], ["paga", "paghe"], ["malattia", "malattie"], ["voce", "voci"], ["detassazione", "detassazioni"]]) {
+    assert.equal(stem(a), stem(b), `${a}/${b}`);
+  }
+  assert.equal(stem("tfr"), "tfr");
+  assert.equal(stem("f24"), "f24", "le sigle con cifre restano come sono");
+  assert.notEqual(stem("premio"), stem("premessa"));
+
+  assert.equal(matchesAllTerms("abbiamo i premi e il cedolino", "premio cedolini"), true, "singolare e plurale valgono");
+  assert.equal(matchesAllTerms("abbiamo i premi", "premio tfr"), false);
+  assert.equal(matchesAllTerms("versione 26.05.00 installata", "26.05.00"), true, "le parole con segni si cercano così come sono");
+  assert.equal(matchesAllTerms("Città di Castello", "citta"), true, "senza distinzione di accenti");
+  assert.equal(matchesAllTerms("il libro unico del lavoro", '"libro unico"'), true);
+  assert.equal(matchesAllTerms("unico libro", '"libro unico"'), false, "una frase tra virgolette va trovata intera");
+  assert.equal(matchesAllTerms("qualsiasi", ""), true);
+
+  const rows = [
+    { id: "A", subject: "Detassazione premi di risultato", problem: "come applico la detassazione ai premi", date: new Date(2026, 1, 1) },
+    { id: "B", subject: "Cedolino errato", problem: "il premio non risulta", fullText: "il premio non risulta. serve la detassazione del premio di risultato aziendale", date: new Date(2026, 5, 1) },
+    { id: "C", subject: "Stampa libro unico", problem: "non stampa", fullText: "detassazione citata di passaggio " + "bla ".repeat(200) + " premi", date: new Date(2026, 8, 1) },
+    { id: "D", subject: "Solo premio", problem: "nulla", date: new Date(2026, 9, 1) },
+    { id: "E", subject: "Altro", problem: "niente", date: new Date(2026, 10, 1) },
+  ];
+  const order = sortByRelevance(rows, "detassazione premio").map((r) => r.id);
+  assert.deepEqual(order, ["A", "B", "C", "D", "E"], "oggetto > testo con parole vicine > parole lontane > una parola sola > nessuna");
+  assert.equal(scoreRow(rows[4], "detassazione premio"), 0);
+  assert.ok(scoreRow(rows[0], "detassazione premi") > scoreRow(rows[0], "detassazione premio"), "la parola esatta vale più della variante");
+  assert.ok(scoreRow({ subject: "premi di risultato" }, "premi risultato") > scoreRow({ subject: "risultato dei controlli sui premi" }, "premi risultato"), "parole vicine");
+  assert.deepEqual(sortByRelevance(rows, "").map((r) => r.id), ["A", "B", "C", "D", "E"], "senza parole l'ordine non cambia");
+  // a parità di punteggio, dal più recente
+  const same = [{ id: "old", subject: "premio", date: new Date(2020, 0, 1) }, { id: "new", subject: "premio", date: new Date(2026, 0, 1) }];
+  assert.deepEqual(sortByRelevance(same, "premio").map((r) => r.id), ["new", "old"]);
+
+  const long = "Buongiorno, " + "testo iniziale poco utile. ".repeat(30) + "Il cliente chiede la detassazione dei premi di risultato per il 2026. " + "altro testo. ".repeat(40);
+  const snip = bestSnippet(long, "detassazione premio", 160);
+  assert.match(snip, /detassazione dei premi di risultato/);
+  assert.ok(snip.startsWith("… ") && snip.endsWith(" …") && snip.length <= 170);
+  assert.equal(bestSnippet("breve", "x", 300), "breve");
+  assert.equal(bestSnippet(long, "", 50), long.slice(0, 50));
+
+  const f = listFilter("premio -cedolino");
+  assert.equal(f("Detassazione premi"), true);
+  assert.equal(f("premi sul cedolino"), false, "-parola esclude (anche le varianti)");
+  assert.equal(f("altro"), false);
+  assert.equal(listFilter("  "), null, "casella vuota: nessun filtro");
+  assert.equal(listFilter("-uniemens")("errore uniemens"), false);
+  assert.equal(listFilter("-uniemens")("stampa cedolino"), true, "solo esclusioni");
+
+  assert.deepEqual(highlightPatterns('premio "libro unico" tfr'), [{ text: "premio", stem: "prem" }, { text: "libro unico", stem: "" }, { text: "tfr", stem: "" }]);
+  assert.deepEqual(searchTerms("premio -cedolino").map((t) => t.text), ["premio"], "le esclusioni non sono parole da cercare");
+});
+
+test("ar: la ricerca usa la radice per singolare/plurale; oltre il limite del portale si divide per periodi", async () => {
+  assert.equal(buildArQuery({ text: "cedolino" }), "( Testi:(cedolino or cedolin*) or Oggetto:(cedolino or cedolin*) )");
+  assert.equal(buildArQuery({ text: "premio" }), "( Testi:(premio or premi*) or Oggetto:(premio or premi*) )");
+  assert.equal(buildArQuery({ text: "paga" }), "( Testi:(paga or paga*) or Oggetto:(paga or paga*) )", "le parole corte non si allargano");
+  assert.equal(buildArQuery({ text: "f24" }), "( Testi:(f24 or f24*) or Oggetto:(f24 or f24*) )");
+
+  // portale finto: 9 ticket nel 2026 (3 al mese da gennaio a marzo), limite 4 per ricerca
+  const y = new Date().getFullYear();
+  const all = [];
+  for (let m = 1; m <= 3; m++) for (let k = 0; k < 3; k++) all.push({ num: String(8800000 + m * 10 + k), m, y });
+  const queries = [];
+  const fetchImpl = async (url, init = {}) => {
+    let body = "<html></html>";
+    if (/portlet\.jsp$/.test(url)) body = "this.splResults.m_cID='f0f7834fde6879c8685311c282f6734a';";
+    else if (/spsl_fquery_mc$/.test(url)) {
+      const q = decodeURIComponent(init.body.split("&")[0].slice(9));
+      queries.push(q);
+      const months = [...q.matchAll(/IdMeseM:(\d+) and IdAnnoM:(\d+)/g)].map((x) => `${x[2]}-${x[1]}`);
+      const hit = all.filter((t) => !months.length || months.includes(`${t.y}-${t.m}`)).slice(0, 4);
+      body = arPage(hit.map((t) => arRow({ num: t.num, code: "0000000" + t.num, subject: "cud", date: `${t.y}-0${t.m}-10`, testi: "cud" }))).replace('"maxResults":[210]', '"maxResults":[4]');
+    }
+    return { ok: true, status: 200, text: async () => body };
+  };
+  const ar = makeAr({ fetch: fetchImpl });
+  ar.setCentre("PAOW");
+  const info = {};
+  assert.equal((await ar.search({ text: "cud", filters: emptyArFilters() }, info)).length, 4);
+  assert.equal(info.raw >= info.max, true, "la ricerca normale è troncata");
+  const progress = [];
+  const res = await ar.searchAll({ text: "cud", filters: { ...emptyArFilters(), dateFrom: `${y}-01-01`, dateTo: `${y}-03-31` } }, { onProgress: (p) => progress.push(p.rows) });
+  assert.equal(res.rows.length, 9, "tutti i ticket, senza doppioni");
+  assert.equal(new Set(res.rows.map((r) => r.id)).size, 9);
+  assert.deepEqual(res.cappedMonths, []);
+  assert.equal(res.stopped, false);
+  assert.ok(res.queries >= 4 && res.queries <= 6, `gennaio-marzo → divisi fino al mese (${res.queries} richieste)`);
+  assert.equal(progress[progress.length - 1], 9);
+  // un mese che da solo supera il limite resta troncato e lo si dice
+  for (let k = 3; k < 8; k++) all.push({ num: String(8800000 + 10 + k), m: 1, y });
+  const res2 = await ar.searchAll({ text: "cud", filters: { ...emptyArFilters(), dateFrom: `${y}-01-01`, dateTo: `${y}-03-31` } });
+  assert.deepEqual(res2.cappedMonths, [`${y}-01`]);
+  // ci si ferma al tetto di richieste
+  const res3 = await ar.searchAll({ text: "cud", filters: { ...emptyArFilters(), dateFrom: `${y}-01-01`, dateTo: `${y}-03-31` } }, { maxQueries: 2 });
+  assert.equal(res3.stopped, true);
+  assert.equal(res3.queries, 2);
+  // annullata (nuova ricerca partita nel frattempo)
+  const res4 = await ar.searchAll({ text: "cud", filters: emptyArFilters() }, { isCancelled: () => true });
+  assert.equal(res4.cancelled, true);
 });

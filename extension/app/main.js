@@ -10,6 +10,7 @@ import { openDiag } from "./diag.js";
 import { makeTransport, AuthError, PORTAL_BASE } from "../lib/transport.js";
 import { makeHda } from "../lib/hda.js";
 import { makeAr, emptyArFilters, hasArFilter } from "../lib/ar.js";
+import { sortByRelevance, matchesAllTerms, bestSnippet, searchTerms, highlightPatterns, listFilter } from "../lib/relevance.js";
 import { makeStorico, emptyStoricoFilters, hasStoricoFilter, enrichArTicket, movePeople } from "../lib/storico.js";
 import { makeRowReader } from "../lib/rows.js";
 import { emptyFilters, buildConditions, describeFilters, ruleFor, DEF, DOMAIN_CONDITION, OPEN_STATUS_IDS, FILTER_DEFS, isEmptyFilter, isUnconstrained, hasNarrowingFilter } from "../lib/filters.js";
@@ -18,7 +19,7 @@ import { loadTicket, TICKET_COLUMNS } from "../lib/ticket.js";
 import { saveTicket, getTicket, searchArchive, archivedMap, archiveInfo, kvGet, kvSet, onKvChange, reviveRow } from "../lib/store.js";
 import { makeLookups } from "../lib/lookups.js";
 import { htmlToText, cleanText, isProbablyHtml, unescapeIfEscapedHtml } from "../lib/richtext.js";
-import { ticketIdFrom, ticketIdVariants, ticketNumber, isLegacyTicketNumber, isTouchNativeId, ticketMergeKey, fmtRelative, fmtDateTime, tokens, queryTerms, matchesAllTokens, pool, sleep, csvCell, debounce } from "../lib/util.js";
+import { ticketIdFrom, ticketIdVariants, ticketNumber, isLegacyTicketNumber, isTouchNativeId, ticketMergeKey, fmtRelative, fmtDateTime, tokens, queryTerms, pool, sleep, csvCell, debounce } from "../lib/util.js";
 
 const inExtension = typeof chrome !== "undefined" && !!(chrome.runtime && chrome.runtime.id);
 const DAY = 86400000;
@@ -31,6 +32,8 @@ function portalLang(settings, touchLang) {
   return touchLang || "it";
 }
 const SORTS = {
+  // attinenza: calcolata qui sulle parole cercate; al portale i ticket si chiedono dal più recente
+  relevance: { label: "Attinenza", field: "date", fb: "c20" },
   date: { label: "Data di apertura", field: "date", fb: "c20" },
   lastChange: { label: "Ultimo aggiornamento", field: "lastChange", fb: "c26" },
   id: { label: "Numero ticket", field: "id", fb: "c23" },
@@ -81,6 +84,8 @@ const S = {
   settings: { ...DEFAULT_SETTINGS },
 };
 const ui = { openSections: {}, statusDetail: false, showInternal: true, newestFirst: false, readerSearch: "", showFilters: true };
+// «Filtra in elenco»: per scheda, vale finché non si fa una nuova ricerca dalla casella in alto
+const listFilters = { touch: "", ar: "", storico: "" };
 
 let transport, hda, ar, storico, lookups;
 let rowReader = makeRowReader(null);
@@ -132,16 +137,34 @@ function slim(row) {
   return o;
 }
 
+/** Le parole cercate su cui si misura l'attinenza: quelle della casella in alto (non un numero ticket) e dell'oggetto. */
+function rankQuery() {
+  const text = String(S.filters.text || "").trim();
+  return [ticketIdFrom(text) ? "" : text, S.filters.subject || ""].join(" ").trim();
+}
+const byRelevance = () => S.sort.key === "relevance" && searchTerms(rankQuery()).length > 0;
+
+/** Estratto del ticket per l'elenco: con delle parole cercate, il punto del testo dove compaiono. */
+const SNIPPETS = new WeakMap();
 function snippetOf(row) {
-  const p = row && row.problem ? String(row.problem) : "";
-  if (!p) return "";
-  const t = isProbablyHtml(unescapeIfEscapedHtml(p)) ? htmlToText(p) : cleanText(p);
-  return t.replace(/\s+/g, " ").trim().slice(0, 300);
+  if (!row) return "";
+  const q = rankQuery();
+  const hit = SNIPPETS.get(row);
+  if (hit && hit.q === q) return hit.s;
+  const p = row.problem ? String(row.problem) : "";
+  let t = p ? (isProbablyHtml(unescapeIfEscapedHtml(p)) ? htmlToText(p) : cleanText(p)).replace(/\s+/g, " ").trim() : "";
+  if (q) {
+    // il riepilogo non contiene tutte le parole ma il testo dei messaggi sì: l'estratto si prende da lì
+    if (row.fullText && !matchesAllTerms(t, q)) t = cleanText(String(row.fullText).replace(/  +/g, " — "));
+    t = bestSnippet(t, q, 300);
+  } else t = t.slice(0, 300);
+  SNIPPETS.set(row, { q, s: t });
+  return t;
 }
 
 function sortSpec() {
   const s = SORTS[S.sort.key] || SORTS.date;
-  return [{ property: rowReader.sortAlias(s.field) || s.fb, direction: S.sort.dir }];
+  return [{ property: rowReader.sortAlias(s.field) || s.fb, direction: S.sort.key === "relevance" ? "DESC" : S.sort.dir }];
 }
 
 const conditionsForId = (id) => [{ ...DOMAIN_CONDITION }, { property: "ID", value: id, op: "eq", id: "ID" }];
@@ -480,8 +503,10 @@ function mergeRowLists(...lists) {
 
 function sortUnifiedRows(rows, exactNum = "") {
   if (!rows || rows.length <= 1) return rows || [];
-  const key = S.sort && S.sort.key ? S.sort.key : "date";
-  const desc = !S.sort || S.sort.dir !== "ASC";
+  if (byRelevance() && !exactNum) return sortByRelevance(rows, rankQuery());
+  // «Attinenza» senza parole cercate: dal più recente
+  const key = S.sort && S.sort.key && S.sort.key !== "relevance" ? S.sort.key : "date";
+  const desc = !S.sort || S.sort.dir !== "ASC" || S.sort.key === "relevance";
   const dir = desc ? -1 : 1;
   return [...rows].sort((a, b) => {
     if (exactNum) {
@@ -512,7 +537,7 @@ async function verifyTouchRowsAllWords(rows, f) {
   const subjWords = queryTerms(f.subject || "");
   let candidates = rows;
   if (subjWords.length > 1) {
-    candidates = candidates.filter((r) => matchesAllTokens(r.subject || "", subjWords));
+    candidates = candidates.filter((r) => matchesAllTerms(r.subject || "", subjWords));
   }
   const tid = ticketIdFrom(f.text);
   const textWords = tid ? [] : queryTerms(f.text || "");
@@ -522,7 +547,7 @@ async function verifyTouchRowsAllWords(rows, f) {
   const needConvCheck = [];
   for (const r of candidates) {
     const hay = `${r.subject || ""} ${r.problem || ""} ${r.catalog || ""} ${r.account || ""}`;
-    if (matchesAllTokens(hay, textWords)) {
+    if (matchesAllTerms(hay, textWords)) {
       confirmedIds.add(r.id);
     } else {
       needConvCheck.push(r);
@@ -560,10 +585,10 @@ async function verifyTouchRowsAllWords(rows, f) {
       for (const r of batch) {
         const msgs = byTicket.get(r.id) || [];
         const fullHay = `${r.subject || ""} ${r.problem || ""} ${r.catalog || ""} ${r.account || ""} ${msgs.join(" ")}`;
-        if (matchesAllTokens(fullHay, textWords)) {
+        if (matchesAllTerms(fullHay, textWords)) {
           confirmedIds.add(r.id);
           if (!r.problem && msgs.length) {
-            const hitMsg = msgs.find((m) => textWords.some((w) => matchesAllTokens(m, [w]))) || msgs[0];
+            const hitMsg = msgs.find((m) => matchesAllTerms(m, textWords)) || msgs.find((m) => textWords.some((w) => matchesAllTerms(m, [w]))) || msgs[0];
             if (hitMsg) r.problem = hitMsg;
           }
         } else if (truncated) {
@@ -659,6 +684,7 @@ async function search({ more = false, fresh = false } = {}) {
   if (!more && f.text !== lastBoxText) {
     lastBoxText = f.text;
     pickPending = true;
+    listFilters.touch = listFilters.ar = listFilters.storico = "";
   }
   const size = Number(S.settings.pageSize) || 50;
   const tid = ticketIdFrom(f.text);
@@ -667,7 +693,10 @@ async function search({ more = false, fresh = false } = {}) {
   const textWords = tid ? [] : queryTerms(f.text || "");
   const subjWords = queryTerms(f.subject || "");
   const multiWord = textWords.length > 1 || subjWords.length > 1;
-  const fetchLimit = !more && multiWord ? Math.max(size, 150) : size;
+  // Con più parole (verificate qui) o con l'ordinamento per attinenza si chiedono più ticket insieme: almeno 150,
+  // in pagine intere, così «Mostra altri» riparte dal punto giusto.
+  const wide = !more && (multiWord || (S.sort.key === "relevance" && textWords.length > 0));
+  const fetchLimit = wide ? size * Math.ceil(150 / size) : size;
 
   // stessa ricerca fatta da poco: risultati subito dalla memoria
   const cacheKey = more ? null : resultCacheKey(f, size);
@@ -993,7 +1022,8 @@ async function search({ more = false, fresh = false } = {}) {
     }
 
     if (ac.signal.aborted) return;
-    S.results = more ? mergeRowLists(S.results, rows) : rows;
+    if (!more && fetchLimit > size) S.page = fetchLimit / size; // pagine già lette
+    S.results = more ? sortUnifiedRows(mergeRowLists(S.results, rows), exactNum) : rows;
     S.total = Math.max(total, S.results.length);
     S.touchTotal = Math.max(touchTotal, touchRows().length);
     log(`ricerca completata: ${S.results.length} ticket in ${Date.now() - t0} ms`);
@@ -1200,13 +1230,13 @@ function runAr({ fresh = false } = {}) {
     return Promise.resolve([]);
   }
   if (!fresh && arInflight && arInflight.key === key) return arInflight.promise;
-  if (!fresh && key === st.key && !st.error && Date.now() - st.at < AR_RESULT_TTL) {
+  if (!fresh && key === st.key && !st.error && Date.now() - st.at < (st.full ? 5 : 1) * AR_RESULT_TTL) {
     st.results = sortUnifiedRows(st.results, exactNum); // l'ordinamento può essere cambiato
     return Promise.resolve(st.results);
   }
   const my = ++arSeq;
   names.queue.length = 0; // i nomi in coda erano per l'elenco di prima
-  Object.assign(st, { results: [], loading: true, error: null, key: "", notices: [] });
+  Object.assign(st, { results: [], loading: true, error: null, key: "", notices: [], full: false, progress: "" });
   renderResults();
   const info = {};
   const promise = ensureCentre()
@@ -1218,7 +1248,11 @@ function runAr({ fresh = false } = {}) {
       st.key = key;
       st.at = Date.now();
       if (!exactNum && info.max && info.raw >= info.max) {
-        st.notices.push(`Il Vecchio Cruscotto restituisce al massimo ${info.max} ticket per ricerca (i più rilevanti): per vedere gli altri restringi il periodo o aggiungi un filtro.`);
+        st.notices.push({
+          text: `Il Vecchio Cruscotto restituisce al massimo ${info.max} ticket per ricerca: qui ne mancano. Posso cercarli tutti dividendo la ricerca per periodi (più richieste al portale), oppure restringi tu con un filtro.`,
+          action: () => runArAll(),
+          actionLabel: "Cerca tutti",
+        });
       }
       // senza centro servizi si cerca in tutti i centri: lo si dice
       if (!exactNum && ar.state.connected && !ar.state.idCenSer && st.results.length) {
@@ -1240,6 +1274,50 @@ function runAr({ fresh = false } = {}) {
     });
   arInflight = { key, promise };
   return promise;
+}
+
+/**
+ * La ricerca in corso, completa: oltre il limite del portale, divisa per periodi (anno, poi metà, fino al mese).
+ * I ticket già in elenco restano visibili mentre arrivano gli altri.
+ */
+async function runArAll() {
+  const st = S.arS;
+  const q = ar ? arQuery() : null;
+  if (!q || q.ticketId) return;
+  const key = JSON.stringify(q);
+  const my = ++arSeq;
+  arInflight = null;
+  names.queue.length = 0;
+  Object.assign(st, { loading: true, error: null, notices: [], progress: "" });
+  renderResults();
+  try {
+    await ensureCentre();
+    const res = await ar.searchAll(q, {
+      isCancelled: () => my !== arSeq,
+      onProgress: (p) => {
+        if (my !== arSeq) return;
+        st.progress = `${p.rows.toLocaleString("it-IT")} ticket finora · ${p.queries} richieste`;
+        const n = document.querySelector("#results .loading .ar-progress");
+        if (n) n.textContent = st.progress;
+      },
+    });
+    if (my !== arSeq || res.cancelled) return;
+    st.results = sortUnifiedRows(res.rows);
+    Object.assign(st, { key, at: Date.now(), full: true });
+    const n = res.rows.length.toLocaleString("it-IT");
+    st.notices.push(`Ricerca completa: ${n} ticket, trovati dividendo la ricerca in ${res.queries} periodi.`);
+    if (res.cappedMonths.length) st.notices.push(`In ${res.cappedMonths.length === 1 ? "un mese" : res.cappedMonths.length + " mesi"} (${res.cappedMonths.slice(0, 6).join(", ")}${res.cappedMonths.length > 6 ? "…" : ""}) il portale ha troncato comunque: lì può mancare qualche ticket. Aggiungi un filtro per vederli tutti.`);
+    if (res.stopped) st.notices.push(`Mi sono fermato a ${n} ticket per non caricare troppo il portale: i periodi più vecchi non sono stati cercati. Restringi con un filtro o con il periodo.`);
+    log(`vecchio cruscotto, ricerca completa: ${res.rows.length} ticket in ${res.queries} richieste`);
+  } catch (e) {
+    log(`vecchio cruscotto, ricerca completa: ${e.message}`);
+    if (my === arSeq) st.error = e;
+  } finally {
+    if (my === arSeq) {
+      Object.assign(st, { loading: false, progress: "" });
+      renderResults();
+    }
+  }
 }
 
 // I filtri del Vecchio Cruscotto valgono finché l'app resta aperta: alla riapertura si riparte senza,
@@ -1379,6 +1457,7 @@ function harvestOperators(map) {
 // un ticket alla volta (numero + giorno di apertura: richiesta stretta), partendo dall'alto dell'elenco; ogni nome trovato
 // resta in memoria, quindi lo stesso cliente o operatore non si richiede più.
 const NAMES_PARALLEL = 3;
+const NAMES_LIST_MAX = 250;
 const NAMES_SLOW_MS = 12000;
 const names = { queue: [], active: 0, tried: new Set(), fails: 0, off: false };
 
@@ -1392,7 +1471,8 @@ function needsNames(r) {
 function queueArNames() {
   if (names.off || !storico || !ar || !ctx.arCentre()) return;
   const queued = new Set(names.queue.map((r) => r.id));
-  for (const r of arRows()) {
+  // solo i primi dell'elenco: con centinaia di ticket non si fa una richiesta per ognuno
+  for (const r of arRows().slice(0, NAMES_LIST_MAX)) {
     // i ticket di un altro centro (trovati per numero) non sono nello Storico del proprio centro
     if (r.cenSer && r.cenSer !== ctx.arCentre()) continue;
     if (needsNames(r) && r.date && !names.tried.has(r.id) && !queued.has(r.id)) names.queue.push(r);
@@ -1558,6 +1638,50 @@ function metaEl(r) {
   return meta.length ? h("div", { class: "meta" }, meta.flatMap((m, k) => [k ? h("span", { class: "sep" }, "·") : null, h("span", { title: m }, m)])) : null;
 }
 
+/** Tutto il testo di un ticket su cui agisce «Filtra in elenco» (con i nomi al posto dei codici, dove si conoscono). */
+function filterTextOf(row) {
+  const r = withArNames(row);
+  return [ticketNumber(r.id), r.subject, r.problem, r.fullText, r.account, r.customerCode, r.contact, r.ownerGroup, r.assigned, r.catalog, r.topic, statusInfo(r.statusId, r.statusText).label].filter(Boolean).join(" ");
+}
+
+/** I ticket della scheda che passano «Filtra in elenco» (tutti, se la casella è vuota). */
+function filteredRows(rows, tab = S.tab) {
+  const test = listFilter(listFilters[tab] || "");
+  return test ? rows.filter((r) => test(filterTextOf(r))) : rows;
+}
+
+/** Nasconde sul posto le righe che non passano il filtro: niente richieste al portale, l'elenco non si ridisegna. */
+function applyListFilter() {
+  const box = document.querySelector("#results .list-filter");
+  if (!box) return;
+  const test = isSourceTab() ? listFilter(listFilters[S.tab] || "") : null;
+  const items = visibleItems();
+  let shown = 0;
+  for (const n of document.querySelectorAll("#results .list > .item")) {
+    const it = items[Number(n.dataset.i)];
+    const ok = !test || !!(it && test(filterTextOf(it.row)));
+    n.hidden = !ok;
+    if (ok) shown++;
+  }
+  const count = box.querySelector(".lf-count");
+  if (count) count.textContent = test ? `${shown.toLocaleString("it-IT")} di ${items.length.toLocaleString("it-IT")}` : "";
+  box.classList.toggle("on", !!test);
+  const none = document.querySelector("#results .lf-none");
+  if (none) none.hidden = !(test && !shown && items.length);
+}
+const applyListFilterSoon = debounce(applyListFilter, 120);
+
+/** La casella «Filtra in elenco» sopra i risultati delle tre fonti. */
+function listFilterBox() {
+  const inp = h("input", { class: "input", type: "search", value: listFilters[S.tab] || "", placeholder: "Filtra in elenco: parole, -parola per escludere", "aria-label": "Filtra in elenco", title: "Restringe i ticket già trovati, senza interrogare il portale. Tutte le parole devono comparire; con il segno meno davanti (-parola) i ticket che la contengono spariscono." });
+  inp.addEventListener("input", () => { listFilters[S.tab] = inp.value; applyListFilterSoon(); });
+  inp.addEventListener("keydown", (e) => {
+    if (e.key === "Escape" && inp.value) { e.stopPropagation(); inp.value = ""; listFilters[S.tab] = ""; applyListFilter(); }
+    if (e.key === "Enter") { e.preventDefault(); applyListFilter(); }
+  });
+  return h("div", { class: "list-filter" }, icon("filter"), inp, h("span", { class: "lf-count" }));
+}
+
 function tabBtn(key, label, n) {
   return h("button", { class: "tab" + (S.tab === key ? " on" : ""), onclick: () => pickTab(key) }, label, n != null ? h("span", { class: "n" }, String(n)) : null);
 }
@@ -1603,6 +1727,9 @@ function sourceTabs(fmtN) {
 function renderResults() {
   const el = $("#results");
   const top = el.scrollTop;
+  // se si sta scrivendo in «Filtra in elenco» il cursore deve restare lì anche quando l'elenco si ridisegna
+  const ae = document.activeElement;
+  const typingFilter = ae && ae.closest && ae.closest("#results .list-filter") ? [ae.selectionStart, ae.selectionEnd] : null;
   clear(el);
   const fmtN = (n) => Number(n || 0).toLocaleString("it-IT");
   const src = isSourceTab();
@@ -1629,7 +1756,7 @@ function renderResults() {
       h("button", { class: "btn btn-small" + (ui.showFilters ? " on" : ""), title: "Mostra/nascondi i filtri", onclick: toggleFilters }, icon("filter"), "Filtri"),
       h("div", { class: "res-count" }, countText,
         src && !busy && items.length && total > items.length ? h("small", null, ` · ne vedi ${fmtN(items.length)}`) : null),
-      S.tab === "touch" || S.tab === "ar" ? [sortSel, dirBtn] : null,
+      S.tab === "touch" || S.tab === "ar" ? [sortSel, S.sort.key === "relevance" ? null : dirBtn] : null,
       S.tab === "storico" ? h("span", { class: "hint" }, "dal più recente") : null,
       src ? h("button", { class: "btn btn-small btn-icon", onclick: () => (S.tab === "storico" ? runStorico({ fresh: true }) : S.tab === "ar" ? runAr({ fresh: true }) : search({ fresh: true })), title: "Aggiorna (rifà la ricerca sul portale)" }, icon("reload")) : null),
     h("div", { class: "res-tools" },
@@ -1648,6 +1775,7 @@ function renderResults() {
         tabBtn("favorites", "Preferiti", S.favorites.length || null),
         tabBtn("recent", "Recenti", S.recent.length || null))));
 
+  if (src && (items.length > 5 || listFilters[S.tab])) head.appendChild(listFilterBox());
   const chips = S.tab === "storico" ? describeStorico() : S.tab === "ar" ? describeAr() : describeFilters(S.filters);
   if (chips.length && (src || S.tab === "archive")) {
     const drop = S.tab === "storico" ? clearStoricoKey : S.tab === "ar" ? clearArKey : clearFilterKey;
@@ -1724,12 +1852,16 @@ function renderResults() {
     }[S.tab];
     list.appendChild(h("div", { class: "empty-state" }, h("h3", null, empty[0]), empty[1]));
   }
+  if (src && items.length) {
+    list.appendChild(h("div", { class: "empty-state lf-none", hidden: true }, h("h3", null, "Nessun ticket dell'elenco passa il filtro"),
+      "Togli una parola dalla casella «Filtra in elenco»: i ticket trovati sono ancora tutti qui."));
+  }
   if (busy) {
     const still = S.tab === "touch" && S.pending && S.pending.size ? [...S.pending].join(", ") : "";
     const msg = S.tab === "storico"
       ? (items.length ? "Carico altri…" : "Cerco nello Storico…")
       : S.tab === "ar"
-        ? "Cerco nel Vecchio Cruscotto…"
+        ? ["Cerco nel Vecchio Cruscotto… ", h("span", { class: "ar-progress" }, arS.progress || "")]
         : still
         ? (S.results.length ? `Sto ancora cercando in: ${still}…` : `Cerco in: ${still}…`)
         : S.results.length ? "Carico altri…" : "Cerco i ticket…";
@@ -1742,8 +1874,16 @@ function renderResults() {
   el.appendChild(list);
 
   const words = tokens(S.filters.text);
-  if (src && S.tab !== "storico" && words.length && !ticketIdFrom(S.filters.text)) highlight(list, words);
+  if (src && S.tab !== "storico" && words.length && !ticketIdFrom(S.filters.text)) highlight(list, highlightPatterns(rankQuery()));
   else if (S.tab === "archive" && words.length) highlight(list, words);
+  applyListFilter();
+  if (typingFilter) {
+    const inp = el.querySelector(".list-filter input");
+    if (inp) {
+      inp.focus();
+      try { inp.setSelectionRange(typingFilter[0], typingFilter[1]); } catch { /* tipo di casella senza selezione */ }
+    }
+  }
   el.scrollTop = top;
   if (S.tab === "ar" && !S.arS.loading) queueArNames();
 }
@@ -1955,7 +2095,7 @@ async function exportCsv() {
   const job = (S.job = { label: "Preparo il file", done: 0, total: Math.min(fromAr ? arRows().length : S.total, 1000) });
   renderResults();
   try {
-    const rows = fromAr ? arRows().map(withArNames) : await fetchAllRows(1000, job);
+    const rows = fromAr ? filteredRows(arRows(), "ar").map(withArNames) : await fetchAllRows(1000, job);
     if (job.cancelled) return;
     const cols = [
       ["Numero", (r) => ticketNumber(r.id)], ["Oggetto", (r) => r.subject], ["Stato", (r) => statusInfo(r.statusId, r.statusText).label],
@@ -2026,10 +2166,12 @@ async function archiveResults() {
 // ---------------------------------------------------------------- tastiera
 
 function moveCursor(delta) {
-  const items = [...document.querySelectorAll("#results .item")];
+  const items = [...document.querySelectorAll("#results .item:not([hidden])")];
   if (!items.length) return;
-  S.cursor = Math.max(0, Math.min(items.length - 1, (S.cursor < 0 ? (delta > 0 ? -1 : items.length) : S.cursor) + delta));
-  const el = items[S.cursor];
+  // S.cursor è la posizione nell'elenco completo; con «Filtra in elenco» ci si muove tra le righe rimaste visibili
+  const at = items.findIndex((n) => Number(n.dataset.i) === S.cursor);
+  const el = items[Math.max(0, Math.min(items.length - 1, (at < 0 ? (delta > 0 ? -1 : items.length) : at) + delta))];
+  S.cursor = Number(el.dataset.i);
   el.focus();
   el.scrollIntoView({ block: "nearest" });
   openSoon(S.cursor);
@@ -2072,6 +2214,11 @@ async function init() {
   ui.openSections = ui.openSections || {};
   if (lastFilters) S.filters = { ...emptyFilters(), ...lastFilters };
   if (sort && SORTS[sort.key]) S.sort = sort;
+  if (!(await kvGet("sortRelevanceOffered", false))) {
+    S.sort = { key: "relevance", dir: "DESC" };
+    kvSet("sort", S.sort);
+    kvSet("sortRelevanceOffered", true);
+  }
   Object.assign(S, { saved: saved || [], favorites: favorites || [], recent: recent || [], captures: captures || [], caps: caps || {}, typesSeen: typesSeen || {} });
   S.calib.learned = learned || {};
   if (S.caps.containsText && S.caps.containsText.wildcard) {

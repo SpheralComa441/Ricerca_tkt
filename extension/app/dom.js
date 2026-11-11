@@ -36,12 +36,17 @@ export const $ = (sel, root = document) => root.querySelector(sel);
 export const $$ = (sel, root = document) => [...root.querySelectorAll(sel)];
 
 /** Evidenzia le parole cercate nei nodi di testo di un elemento */
+/**
+ * words: parole da evidenziare (stringhe) oppure { text, stem }: con `stem` si evidenziano anche le varianti
+ * della parola (cedolino → cedolini), cioè la radice seguita da una desinenza breve.
+ */
 export function highlight(root, words) {
-  const ws = (words || []).filter((w) => w && w.length >= 2);
+  const ws = (words || []).map((w) => (typeof w === "string" ? { text: w, stem: "" } : w)).filter((w) => w && w.text && w.text.length >= 2);
   if (!ws.length) return 0;
   const esc = (s) => s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
   // confronto senza accenti: si cerca sulla forma normalizzata carattere per carattere
-  const re = new RegExp(ws.map(esc).join("|"), "gi");
+  const alts = [...ws.map((w) => esc(w.text)), ...ws.filter((w) => w.stem).map((w) => `\\b${esc(w.stem)}[a-z]{0,3}\\b`)];
+  const re = new RegExp(alts.join("|"), "gi");
   let count = 0;
   const walker = document.createTreeWalker(root, NodeFilter.SHOW_TEXT, {
     acceptNode: (n) => (n.parentElement && n.parentElement.closest("mark,script,style") ? NodeFilter.FILTER_REJECT : NodeFilter.FILTER_ACCEPT),
