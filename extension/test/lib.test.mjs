@@ -353,7 +353,7 @@ test("ar: extractMcidFromHtml, buildArQuery (NumTic, prefissi * e AND tra parole
   const qWords = buildArQuery({ text: "voc retributiv", idCenSer: "PAOW" });
   assert.equal(
     qWords,
-    "IdCenSer:PAOW and ( Testi:(voc or voc*) or Oggetto:(voc or voc*) ) and ( Testi:(retributiv or retributiv*) or Oggetto:(retributiv or retributiv*) )"
+    "IdCenSer:PAOW and ( Testi:(voc OR voc*) or Oggetto:(voc OR voc*) ) and ( Testi:(retributiv OR retributiv*) or Oggetto:(retributiv OR retributiv*) )"
   );
 
   // Ricerca per numero ticket a 7 cifre tramite il campo Solr NumTic
@@ -537,7 +537,7 @@ test("ar: risposta nel formato reale (42 campi, riga sentinella, maxResults) e f
   // gruppo come nella Ricerca rapida (… and IdGruppo:10663) e anni di apertura
   assert.equal(
     buildArQuery({ text: "detassazione", idCenSer: "PAOW", groups: ["10663"] }),
-    "IdCenSer:PAOW and ( Testi:(detassazione or detassazion*) or Oggetto:(detassazione or detassazion*) ) and IdGruppo:10663"
+    "IdCenSer:PAOW and ( Testi:(detassazione OR detassazion*) or Oggetto:(detassazione OR detassazion*) ) and IdGruppo:10663"
   );
   assert.match(buildArQuery({ text: "x", groups: ["10663", "10552"] }), /\( IdGruppo:10663 or IdGruppo:10552 \)$/);
   assert.match(buildArQuery({ text: "cud", dateFrom: "2020-01-01", dateTo: "2026-12-31" }), /^\( \(IdAnnoA:2020 \) or .*\(IdAnnoA:2026 \) \) and /);
@@ -749,7 +749,7 @@ test("ar: filtri della Ricerca rapida (gruppo, operatore, cliente, stato, chi ha
   // come nella ricerca reale del portale: … and ( Testi:(x) or Oggetto:(x) ) and IdOperatore:… and IdCliente:…
   assert.equal(
     buildArQuery({ text: "cud", idCenSer: "PAOW", operator: "000000000100001", clientCode: "1234" }),
-    "IdCenSer:PAOW and ( Testi:(cud or cud*) or Oggetto:(cud or cud*) ) and IdOperatore:000000000100001 and IdCliente:000000000001234",
+    "IdCenSer:PAOW and ( Testi:(cud OR cud*) or Oggetto:(cud OR cud*) ) and IdOperatore:000000000100001 and IdCliente:000000000001234",
   );
   // solo filtri: il gruppo che ha partecipato si cerca nelle due forme in cui può essere scritto nell'indice
   assert.equal(buildArQuery({ idCenSer: "PAOW", groupsIn: ["50454"] }), "IdCenSer:PAOW and ( IdGruppoIn:50454 or IdGruppoIn:50454.0 )");
@@ -767,8 +767,8 @@ test("ar: filtri della Ricerca rapida (gruppo, operatore, cliente, stato, chi ha
   assert.match(buildArQuery({ text: "cud", dateTo: `${y}-02-10`, dateRef: "1" }), new RegExp(`^\\( \\(IdMeseM:1 and IdAnnoM:${y - 2}\\) or .*\\(IdMeseM:2 and IdAnnoM:${y}\\) \\) and `), "solo «al»: dai due anni prima");
   assert.match(buildArQuery({ text: "cud", dateFrom: `${y}-01-15` }), new RegExp(`^\\( \\(IdMeseA:1 and IdAnnoA:${y}\\)`), "solo «dal»: fino a oggi");
   // dove cercare le parole
-  assert.equal(buildArQuery({ text: "cud", searchIn: "1" }), "Oggetto:(cud or cud*)");
-  assert.equal(buildArQuery({ text: "cud", searchIn: "0" }), "Testi:(cud or cud*)");
+  assert.equal(buildArQuery({ text: "cud", searchIn: "1" }), "Oggetto:(cud OR cud*)");
+  assert.equal(buildArQuery({ text: "cud", searchIn: "0" }), "Testi:(cud OR cud*)");
   // con un numero ticket i filtri non contano
   assert.equal(buildArQuery({ ticketId: "8900042", idCenSer: "PAOW", statoBase: "C", groupsIn: ["50454"], dateFrom: "2026-01-01", dateTo: "2026-03-31" }), "IdCenSer:PAOW and NumTic:8900042");
 
@@ -886,10 +886,10 @@ test("attinenza: radici italiane, tutte le parole con le varianti, fasce di atti
 });
 
 test("ar: la ricerca usa la radice per singolare/plurale; oltre il limite del portale si divide per periodi", async () => {
-  assert.equal(buildArQuery({ text: "cedolino" }), "( Testi:(cedolino or cedolin*) or Oggetto:(cedolino or cedolin*) )");
-  assert.equal(buildArQuery({ text: "premio" }), "( Testi:(premio or premi*) or Oggetto:(premio or premi*) )");
-  assert.equal(buildArQuery({ text: "paga" }), "( Testi:(paga or paga*) or Oggetto:(paga or paga*) )", "le parole corte non si allargano");
-  assert.equal(buildArQuery({ text: "f24" }), "( Testi:(f24 or f24*) or Oggetto:(f24 or f24*) )");
+  assert.equal(buildArQuery({ text: "cedolino" }), "( Testi:(cedolino OR cedolin*) or Oggetto:(cedolino OR cedolin*) )");
+  assert.equal(buildArQuery({ text: "premio" }), "( Testi:(premio OR premi*) or Oggetto:(premio OR premi*) )");
+  assert.equal(buildArQuery({ text: "paga" }), "( Testi:(paga OR paga*) or Oggetto:(paga OR paga*) )", "le parole corte non si allargano");
+  assert.equal(buildArQuery({ text: "f24" }), "( Testi:(f24 OR f24*) or Oggetto:(f24 OR f24*) )");
 
   // portale finto: 9 ticket nel 2026 (3 al mese da gennaio a marzo), limite 4 per ricerca
   const y = new Date().getFullYear();
@@ -954,11 +954,40 @@ test("ar: con più parole i ticket trovati dal portale non si scartano anche se 
   ar.setCentre("PAOW");
   const info = {};
   const rows = await ar.search({ text: "detassazione premio", filters: emptyArFilters() }, info);
-  assert.match(queries[0], /Testi:\(detassazione or detassazion\*\).* and .*Testi:\(premio or premi\*\)/, "le parole sono già chieste tutte al portale");
+  assert.match(queries[0], /Testi:\(detassazione OR detassazion\*\).* and .*Testi:\(premio OR premi\*\)/, "le parole sono già chieste tutte al portale");
   assert.deepEqual(rows.map((r) => r.id), ["8900001", "8900002", "8900003"], "restano tutti i ticket che il portale ha trovato");
   assert.equal(info.raw, 3);
   assert.equal(info.kept, 3);
   // l'attinenza li mette comunque in ordine: prima chi ha tutte le parole vicine
   const { sortByRelevance } = await import("../lib/relevance.js");
   assert.deepEqual(sortByRelevance(rows, "detassazione premio").map((r) => r.id), ["8900001", "8900002", "8900003"]);
+});
+
+test("touch: più parole vanno al portale in una sola condizione, come fa HDA Touch; la soluzione è testo del ticket", async () => {
+  const { buildConditions } = await import("../lib/filters.js");
+  const { makeRowReader } = await import("../lib/rows.js");
+  const { relevance, TIERS } = await import("../lib/relevance.js");
+  const textConds = (calib) => buildConditions({ ...emptyFilters(), text: "detassazione maggiorazione" }, calib).filter((c) => c.property === "FullText");
+
+  // come nella richiesta reale di Touch: FullText eq «detassazione maggiorazione» [INCLUDECONVERSATIONITEM]
+  const native = textConds({ singleFullText: true });
+  assert.equal(native.length, 1);
+  assert.equal(native[0].value, "detassazione maggiorazione");
+  assert.equal(native[0].op, "eq");
+  assert.equal(native[0].extKey, "INCLUDECONVERSATIONITEM");
+  // ricerca estesa: la parola più lunga al portale, le altre verificate nell'app
+  const wide = textConds({ primaryTermOnly: true });
+  assert.equal(wide.length, 1);
+  assert.equal(wide[0].value, "maggiorazione");
+  // una parola sola: uguale nei due modi
+  const one = (calib) => buildConditions({ ...emptyFilters(), text: "cigs" }, calib).find((c) => c.property === "FullText").value;
+  assert.equal(one({ singleFullText: true }), "cigs");
+  assert.equal(one({ primaryTermOnly: true }), "cigs");
+
+  // la colonna Solution dell'elenco (c44 nella vista Default)
+  const row = makeRowReader(null).read({ c23: "10500123Z", c45: "Quesito", c40: "vedi allegato", c44: "si applica la detassazione alla maggiorazione" });
+  assert.equal(row.solution, "si applica la detassazione alla maggiorazione");
+  assert.equal(makeRowReader({ c1: "ID", c2: "Solution" }).read({ c1: "1", c2: "testo" }).solution, "testo");
+  assert.equal(relevance(row, "detassazione maggiorazione").tier, TIERS.ALL_NEAR_TEXT, "le parole nella soluzione valgono come testo");
+  assert.equal(relevance({ ...row, solution: "" }, "detassazione maggiorazione").tier, TIERS.NONE);
 });

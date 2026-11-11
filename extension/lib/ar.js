@@ -80,8 +80,10 @@ function fmtSolrTerm(w) {
   if (/^[A-Za-z0-9\u00C0-\u017F]{3,}$/.test(clean)) {
     // Singolare e plurale: si toglie la vocale finale (cedolino → cedolin*: cedolini, cedolino…; premio → premi*),
     // ma solo se ne restano almeno cinque lettere, per non allargare troppo le parole corte.
+    // Dentro il campo l'operatore è maiuscolo, come lo scrive il portale («detassazione AND maggiorazioni»): in minuscolo
+    // potrebbe essere letto come una parola da cercare. Il jolly va in minuscolo perché non passa dall'analisi del testo.
     const root = /^[A-Za-z]{6,}$/.test(clean) && /[aeio]$/i.test(clean) ? clean.slice(0, -1) : clean;
-    return `${clean} or ${root}*`;
+    return `${clean} OR ${root.toLowerCase()}*`;
   }
   return clean;
 }

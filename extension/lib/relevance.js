@@ -184,7 +184,8 @@ export const TIERS = {
 /**
  * Attinenza di un ticket: { tier, score }. `score` = fascia × 1000 + dettaglio (0-999), così la fascia decide sempre
  * e il dettaglio ordina dentro la fascia (parole più strette, in ordine, esatte, più parole trovate).
- * Campi letti: subject (oggetto); il testo è problem (richiesta o estratto) più fullText (messaggi, quando ci sono).
+ * Campi letti: subject (oggetto); il testo è problem (richiesta o estratto), solution (soluzione, in Touch) e
+ * fullText (messaggi, nel Vecchio Cruscotto).
  */
 export function relevance(row, termsOrQuery) {
   const terms = Array.isArray(termsOrQuery) && termsOrQuery.length && typeof termsOrQuery[0] === "object" ? termsOrQuery : searchTerms(termsOrQuery);
@@ -195,7 +196,7 @@ export function relevance(row, termsOrQuery) {
   // (le parole sono «vicine» solo dentro lo stesso messaggio). Il pezzo che ripete l'oggetto non è «testo».
   const messages = row.fullText ? String(row.fullText).split(/ {2,}/).filter((m) => m.trim() && norm(m) !== subjNorm) : [];
   const S = analyse(row.subject || "", terms);
-  const T = mergeParts([row.problem, ...messages].filter(Boolean).map((t) => analyse(t, terms)), n);
+  const T = mergeParts([row.problem, row.solution, ...messages].filter(Boolean).map((t) => analyse(t, terms)), n);
   const union = S.hits.filter((h, k) => h || T.hits[k]).length;
   if (!union) return { tier: 0, score: 0 };
 

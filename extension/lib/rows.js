@@ -10,6 +10,7 @@ const FIELDS = {
   id: { re: /^ID$/, fb: "c23" },
   subject: { re: /^Subject$/, fb: "c45" },
   problem: { re: /^Problem$/, fb: "c40" },
+  solution: { re: /^Solution$/, fb: "c44" },
   statusId: { re: /^TicketStatusID$/, fb: "c59" },
   statusText: { re: /^TicketStatus\.(Translated)?Description$/, fb: "c56" },
   typeId: { re: /^TicketTypeID$/, fb: "c61" },

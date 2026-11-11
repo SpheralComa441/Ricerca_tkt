@@ -159,6 +159,11 @@ function snippetOf(row) {
   if (q) {
     // il riepilogo non contiene tutte le parole ma il testo dei messaggi sì: l'estratto si prende da lì
     if (row.fullText && !matchesAllTerms(t, q)) t = cleanText(String(row.fullText).replace(/  +/g, " — "));
+    else if (row.solution && !matchesAllTerms(t, q)) {
+      // in Touch le parole possono stare nella soluzione: se la richiesta non le ha tutte si mostra anche quella
+      const sol = String(row.solution);
+      t = [t, (isProbablyHtml(unescapeIfEscapedHtml(sol)) ? htmlToText(sol) : cleanText(sol)).replace(/\s+/g, " ").trim()].filter(Boolean).join(" — ");
+    }
     t = bestSnippet(t, q, 300);
   } else t = t.slice(0, 300);
   SNIPPETS.set(row, { q, s: t });
@@ -535,7 +540,7 @@ async function verifyTouchRowsAllWords(rows, f) {
   const confirmedIds = new Set();
   const needConvCheck = [];
   for (const r of candidates) {
-    const hay = `${r.subject || ""} ${r.problem || ""} ${r.catalog || ""} ${r.account || ""}`;
+    const hay = `${r.subject || ""} ${r.problem || ""} ${r.solution || ""} ${r.catalog || ""} ${r.account || ""}`;
     if (matchesAllTerms(hay, textWords)) {
       confirmedIds.add(r.id);
     } else {
@@ -573,7 +578,7 @@ async function verifyTouchRowsAllWords(rows, f) {
       }
       for (const r of batch) {
         const msgs = byTicket.get(r.id) || [];
-        const fullHay = `${r.subject || ""} ${r.problem || ""} ${r.catalog || ""} ${r.account || ""} ${msgs.join(" ")}`;
+        const fullHay = `${r.subject || ""} ${r.problem || ""} ${r.solution || ""} ${r.catalog || ""} ${r.account || ""} ${msgs.join(" ")}`;
         if (matchesAllTerms(fullHay, textWords)) {
           confirmedIds.add(r.id);
           if (!r.problem && msgs.length) {
@@ -771,10 +776,18 @@ async function search({ more = false, fresh = false } = {}) {
   };
 
   const calibForSearch = { ...S.calib, primaryTermOnly: true };
+  // Più parole nella casella: come fa HDA Touch, tutto il testo va al portale in una sola condizione, ed è il portale
+  // a trovare i ticket che le contengono tutte (oggetto, richiesta, soluzione, messaggi). Niente verifica qui.
+  // Con una "frase tra virgolette" resta il modo dell'app: parola più lunga al portale, il resto verificato qui.
+  const nativeText = !tid && textWords.length > 1 && !/"/.test(f.text);
+  const calibNative = { ...S.calib, singleFullText: true };
+  const textCalib = nativeText ? calibNative : calibForSearch;
+  /** Filtri per la verifica locale: con la ricerca del portale le parole della casella non si ricontrollano. */
+  const checkF = (x) => (nativeText ? { ...x, text: "" } : x);
 
-  const run = (filters, customLimit = fetchLimit, signal = ac.signal) =>
+  const run = (filters, customLimit = fetchLimit, signal = ac.signal, calib = calibForSearch) =>
     hda.listData("Incidents", {
-      conditions: buildConditions(filters, calibForSearch),
+      conditions: buildConditions(filters, calib),
       page: S.page,
       start: (S.page - 1) * size,
       limit: customLimit,
@@ -794,9 +807,9 @@ async function search({ more = false, fresh = false } = {}) {
     let touchTotal = 0; // quanti ticket ha in tutto Touch per questa ricerca (per «Mostra altri»)
 
     if (more && S.activeEffectiveFilters) {
-      const res = await run(S.activeEffectiveFilters, size);
+      const res = await run(S.activeEffectiveFilters, size, ac.signal, textCalib);
       if (ac.signal.aborted) return;
-      rows = await verifyTouchRowsAllWords(readRawRows(res.rows), f);
+      rows = await verifyTouchRowsAllWords(readRawRows(res.rows), checkF(f));
       total = res.total;
       touchTotal = res.total || 0;
     } else if (isUnconstrained(f)) {
@@ -832,23 +845,23 @@ async function search({ more = false, fresh = false } = {}) {
         "messaggi di Touch",
         (async () => {
           try {
-            const r = await run(f, fetchLimit);
+            const r = await run(f, fetchLimit, ac.signal, textCalib);
             S.activeEffectiveFilters = f;
-            return { rows: await verifyTouchRowsAllWords(readRawRows(r.rows), f), total: r.total, read: r.rows.length, complete: true };
+            return { rows: await verifyTouchRowsAllWords(readRawRows(r.rows), checkF(f)), total: r.total, read: r.rows.length, complete: true };
           } catch (e) {
             if (e instanceof AuthError || e.name === "AbortError") throw e;
             log(`FullText su tutto lo storico (${e.message}): riprovo sugli ultimi 24 mesi / aperti`);
             // Se SQL Server supera i 25s su 10 anni senza filtri, restringiamo automaticamente FullText agli ultimi 24 mesi (o agli aperti)
             const recentF = !f.dateFrom ? { ...f, dateFrom: twoYearsAgoDate() } : { ...f, statuses: OPEN_STATUS_IDS };
             try {
-              const r2 = await run(recentF, fetchLimit);
+              const r2 = await run(recentF, fetchLimit, ac.signal, textCalib);
               S.activeEffectiveFilters = recentF;
               S.notices.push(
                 !f.dateFrom
                   ? "La ricerca nei messaggi su tutto lo storico ha superato il limite di 25 secondi del portale: i messaggi sono cercati negli ultimi 24 mesi (gli oggetti su tutto lo storico)."
                   : "La ricerca nei messaggi ha superato il limite di 25 secondi del portale: i messaggi sono cercati nei ticket aperti."
               );
-              return { rows: await verifyTouchRowsAllWords(readRawRows(r2.rows), f), total: r2.total, read: r2.rows.length };
+              return { rows: await verifyTouchRowsAllWords(readRawRows(r2.rows), checkF(f)), total: r2.total, read: r2.rows.length };
             } catch (e2) {
               if (e2 instanceof AuthError || e2.name === "AbortError") throw e2;
               S.activeEffectiveFilters = subF;
@@ -864,9 +877,17 @@ async function search({ more = false, fresh = false } = {}) {
       const subRows = await subPromise;
       if (ac.signal.aborted) return;
       rows = sortUnifiedRows(mergeRowLists(ftRes.rows, subRows));
-      total = multiWord ? rows.length : Math.max(ftRes.total || 0, rows.length);
-      touchTotal = multiWord ? 0 : ftRes.total || 0;
-      if (multiWord && !more) noteTouchScan(ftRes.read || 0, ftRes.total || 0, fetchLimit, primaryTerm(textWords), ftRes.rows.length);
+      // con la ricerca del portale il totale è il suo (e «Mostra altri» carica le pagine successive)
+      const portalTotal = nativeText && subjWords.length <= 1;
+      total = multiWord && !portalTotal ? rows.length : Math.max(ftRes.total || 0, rows.length);
+      touchTotal = multiWord && !portalTotal ? 0 : ftRes.total || 0;
+      if (nativeText && !more) {
+        log(`touch, più parole: il portale trova ${ftRes.total || 0} ticket con tutte le parole («${f.text}» in una sola ricerca)`);
+        // si può sempre allargare: altre forme delle parole (singolare/plurale), controllando i ticket uno per uno
+        S.touchScan = ftRes.complete || ftRes.total
+          ? { native: true, filters: JSON.parse(JSON.stringify(S.activeEffectiveFilters || f)), word: primaryTerm(textWords), step: fetchLimit, examined: 0, total: null, running: false, stopped: false, error: "" }
+          : null;
+      } else if (multiWord && !more) noteTouchScan(ftRes.read || 0, ftRes.total || 0, fetchLimit, primaryTerm(textWords), ftRes.rows.length);
       if (hasNarrowingFilter(f) && rows.length < size) S.notices.push(textNarrowsNotice(f));
     } else if (tid) {
       // Ricerca per numero ticket: su HDA TOUCH tutte le varianti dell'ID in parallelo (es. "9876543" e "9876543Z",
@@ -1043,7 +1064,7 @@ async function scanTouchRest() {
   const startAt = scan.examined;
   const live = () => S.touchScan === scan && searchAbort === ac && !ac.signal.aborted;
   try {
-    while (scan.examined < scan.total) {
+    while (scan.total == null || scan.examined < scan.total) {
       if (scan.examined - startAt >= TOUCH_SCAN_MAX) {
         scan.stopped = true;
         break;
@@ -1065,13 +1086,13 @@ async function scanTouchRest() {
       const ok = await verifyTouchRowsAllWords(res.rows.map((r) => rowReader.read(r)), scan.filters);
       if (!live()) return;
       scan.examined += res.rows.length;
-      if (res.total) scan.total = Math.max(res.total, scan.examined);
+      scan.total = Math.max(res.total || 0, scan.examined);
       S.results = sortUnifiedRows(mergeRowLists(S.results, ok));
       S.total = S.results.length;
       lookups.harvest(ok);
       renderResults();
     }
-    log(`touch, più parole: controllati ${scan.examined} di ${scan.total}, ${S.results.length} hanno tutte le parole`);
+    log(`touch, ${scan.native ? "ricerca estesa" : "più parole"}: controllati ${scan.examined} di ${scan.total} ticket con «${scan.word}», in elenco ${S.results.length}`);
   } catch (e) {
     if (e.name === "AbortError" || !live()) return;
     log(`touch, controllo degli altri ticket: ${e.message}`);
@@ -1086,8 +1107,27 @@ async function scanTouchRest() {
 function touchScanNotice(fmtN) {
   const scan = S.touchScan;
   if (!scan) return null;
+  const inList = fmtN(S.results.filter((r) => r.source !== "ar").length);
+  if (scan.native) {
+    // la ricerca è quella del portale; in più si possono cercare le altre forme delle parole
+    if (scan.running) return { text: `Ricerca estesa… controllati ${fmtN(scan.examined)}${scan.total != null ? " di " + fmtN(scan.total) : ""} ticket con «${scan.word}» (in elenco ${inList} finora).` };
+    if (!scan.examined && !scan.error) {
+      return {
+        text: `Questi sono i ticket che HDA Touch trova con tutte le parole, scritte così. Con la ricerca estesa cerco anche le altre forme (singolare e plurale), controllando uno per uno i ticket che contengono «${scan.word}»: ci vuole più tempo.`,
+        action: scanTouchRest,
+        actionLabel: "Ricerca estesa",
+      };
+    }
+    const leftN = scan.total != null ? scan.total - scan.examined : 1;
+    if (leftN <= 0) return { text: `Ricerca estesa finita: controllati tutti i ${fmtN(scan.total)} ticket con «${scan.word}». In elenco ${inList} ticket, comprese le altre forme delle parole.` };
+    return {
+      text: `Ricerca estesa: controllati ${fmtN(scan.examined)}${scan.total != null ? " di " + fmtN(scan.total) : ""} ticket con «${scan.word}»${scan.error ? ` (errore: ${scan.error})` : scan.stopped ? " (mi sono fermato per non caricare il portale)" : ""}. In elenco ${inList} ticket.`,
+      action: scanTouchRest,
+      actionLabel: "Continua",
+    };
+  }
   const left = scan.total - scan.examined;
-  const have = `${fmtN(S.results.filter((r) => r.source !== "ar").length)} hanno tutte le parole`;
+  const have = `${inList} hanno tutte le parole`;
   if (scan.running) return { text: `Controllo gli altri ticket… ${fmtN(scan.examined)} di ${fmtN(scan.total)} (${have} finora).` };
   if (left <= 0) return { text: `Controllati tutti i ${fmtN(scan.total)} ticket che il portale trova con «${scan.word}»: ${have}.` };
   return {
@@ -1677,7 +1717,7 @@ function metaEl(r) {
 /** Tutto il testo di un ticket su cui agisce «Filtra in elenco» (con i nomi al posto dei codici, dove si conoscono). */
 function filterTextOf(row) {
   const r = withArNames(row);
-  return [ticketNumber(r.id), r.subject, r.problem, r.fullText, r.account, r.customerCode, r.contact, r.ownerGroup, r.assigned, r.catalog, r.topic, statusInfo(r.statusId, r.statusText).label].filter(Boolean).join(" ");
+  return [ticketNumber(r.id), r.subject, r.problem, r.solution, r.fullText, r.account, r.customerCode, r.contact, r.ownerGroup, r.assigned, r.catalog, r.topic, statusInfo(r.statusId, r.statusText).label].filter(Boolean).join(" ");
 }
 
 /** I ticket della scheda che passano «Filtra in elenco» (tutti, se la casella è vuota). */
@@ -2118,7 +2158,8 @@ function updateJob() {
 async function fetchAllRows(max, job) {
   const out = [];
   const f = S.activeEffectiveFilters || S.filters;
-  const conditions = buildConditions(f, S.calib);
+  // più parole: come nell'elenco, tutto il testo in una sola condizione (la ricerca del portale)
+  const conditions = buildConditions(f, { ...S.calib, singleFullText: true });
   const size = 200;
   for (let page = 1; out.length < max; page++) {
     if (job && job.cancelled) break;
