@@ -315,10 +315,56 @@ function renderArSidebar(ctx) {
     field("Le parole si cercano in", seg("searchIn", [["2", "Testo e oggetto"], ["0", "Solo testo"], ["1", "Solo oggetto"]], "2"))));
 }
 
+/** Filtri della scheda Knowledge Base: quelli del modulo di ricerca del portale. Le parole si scrivono nella casella in alto. */
+function renderKbSidebar(ctx) {
+  const f = ctx.S.kbS.filters;
+  const el = clear(document.getElementById("sidebar"));
+  el.dataset.source = "kb";
+  el.appendChild(h("div", { class: "side-head" }, h("h2", null, "Filtri Knowledge Base"), h("button", { class: "linkbtn", onclick: () => ctx.kbReset() }, "Azzera tutto")));
+  el.appendChild(h("div", { class: "side-note src-kb" },
+    "Le schede della Knowledge Base dell'Area Riservata (SKB). Le parole si scrivono nella casella in alto e si cercano nel titolo e nel testo; per una scheda precisa scrivi SKB# e il numero."));
+
+  const okDay = (v) => v === "" || /^(19[89]\d|20\d\d)-\d\d-\d\d$/.test(v);
+  const day = (key, label) => {
+    const inp = h("input", { class: "input", type: "date", value: f[key] || "", "aria-label": label });
+    inp.addEventListener("change", () => okDay(inp.value) && inp.value !== (f[key] || "") && ctx.kbSetFilter(key, inp.value));
+    return inp;
+  };
+  const p2 = (n) => String(n).padStart(2, "0");
+  const iso = (d) => `${d.getFullYear()}-${p2(d.getMonth() + 1)}-${p2(d.getDate())}`;
+  const now = new Date();
+  const y = now.getFullYear();
+  const presets = [
+    ["Ultimi 3 mesi", { dateFrom: iso(new Date(y, now.getMonth() - 2, 1)), dateTo: iso(new Date(y, now.getMonth() + 1, 0)) }],
+    [String(y), { dateFrom: `${y}-01-01`, dateTo: `${y}-12-31` }],
+    [String(y - 1), { dateFrom: `${y - 1}-01-01`, dateTo: `${y - 1}-12-31` }],
+    ["Tutto", { dateFrom: "", dateTo: "" }],
+  ];
+  const seg = (key, options) => h("div", { class: "seg" },
+    options.map(([v, name, title]) => h("button", { type: "button", class: "preset" + (f[key] === v ? " on" : ""), title: title || null, onclick: () => f[key] !== v && ctx.kbSetFilter(key, v) }, name)));
+
+  el.appendChild(h("div", { class: "fbody plain" },
+    field("Le parole", seg("mode", [["all", "Tutte"], ["any", "Almeno una"], ["phrase", "Frase esatta"]]),
+      "«Tutte»: ogni parola deve comparire nel titolo o nel testo, anche al singolare o al plurale."),
+    field("Visibilità", seg("visibility", [["", "Tutte"], ["E", "Esterna", "Schede che vede anche il cliente"], ["I", "Interna", "Schede riservate agli operatori"]]),
+      "In elenco ogni scheda dice se è esterna o interna."),
+    field("Periodo (dal – al)",
+      h("div", null,
+        h("div", { class: "row2" }, day("dateFrom", "dal"), day("dateTo", "al")),
+        h("div", { class: "presets" }, presets.map(([name, val]) =>
+          h("button", { type: "button", class: "preset" + (f.dateFrom === val.dateFrom && f.dateTo === val.dateTo ? " on" : ""), onclick: () => ctx.kbSetFilter(val) }, name)))),
+      "«Tutto» = tutte le schede, dal 2007 a oggi."),
+    field("Il periodo si riferisce a", seg("dateRef", [["ult", "Ultima modifica"], ["pub", "Pubblicazione"]])),
+    field("Stato", seg("published", [[true, "Pubblicate"], [false, "Tutte"]])),
+    field("Versione della scheda", seg("definitive", [[true, "Definitive"], [false, "Tutte"]]),
+      "Come nel portale, di solito si cercano le schede pubblicate e definitive.")));
+}
+
 export function renderSidebar(ctx) {
   const { S, ui } = ctx;
   if (S.tab === "storico") return renderStoricoSidebar(ctx);
   if (S.tab === "ar") return renderArSidebar(ctx);
+  if (S.tab === "kb") return renderKbSidebar(ctx);
   const f = S.filters;
   const el = clear(document.getElementById("sidebar"));
   el.dataset.source = "touch";

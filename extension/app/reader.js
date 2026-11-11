@@ -7,6 +7,11 @@ import { sanitizeHtml, textToFragment, splitQuoted, htmlToText } from "../lib/ri
 import { timelineText } from "../lib/ticket.js";
 import { highlightPatterns } from "../lib/relevance.js";
 import { guessMimeFromName } from "../lib/hda.js";
+import { kbLabel, isKbId, KB_VISIBILITY } from "../lib/kb.js";
+
+const isKbRow = (id, row, full) => ((full && full.source) || (row && row.source)) === "kb" || isKbId(id);
+/** Il numero come lo si legge: "10500123" per un ticket, "SKB#12345" per una scheda della Knowledge Base. */
+const shownNumber = (id, row, full) => (isKbRow(id, row, full) ? kbLabel(row && row.kbId ? row : { id }) : ticketNumber(id));
 
 const ROLE_LABEL = { customer: "Cliente", operator: "Operatore", system: "Sistema" };
 
@@ -459,7 +464,8 @@ export function renderReaderLoading(ctx, id, row) {
   el.hidden = false;
   clear(el);
   el.appendChild(header(ctx, id, row, null));
-  const body = h("div", { class: "rd-body" }, row ? facts(row, null) : null, h("div", { class: "loading" }, h("span", { class: "spinner" }), "Carico la conversazione completa…"));
+  const kb = isKbRow(id, row, null);
+  const body = h("div", { class: "rd-body" }, row ? (kb ? kbFacts(row) : facts(row, null)) : null, h("div", { class: "loading" }, h("span", { class: "spinner" }), kb ? "Leggo la scheda dal portale…" : "Carico la conversazione completa…"));
   el.appendChild(body);
   el.scrollTop = 0;
 }
@@ -469,14 +475,18 @@ export function renderReaderError(ctx, id, row, err) {
   const body = el.querySelector(".rd-body") || el.appendChild(h("div", { class: "rd-body" }));
   const ld = body.querySelector(".loading");
   if (ld) ld.remove();
-  const isLegacy = (err && err.isLegacyTicket) || (row && (row.source === "ar" || row.source === "storico")) || (isLegacyTicketNumber(id) && !(row && row.source !== "ar" && row.id));
+  const kb = isKbRow(id, row, null);
+  const isLegacy = !kb && ((err && err.isLegacyTicket) || (row && (row.source === "ar" || row.source === "storico")) || (isLegacyTicketNumber(id) && !(row && row.source !== "ar" && row.id)));
   const num = ticketNumber(id);
   body.appendChild(
     h("div", { class: "err-box" },
-      "Non riesco a leggere il ticket: " + err.message,
+      (kb ? "Non riesco a leggere la scheda: " : "Non riesco a leggere il ticket: ") + err.message,
       h("div", { style: { display: "flex", gap: "8px", flexWrap: "wrap", marginTop: "8px" } },
         isLegacy && ctx.openArHome
           ? h("button", { class: "btn btn-primary", onclick: () => ctx.openArHome(row && row.arUrl) }, icon("external"), "Apri e collega Vecchio Cruscotto")
+          : null,
+        kb && ctx.openArHome
+          ? h("button", { class: "btn btn-primary", onclick: () => ctx.openArHome(row && row.arUrl) }, icon("external"), "Apri nell'Area Riservata")
           : null,
         isLegacy && ctx.searchLegacyRefInTouch
           ? h("button", { class: "btn", onclick: () => ctx.searchLegacyRefInTouch(num) }, `Cerca #${num} nei ticket Touch`)
@@ -489,32 +499,40 @@ function header(ctx, id, row, full) {
   const fav = ctx.isFavorite(id);
   const source = (full && full.source) || (row && row.source) || "touch";
   const isStorico = source === "storico";
-  const isAr = source === "ar" || isStorico;
+  const isKb = isKbRow(id, row, full);
+  const isAr = source === "ar" || isStorico || isKb;
+  const num = shownNumber(id, row, full);
   const t = (full && full.ticket) || {};
   const subject = (row && row.subject) || t.Subject || "";
   const statusId = (row && row.statusId) || t.TicketStatusID || "";
   // la copia segue il pulsante «Note interne»: le note nascoste non finiscono negli appunti (e magari in una mail al cliente)
   const copyText = () => {
     const entries = (full.timeline || []).filter((e) => ctx.ui.showInternal || !e.internal);
-    navigator.clipboard.writeText(timelineText(entries, `Ticket ${ticketNumber(id)}${subject ? " — " + subject : ""}`));
-    toast(ctx.ui.showInternal ? "Ticket copiato negli appunti" : "Ticket copiato negli appunti (senza note interne)", "ok", 1800);
+    navigator.clipboard.writeText(timelineText(entries, `${isKb ? "Scheda" : "Ticket"} ${num}${subject ? " — " + subject : ""}`));
+    toast(isKb ? "Scheda copiata negli appunti" : ctx.ui.showInternal ? "Ticket copiato negli appunti" : "Ticket copiato negli appunti (senza note interne)", "ok", 1800);
   };
   const arUrl = (full && full.arUrl) || (row && row.arUrl) || "";
   const favBtn = h("button", { class: "btn btn-icon" + (fav ? " star-on" : ""), title: fav ? "Togli dai preferiti" : "Aggiungi ai preferiti", onclick: () => { ctx.toggleFavorite(id, row); favBtn.classList.toggle("star-on"); } }, icon("star"));
   return h("div", { class: "rd-head" },
     h("div", { class: "rd-top" },
-      h("span", { class: "rd-num", title: "Copia il numero", onclick: () => { navigator.clipboard.writeText(ticketNumber(id)); toast("Numero copiato", "ok", 1500); } }, "#" + ticketNumber(id)),
-      statusId || (row && row.statusText) ? pill(statusId, row && row.statusText) : null,
-      h("span", { class: `src-badge src-${isStorico ? "storico" : isAr ? "ar" : "touch"}`, title: isStorico ? "Ticket dello Storico (Ricerca avanzata dell'Area Riservata)" : isAr ? "Ticket del Vecchio Cruscotto (Area Riservata)" : "Ticket di HDA TOUCH" }, isStorico ? "Storico" : isAr ? "Vecchio Cruscotto" : "HDA Touch"),
+      h("span", { class: "rd-num", title: "Copia il numero", onclick: () => { navigator.clipboard.writeText(num); toast("Numero copiato", "ok", 1500); } }, (isKb ? "" : "#") + num),
+      isKb
+        ? (row && row.visibility ? h("span", { class: `pill kb-${row.visibility === "I" ? "int" : "ext"}`, title: row.visibility === "I" ? "Visibilità interna: il cliente non la vede" : "Visibilità esterna: la vede anche il cliente" }, KB_VISIBILITY[row.visibility] || row.visibility) : null)
+        : statusId || (row && row.statusText) ? pill(statusId, row && row.statusText) : null,
+      h("span", { class: `src-badge src-${isKb ? "kb" : isStorico ? "storico" : isAr ? "ar" : "touch"}`, title: isKb ? "Scheda della Knowledge Base (Area Riservata)" : isStorico ? "Ticket dello Storico (Ricerca avanzata dell'Area Riservata)" : isAr ? "Ticket del Vecchio Cruscotto (Area Riservata)" : "Ticket di HDA TOUCH" }, isKb ? "Knowledge Base" : isStorico ? "Storico" : isAr ? "Vecchio Cruscotto" : "HDA Touch"),
       row && row.typeText && source !== "ar" ? h("span", { class: "tag-mini" }, row.typeText) : null,
       h("div", { class: "rd-actions" },
         favBtn,
-        full ? h("button", { class: "btn", title: "Copia tutto il ticket come testo (le note interne solo se visibili)", onclick: copyText }, icon("copy"), "Copia") : null,
+        full ? h("button", { class: "btn", title: isKb ? "Copia la scheda come testo" : "Copia tutto il ticket come testo (le note interne solo se visibili)", onclick: copyText }, icon("copy"), "Copia") : null,
+        // in una pagina a parte il ticket resta aperto mentre se ne guardano altri (non serve se si è già in una pagina sua)
+        ctx.openInNewPage && !ctx.S.solo
+          ? h("button", { class: "btn", title: "Apri in una nuova pagina del browser, per tenerne aperti più di uno", onclick: () => ctx.openInNewPage(id, (full && full.row) || row) }, icon("external"), "Nuova pagina")
+          : null,
         isAr
-          ? h("button", { class: "btn", title: "Apri questo ticket nell'Area Riservata", onclick: () => ctx.openArHome && ctx.openArHome(arUrl) }, icon("external"), isStorico ? "Apri nell'Area Riservata" : "Apri nel vecchio cruscotto")
+          ? h("button", { class: "btn", title: isKb ? "Apri questa scheda nell'Area Riservata" : "Apri questo ticket nell'Area Riservata", onclick: () => ctx.openArHome && ctx.openArHome(arUrl) }, icon("external"), isStorico || isKb ? "Apri nell'Area Riservata" : "Apri nel vecchio cruscotto")
           : h("button", { class: "btn", title: "Apri questo ticket in HDA TOUCH", onclick: () => ctx.openInTouch(id) }, icon("external"), "Apri in Touch"),
-        h("button", { class: "btn btn-icon", title: "Chiudi (Esc)", onclick: () => ctx.closeReader() }, icon("close")))),
-    h("h1", { class: "rd-title" }, subject || "Ticket " + ticketNumber(id)));
+        h("button", { class: "btn btn-icon", title: ctx.S.solo ? "Chiudi questa pagina" : "Chiudi (Esc)", onclick: () => ctx.closeReader() }, icon("close")))),
+    h("h1", { class: "rd-title" }, subject || (isKb ? "Scheda " : "Ticket ") + num));
 }
 
 function facts(row, ticket, extraFacts = []) {
@@ -532,6 +550,23 @@ function facts(row, ticket, extraFacts = []) {
     ["Ultimo aggiornamento", fmtDateTime(row.lastChange || t.LastChange)],
     ["Chiuso il", fmtDateTime(t.ClosureDate || row.closureDate)],
     ["Scadenza SLA", row.nextExpiration && statusInfo(row.statusId).group !== "closed" ? `${fmtDateTime(row.nextExpiration)}${row.sla ? " · " + row.sla : ""}` : ""],
+    ...(extraFacts || []),
+  ].filter(([, v]) => v && String(v).trim());
+  return h("dl", { class: "facts" }, F.map(([k, v]) => h("div", { class: "fact" }, h("dt", null, k), h("dd", null, v))));
+}
+
+/** I dati di una scheda della Knowledge Base (al posto di cliente, gruppo e operatore dei ticket). */
+function kbFacts(row, extraFacts = []) {
+  const F = [
+    ["Prodotto", row.catalog],
+    ["Versione", row.version],
+    ["Tipologia", row.typeText],
+    ["Visibilità", KB_VISIBILITY[row.visibility] || row.visibility],
+    ["Stato", [row.published ? "Pubblicata" : row.stato ? `Non pubblicata (${row.stato})` : "", row.definitive ? "definitiva" : row.definitive === false ? "non definitiva" : ""].filter(Boolean).join(", ")],
+    ["Pubblicata il", fmtDate(row.date)],
+    ["Ultima modifica", fmtDate(row.lastChange)],
+    ["Autore", row.assigned],
+    ["Allegati", row.hasAttachments ? "Sì" : ""],
     ...(extraFacts || []),
   ].filter(([, v]) => v && String(v).trim());
   return h("dl", { class: "facts" }, F.map(([k, v]) => h("div", { class: "fact" }, h("dt", null, k), h("dd", null, v))));
@@ -609,8 +644,9 @@ function entryEl(ctx, e, ticketId, allAttachments) {
   let role = ROLE_LABEL[e.role] || "Operatore";
   if (e.kind === "request") { cls += " request customer"; role = "Richiesta iniziale"; }
   if (e.kind === "solution") { cls = "msg solution"; role = "Soluzione"; }
+  if (e.kind === "doc") { cls = "msg doc"; role = e.author || "Testo della scheda"; }
   if (e.internal) { cls += " internal"; role = "Nota interna"; }
-  const who = e.author || (e.kind === "request" ? "Cliente" : "");
+  const who = e.kind === "doc" ? "" : e.author || (e.kind === "request" ? "Cliente" : "");
   return h("article", { class: cls, dataset: { internal: e.internal ? "1" : "0" } },
     h("div", { class: "msg-card" },
       h("div", { class: "msg-h" },
@@ -620,7 +656,7 @@ function entryEl(ctx, e, ticketId, allAttachments) {
         e.label ? h("span", { class: "tag-mini", title: "Causale del movimento" }, e.label) : null,
         e.role === "customer" && e.account && e.account !== who ? h("span", { class: "hint" }, e.account) : null,
         e.internal ? h("span", { class: "tag-mini", title: "Non visibile al cliente" }, icon("lock"), " interna") : null,
-        h("span", { class: "at", title: e.date ? e.date.toLocaleString("it-IT") : "" }, fmtDateTime(e.date))),
+        e.date ? h("span", { class: "at", title: e.date.toLocaleString("it-IT") }, fmtDateTime(e.date)) : null),
       bodyOf(e),
       e.truncated ? h("div", { class: "trunc" }, "Testo troncato dal portale: aprilo in Touch per leggerlo tutto.") : null,
       messageAttachmentsEl(ctx, e, ticketId, allAttachments)));
@@ -638,7 +674,8 @@ export function renderReader(ctx, full, { fromArchive = null } = {}) {
 
   const body = h("div", { class: "rd-body" });
   el.appendChild(body);
-  body.appendChild(facts(row, full.ticket, full.extraFacts));
+  const isKb = isKbRow(full.id, row, full);
+  body.appendChild(isKb ? kbFacts(row, full.extraFacts) : facts(row, full.ticket, full.extraFacts));
   const attBox = attachmentsSection(ctx, attachments, full.id);
   if (attBox) body.appendChild(attBox);
   if (fromArchive) body.appendChild(h("div", { class: "rd-note" }, `Copia salvata nell'archivio locale il ${fmtDate(fromArchive)}: il portale non ha risposto.`));
@@ -649,7 +686,7 @@ export function renderReader(ctx, full, { fromArchive = null } = {}) {
   const nInternal = entries.filter((e) => e.internal).length;
   const nMsg = entries.filter((e) => e.kind === "message").length;
   const tl = h("div", { class: "timeline" });
-  const search = h("input", { class: "input", type: "search", placeholder: "Cerca nel ticket…", value: ui.readerSearch || "" });
+  const search = h("input", { class: "input", type: "search", placeholder: isKbRow(full.id, row, full) ? "Cerca nella scheda…" : "Cerca nel ticket…", value: ui.readerSearch || "" });
 
   function draw() {
     clear(tl);
@@ -679,9 +716,9 @@ export function renderReader(ctx, full, { fromArchive = null } = {}) {
   const btnOrder = h("button", { class: "btn btn-small", title: "Cambia l'ordine", onclick: () => { ui.newestFirst = !ui.newestFirst; btnOrder.textContent = ui.newestFirst ? "Dal più recente" : "Dal più vecchio"; ctx.saveUi(); draw(); } }, ui.newestFirst ? "Dal più recente" : "Dal più vecchio");
 
   body.appendChild(h("div", { class: "rd-tools" },
-    h("h3", null, `Conversazione · ${nMsg} messaggi${entries.some((e) => e.kind === "solution") ? " + soluzione" : ""}`),
+    h("h3", null, isKb ? "Testo della scheda" : `Conversazione · ${nMsg} messaggi${entries.some((e) => e.kind === "solution") ? " + soluzione" : ""}`),
     nInternal ? btnInternal : null,
-    btnOrder,
+    isKb ? null : btnOrder,
     search));
   body.appendChild(tl);
   draw();

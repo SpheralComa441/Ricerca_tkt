@@ -150,19 +150,26 @@
     return { ok: true, status: res.status, text: res.text, mcid: state.mcid, pArea: state.pArea, idCenSer: state.idCenSer };
   }
 
-  function extractFromDocument(doc) {
-    const allDocs = [doc];
+  // La pagina e i suoi riquadri (anche annidati: le schede del portale sono fatte di riquadri dentro riquadri)
+  function collectDocs(doc, depth = 0, out = []) {
+    out.push(doc);
+    if (depth >= 3) return out;
     try {
       for (const f of doc.querySelectorAll("iframe, frame")) {
         try {
-          if (f.contentDocument && f.contentDocument.body) allDocs.push(f.contentDocument);
+          if (f.contentDocument && f.contentDocument.body) collectDocs(f.contentDocument, depth + 1, out);
         } catch {
-          /* */
+          /* riquadro di altra origine */
         }
       }
     } catch {
       /* */
     }
+    return out;
+  }
+
+  function extractFromDocument(doc) {
+    const allDocs = collectDocs(doc);
 
     const fields = [];
     const texts = [];
@@ -262,13 +269,11 @@
       }
     }
 
-    const bodyText = allDocs
-      .map((d) => (d.body ? d.body.innerText || d.body.textContent || "" : ""))
-      .join("\n")
-      .replace(/[ \t]+/g, " ")
-      .replace(/\n{3,}/g, "\n\n")
-      .trim()
-      .slice(0, 20000);
+    // il testo di ogni riquadro, pulito; il primo è la pagina, gli altri i riquadri interni nell'ordine in cui compaiono
+    const bodies = allDocs
+      .map((d) => (d.body ? d.body.innerText || d.body.textContent || "" : "").replace(/[ \t]+/g, " ").replace(/\n{3,}/g, "\n\n").trim().slice(0, 20000))
+      .slice(0, 12);
+    const bodyText = bodies.filter(Boolean).join("\n").slice(0, 20000);
 
     return {
       title: doc.title || "",
@@ -277,10 +282,11 @@
       tables,
       attachments,
       bodyText,
+      bodies,
     };
   }
 
-  async function readDetail(rawUrl) {
+  async function readDetail(rawUrl, deep = false) {
     let fullUrl = String(rawUrl || "").trim();
     if (!fullUrl) return { error: "url-vuoto" };
     if (!/^https?:\/\//i.test(fullUrl)) {
@@ -305,6 +311,28 @@
         };
         iframe.src = fullUrl;
       });
+      if (deep) {
+        // Scheda fatta di più riquadri che si riempiono uno dopo l'altro: si aspetta che il contenuto resti fermo (al massimo ~8 s)
+        let last = "";
+        let stable = 0;
+        let best = null;
+        for (let i = 0; i < 32 && stable < 3; i++) {
+          await new Promise((r) => setTimeout(r, 250));
+          try {
+            const doc = iframe.contentDocument;
+            if (!doc || !doc.body) continue;
+            const ex = extractFromDocument(doc);
+            const sig = `${ex.bodyText.length}:${ex.fields.length}:${ex.texts.length}`;
+            stable = sig === last && ex.bodyText.length > 80 ? stable + 1 : 0;
+            last = sig;
+            best = ex;
+          } catch {
+            /* */
+          }
+        }
+        if (!best) return { error: "pagina-non-leggibile", url: fullUrl };
+        return { ok: true, data: { ...best, url: fullUrl } };
+      }
       // SitePainter popola i controlli via JS dopo l'evento load: attendiamo che compaiano valori nei campi
       for (let i = 0; i < 8; i++) {
         await new Promise((r) => setTimeout(r, 250));
@@ -349,7 +377,7 @@
         return { ok: !!st.mcid, mcid: st.mcid, pArea: st.pArea, idCenSer: st.idCenSer, url: location.href };
       }
       if (msg.cmd === "search") return await runSearch(msg);
-      if (msg.cmd === "read") return await readDetail(msg.url);
+      if (msg.cmd === "read") return await readDetail(msg.url, msg.deep === true);
       if (msg.cmd === "fetch") return await plainFetch(msg);
       return { error: "comando-sconosciuto" };
     };

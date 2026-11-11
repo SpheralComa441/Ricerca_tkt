@@ -73,7 +73,7 @@ function id15(v) {
   return d ? d.padStart(15, "0").slice(-15) : "";
 }
 
-function fmtSolrTerm(w) {
+export function fmtSolrTerm(w) {
   const clean = String(w || "").replace(/[()"\\:]/g, " ").trim();
   if (!clean) return "";
   if (/\s/.test(clean)) return `"${clean}"`;
@@ -657,26 +657,19 @@ export function makeAr({ log = () => {}, fetch: fetchImpl = globalThis.fetch } =
     return { connected: false };
   }
 
-  /** info (facoltativo) riceve: max = quanti ticket al massimo restituisce il portale per ricerca, raw = quanti ne ha restituiti. */
-  async function rawQuery(query, info = {}) {
-    if (!query) return [];
-    const t0 = Date.now();
-    const read = (text) => {
-      const json = extractArJson(text);
-      const rows = parseArResponse(json || text);
-      info.max = Number(json && Array.isArray(json.maxResults) ? json.maxResults[0] : 0) || 0;
-      info.raw = rows.length;
-      return rows;
-    };
-    const viaTab = await sendBridge({ cmd: "search", query, pArea: state.pArea });
+  /**
+   * Una ricerca a servlet/spsl_fquery_mc → { text, via }. Prima dalla scheda dell'Area Riservata aperta, altrimenti diretta.
+   * area: l'archivio in cui cercare (i ticket del Vecchio Cruscotto, oppure "TICKET-TKB" per la Knowledge Base).
+   */
+  async function solrText(query, area = "") {
+    const pArea = area || state.pArea || "TICKOPEXXX";
+    const viaTab = await sendBridge({ cmd: "search", query, pArea });
     if (viaTab && viaTab.ok && viaTab.text) {
       if (viaTab.mcid) state.mcid = viaTab.mcid;
-      if (viaTab.pArea) state.pArea = viaTab.pArea;
+      if (viaTab.pArea && !area) state.pArea = viaTab.pArea;
       if (viaTab.idCenSer) state.idCenSer = viaTab.idCenSer;
-      const rows = read(viaTab.text);
       state.connected = true;
-      log(`vecchio cruscotto: ${rows.length} risultati (${Date.now() - t0} ms, scheda)`);
-      return rows;
+      return { text: viaTab.text, via: "scheda" };
     }
 
     if (!state.mcid && (!directFailedAt || Date.now() - directFailedAt > DIRECT_RETRY_MS)) await discoverDirect();
@@ -688,7 +681,7 @@ export function makeAr({ log = () => {}, fetch: fetchImpl = globalThis.fetch } =
     const doDirectPost = async () => {
       const body =
         `pKeyword=${encodeURIComponent(query)}` +
-        `&pArea=${encodeURIComponent(state.pArea || "TICKOPEXXX")}` +
+        `&pArea=${encodeURIComponent(area || state.pArea || "TICKOPEXXX")}` +
         `&pCore=&pLangs=ITA&cs_SITE=&m_cID=${encodeURIComponent(state.mcid)}`;
       const r = await fetchImpl(`${AR_BASE}/servlet/spsl_fquery_mc`, {
         method: "POST",
@@ -704,9 +697,26 @@ export function makeAr({ log = () => {}, fetch: fetchImpl = globalThis.fetch } =
       state.mcid = null;
       if (await discoverDirect()) text = await doDirectPost();
     }
-    const rows = read(text);
     state.connected = true;
-    log(`vecchio cruscotto: ${rows.length} risultati (${Date.now() - t0} ms, direct)`);
+    return { text, via: "direct" };
+  }
+
+  /** La stessa ricerca in un'altra area del portale (Knowledge Base): ritorna il testo della risposta. */
+  async function solr(query, area) {
+    if (!query) return "";
+    return (await solrText(query, area)).text;
+  }
+
+  /** info (facoltativo) riceve: max = quanti ticket al massimo restituisce il portale per ricerca, raw = quanti ne ha restituiti. */
+  async function rawQuery(query, info = {}) {
+    if (!query) return [];
+    const t0 = Date.now();
+    const { text, via } = await solrText(query);
+    const json = extractArJson(text);
+    const rows = parseArResponse(json || text);
+    info.max = Number(json && Array.isArray(json.maxResults) ? json.maxResults[0] : 0) || 0;
+    info.raw = rows.length;
+    log(`vecchio cruscotto: ${rows.length} risultati (${Date.now() - t0} ms, ${via})`);
     return rows;
   }
 
@@ -805,9 +815,10 @@ export function makeAr({ log = () => {}, fetch: fetchImpl = globalThis.fetch } =
     return { rows: [...found.values()], queries, cappedMonths, stopped };
   }
 
-  async function readDetail(url) {
+  /** Legge una pagina del portale dalla scheda dell'Area Riservata aperta. deep: aspetta anche i riquadri interni (schede della Knowledge Base). */
+  async function readDetail(url, { deep = false } = {}) {
     if (!url) return null;
-    const res = await sendBridge({ cmd: "read", url });
+    const res = await sendBridge({ cmd: "read", url, deep });
     if (res && res.ok && res.data) return res.data;
     return null;
   }
@@ -909,6 +920,8 @@ export function makeAr({ log = () => {}, fetch: fetchImpl = globalThis.fetch } =
     checkStatus,
     search,
     searchAll,
+    solr,
+    readDetail,
     loadTicket,
     request,
     findCentre,

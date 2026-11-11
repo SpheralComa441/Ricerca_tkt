@@ -1,4 +1,4 @@
-# Ricerca TKT — Estensione Chrome / Edge (v4.2)
+# Ricerca TKT — Estensione Chrome / Edge (v4.5)
 
 Applicazione dedicata in una scheda del browser per cercare e leggere i ticket di **HDA TOUCH** (`https://zucchetti.support/HDAPortal/`) senza toccare i componenti ExtJS della pagina.
 
@@ -34,19 +34,20 @@ Dopo un aggiornamento del codice basta premere il pulsante **Ricarica** (↻) ne
    - Con **Archivia risultati** puoi salvare in blocco i ticket della ricerca corrente (2 alla volta con pausa, saltando quelli non modificati).
    - Nella scheda **Archivio locale** la ricerca trova le parole anche dentro tutti i messaggi e le note interne.
 
-## Le tre fonti: HDA Touch, Vecchio Cruscotto, Storico
+## Le fonti: HDA Touch, Vecchio Cruscotto, Storico, Knowledge Base
 
-Sopra l'elenco ci sono tre schede, ognuna con il suo colore e il numero di ticket trovati. Lo stesso colore segna la riga del ticket (striscia a sinistra) e l'etichetta nel lettore, così si vede sempre da dove viene un ticket.
+Sopra l'elenco ci sono quattro schede, ognuna con il suo colore e il numero di ticket trovati. Lo stesso colore segna la riga del ticket (striscia a sinistra) e l'etichetta nel lettore, così si vede sempre da dove viene un ticket.
 
 | Scheda | Che cos'è | Come si cerca |
 |---|---|---|
 | **HDA Touch** (blu) | I ticket di HDA TOUCH | Parole, numero e tutti i filtri a sinistra |
 | **Vecchio Cruscotto** (arancio) | La *Ricerca rapida* dell'Area Riservata (anni recenti) | Parole e numero dalla casella in alto, più i suoi filtri a sinistra: periodo, stato, gruppo e operatore che hanno in carico il ticket, cliente, gruppo e operatore che hanno partecipato. Si può cercare anche solo con i filtri |
 | **Storico** (viola) | La *Ricerca avanzata* dell'Area Riservata: tutti i ticket, anche prima del 2024 | Numero ticket, periodo (riferito all'ultimo aggiornamento o all'apertura), stato aperto/chiuso, codice cliente, gruppo, operatore. **Non cerca per parole** (nel portale i campi oggetto e testo sono disattivati) |
+| **Knowledge Base** (verde) | Le schede *SKB* della Knowledge Base dell'Area Riservata, a visibilità esterna e interna | Parole dalla casella in alto (nel titolo e nel testo), numero della scheda scritto come `SKB#12345`, più i suoi filtri a sinistra: tutte le parole / almeno una / frase esatta, visibilità, periodo, pubblicate, definitive |
 
 - **Numero ticket** nella casella in alto: si cerca nelle tre fonti insieme. Il ticket si apre da solo e la scheda passa a quella della sua fonte. Se il ticket c'è solo nello Storico si apre da lì.
 - **Niente ricerche non richieste**: ogni scheda cerca solo quando c'è qualcosa da cercare (parole o numero nella casella, oppure un suo filtro). Una scheda a cui non si è chiesto niente dice «Nessuna ricerca».
-- **L'app si apre sempre vuota**: parole e filtri dell'ultima volta non vengono ricordati, in nessuna delle tre schede. Per ritrovare una ricerca usa *Salva ricerca* (HDA Touch). Restano invece l'ordinamento scelto, le impostazioni, i preferiti e i recenti.
+- **L'app si apre sempre vuota**: parole e filtri dell'ultima volta non vengono ricordati, in nessuna scheda. Per ritrovare una ricerca usa *Salva ricerca* (HDA Touch). Restano invece l'ordinamento scelto, le impostazioni, i preferiti e i recenti.
 - **Parole** nella casella in alto: si cercano in HDA Touch e nel Vecchio Cruscotto. La scheda Storico lo dice e propone i suoi filtri.
 - **Ogni scheda ha i suoi filtri**: quelli a sinistra cambiano con la scheda e valgono solo per quella fonte. Cambiare un filtro rifà la ricerca solo lì e non fa cambiare scheda. Solo una nuova ricerca dalla casella in alto può portare da sola alla scheda che ha trovato qualcosa.
 - **Scheda Vecchio Cruscotto**: i filtri sono quelli della Ricerca rapida del portale. «Gruppo che ha partecipato» trova i ticket a cui un gruppo ha lavorato anche se ora li ha in carico un altro. Il periodo va a mesi interi e si riferisce all'ultimo aggiornamento o all'apertura. Il portale restituisce al massimo 210 ticket per ricerca (i più rilevanti): quando succede un avviso lo dice. Con un numero ticket nella casella i filtri non contano. *Excel* scarica i ticket in elenco.
@@ -57,6 +58,27 @@ Sopra l'elenco ci sono tre schede, ognuna con il suo colore e il numero di ticke
 - **Lettura di un ticket del Vecchio Cruscotto**: la conversazione si legge dalla scheda del ticket nell'Area Riservata, quindi ogni messaggio ha il nome di chi l'ha scritto, il destinatario, la data e la causale, e in alto ci sono cliente, contatto, gruppo e operatore. Se la scheda non risponde entro qualche secondo si vede la conversazione ricostruita dal testo della ricerca (senza nomi né date dei singoli messaggi).
 - Per lo Storico serve l'accesso all'Area Riservata (come per il Vecchio Cruscotto). Gli allegati dei ticket dello Storico si aprono dalla scheda del ticket nell'Area Riservata.
 - Nelle schede *Archivio locale*, *Preferiti* e *Recenti* ogni riga porta l'etichetta della sua fonte.
+
+## Knowledge Base
+
+La scheda **Knowledge Base** cerca nelle schede SKB dell'Area Riservata con la stessa ricerca del portale (pagina *Infinity Search*, opzione *Knowledge Base*). Serve l'accesso all'Area Riservata, come per il Vecchio Cruscotto.
+
+- **In elenco** ogni scheda mostra: visibilità (**Esterna** in verde, **Interna** in arancio: il cliente non la vede), numero (`SKB#…`), oggetto, data di pubblicazione, prodotto, versione, tipologia, autore e l'estratto del testo con le parole trovate. La graffetta segna le schede con allegati.
+- **Parole**: di partenza devono comparire tutte, nel titolo o nel testo, anche al singolare o al plurale. A sinistra si passa ad *Almeno una* o a *Frase esatta*.
+- **Filtri di partenza**: come nel portale, solo schede pubblicate e definitive; la visibilità è *Tutte* (nel portale parte da *Esterna*) e il periodo è *Tutto* (nel portale parte dagli ultimi tre mesi). Con un filtro scelto si può sfogliare anche senza parole.
+- **Periodo**: al portale si chiedono gli anni dell'ultima modifica; il giorno esatto (di ultima modifica o di pubblicazione) si controlla sulle schede ricevute.
+- **Oltre le 210 schede**: è il limite del portale per ricerca. L'avviso offre *Cerca tutte*, che ripete la ricerca un anno alla volta.
+- **Lettura**: aprendo una scheda l'app legge la sua pagina nel portale (dalla scheda dell'Area Riservata aperta nel browser) e ne mostra i campi, il testo e gli allegati. È una lettura generica della pagina: per vederla con la sua impaginazione e le immagini c'è **Apri nell'Area Riservata**. Se l'Area Riservata non è aperta in una scheda del browser resta l'estratto arrivato con la ricerca.
+- Le schede lette finiscono nell'archivio locale, nei *Recenti* e si possono mettere tra i *Preferiti*, come i ticket.
+
+## Più ticket aperti insieme: «Nuova pagina»
+
+Un ticket (o una scheda della Knowledge Base) si può aprire in una pagina del browser tutta sua, dove si vede solo il lettore. Le pagine restano aperte una accanto all'altra e il titolo di ognuna dice numero e oggetto.
+
+- **Dal lettore**: pulsante **Nuova pagina**.
+- **Dall'elenco**: il pulsante con la freccia che compare a destra della riga passandoci sopra, oppure **Ctrl+clic** (o clic con la rotella) sulla riga: la pagina si apre dietro e nell'elenco non cambia niente.
+- Nella pagina del ticket la **X** chiude la pagina; **Apri la ricerca**, in alto, mostra lì l'app intera. *Esc* non chiude la pagina.
+- La pagina legge il ticket dal portale per conto suo: serve la stessa sessione aperta (Touch o Area Riservata).
 
 ## Se non si collega a Touch
 

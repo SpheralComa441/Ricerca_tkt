@@ -12,6 +12,7 @@ import { makeHda } from "../lib/hda.js";
 import { makeAr, emptyArFilters, hasArFilter } from "../lib/ar.js";
 import { sortByRelevance, matchesAllTerms, bestSnippet, searchTerms, highlightPatterns, listFilter } from "../lib/relevance.js";
 import { makeStorico, emptyStoricoFilters, hasStoricoFilter, enrichArTicket, movePeople } from "../lib/storico.js";
+import { makeKb, emptyKbFilters, hasKbFilter, kbNumberFrom, kbLabel, isKbId, KB_VISIBILITY } from "../lib/kb.js";
 import { makeRowReader } from "../lib/rows.js";
 import { emptyFilters, buildConditions, describeFilters, ruleFor, DEF, DOMAIN_CONDITION, OPEN_STATUS_IDS, FILTER_DEFS, isEmptyFilter, isUnconstrained, hasNarrowingFilter, primaryTerm } from "../lib/filters.js";
 import { statusInfo, mergePortalStatuses } from "../lib/statuses.js";
@@ -19,7 +20,7 @@ import { loadTicket, TICKET_COLUMNS } from "../lib/ticket.js";
 import { saveTicket, getTicket, searchArchive, archivedMap, archiveInfo, kvGet, kvSet, onKvChange, reviveRow } from "../lib/store.js";
 import { makeLookups } from "../lib/lookups.js";
 import { htmlToText, cleanText, isProbablyHtml, unescapeIfEscapedHtml } from "../lib/richtext.js";
-import { ticketIdFrom, ticketIdVariants, ticketNumber, isLegacyTicketNumber, isTouchNativeId, ticketMergeKey, fmtRelative, fmtDateTime, tokens, queryTerms, pool, sleep, csvCell, debounce } from "../lib/util.js";
+import { ticketIdFrom, ticketIdVariants, ticketNumber, isLegacyTicketNumber, isTouchNativeId, ticketMergeKey, fmtRelative, fmtDate, fmtDateTime, tokens, queryTerms, pool, sleep, csvCell, debounce } from "../lib/util.js";
 
 const inExtension = typeof chrome !== "undefined" && !!(chrome.runtime && chrome.runtime.id);
 const DAY = 86400000;
@@ -59,7 +60,9 @@ const S = {
   pending: new Set(),
   error: null,
   notices: [],
-  tab: "touch", // touch | ar | storico (le tre fonti) | archive | favorites | recent
+  tab: "touch", // touch | ar | storico | kb (le fonti) | archive | favorites | recent
+  // pagina aperta per un solo ticket («Apri in una nuova pagina»): si vede solo il lettore
+  solo: false,
   touchTotal: 0,
   // Più parole in Touch: al portale si chiede la parola più lunga e le altre si verificano qui, a blocchi.
   // { filters, word, step, examined, total, running, stopped, error }: quanti dei ticket trovati dal portale sono già stati controllati.
@@ -67,6 +70,8 @@ const S = {
   // Vecchio Cruscotto: ricerca a sé, con i suoi filtri (quelli della Ricerca rapida dell'Area Riservata)
   arS: { filters: emptyArFilters(), results: [], loading: false, error: null, key: "", at: 0, notices: [] },
   storico: { filters: emptyStoricoFilters(), results: [], total: 0, loading: false, error: null, key: "" },
+  // Knowledge Base: le schede SKB dell'Area Riservata, con i loro filtri
+  kbS: { filters: emptyKbFilters(), results: [], loading: false, error: null, key: "", at: 0, notices: [] },
   stLookups: { groups: {}, operators: {}, clients: {} },
   archiveHits: [],
   archiveCount: 0,
@@ -88,9 +93,9 @@ const S = {
 };
 const ui = { openSections: {}, statusDetail: false, showInternal: true, newestFirst: false, readerSearch: "", showFilters: true };
 // «Filtra in elenco»: per scheda, vale finché non si fa una nuova ricerca dalla casella in alto
-const listFilters = { touch: "", ar: "", storico: "" };
+const listFilters = { touch: "", ar: "", storico: "", kb: "" };
 
-let transport, hda, ar, storico, lookups;
+let transport, hda, ar, storico, kb, lookups;
 let rowReader = makeRowReader(null);
 let searchAbort = null;
 let openSeq = 0;
@@ -124,6 +129,9 @@ const ctx = {
   storicoLookup,
   arSetFilter,
   arReset,
+  kbSetFilter,
+  kbReset,
+  openInNewPage,
   arCentre: () => (ar && ar.state.idCenSer) || S.caps.arCentro || "",
 };
 
@@ -189,6 +197,7 @@ function openArHome(url) {
 function searchLegacyRefInTouch(num) {
   const clean = ticketNumber(num);
   if (!clean) return;
+  leaveSolo();
   closeReader();
   S.filters.text = "";
   S.filters.subject = clean;
@@ -509,8 +518,8 @@ function sortUnifiedRows(rows, exactNum = "") {
       if (aEx !== bEx) return bEx - aEx;
     }
     if (key === "id") {
-      const na = Number(ticketNumber(a.id)) || 0;
-      const nb = Number(ticketNumber(b.id)) || 0;
+      const na = Number(String(ticketNumber(a.id)).replace(/\D/g, "")) || 0;
+      const nb = Number(String(ticketNumber(b.id)).replace(/\D/g, "")) || 0;
       if (na !== nb) return (na - nb) * dir;
     } else {
       const da = a[key] instanceof Date ? a[key].getTime() : a.date instanceof Date ? a.date.getTime() : 0;
@@ -677,7 +686,7 @@ async function search({ more = false, fresh = false } = {}) {
   if (!more && f.text !== lastBoxText) {
     lastBoxText = f.text;
     pickPending = !!String(f.text || "").trim(); // casella vuota (anche all'avvio): si resta sulla scheda aperta
-    listFilters.touch = listFilters.ar = listFilters.storico = "";
+    listFilters.touch = listFilters.ar = listFilters.storico = listFilters.kb = "";
   }
   const size = Number(S.settings.pageSize) || 50;
   const tid = ticketIdFrom(f.text);
@@ -702,6 +711,7 @@ async function search({ more = false, fresh = false } = {}) {
       S.touchTotal = hit.touchTotal || 0;
       const stCached = runStorico();
       const arCached = runAr();
+      runKb();
       stCached.then(() => { autoPickTab(); renderResults(); });
       S.notices = [...hit.notices];
       S.activeEffectiveFilters = hit.eff;
@@ -729,6 +739,8 @@ async function search({ more = false, fresh = false } = {}) {
   const storicoPromise = more ? Promise.resolve(S.storico.results) : runStorico({ fresh });
   // anche il Vecchio Cruscotto: parole o numero della casella in alto più i suoi filtri
   const arPromise = more ? Promise.resolve(S.arS.results) : runAr({ fresh });
+  // e la Knowledge Base: le parole della casella in alto più i suoi filtri
+  if (!more) runKb({ fresh });
   if (!more) {
     S.page = 1;
     S.results = [];
@@ -1174,17 +1186,20 @@ async function refreshArchiveCount() {
   }
 }
 
-// ---------------------------------------------------------------- le tre fonti
+// ---------------------------------------------------------------- le fonti
 
 const SOURCES = {
   touch: { label: "HDA Touch", title: "Ticket di HDA TOUCH" },
   ar: { label: "Vecchio Cruscotto", title: "Ticket del Vecchio Cruscotto (Area Riservata), cercati per parole: anni recenti" },
   storico: { label: "Storico", title: "Ricerca avanzata dell'Area Riservata: tutti i ticket, anche prima del 2024 (senza ricerca per parole)" },
+  kb: { label: "Knowledge Base", title: "Schede della Knowledge Base dell'Area Riservata (SKB), a visibilità esterna e interna" },
 };
-const isSourceTab = (t = S.tab) => t === "touch" || t === "ar" || t === "storico";
-const sourceOf = (r) => (r && (r.source === "ar" || r.source === "storico") ? r.source : "touch");
+const isSourceTab = (t = S.tab) => t === "touch" || t === "ar" || t === "storico" || t === "kb";
+const sourceOf = (r) => (r && (r.source === "ar" || r.source === "storico" || r.source === "kb") ? r.source : "touch");
 const touchRows = () => S.results.filter((r) => r.source !== "ar");
 const arRows = () => S.arS.results;
+/** Il numero come lo si legge: "10500123" per un ticket, "SKB#12345" per una scheda della Knowledge Base. */
+const numberOf = (r) => (r && (r.source === "kb" || isKbId(r.id)) ? kbLabel(r) : ticketNumber(r && r.id));
 
 /** Ticket trovati per fonte (per le schede): di Touch il totale del portale, non solo quelli già caricati. */
 function sourceCounts() {
@@ -1193,6 +1208,7 @@ function sourceCounts() {
     touch: S.loading ? nTouch : Math.max(nTouch, S.touchTotal || 0),
     ar: arRows().length,
     storico: Math.max(S.storico.total || 0, S.storico.results.length),
+    kb: S.kbS.results.length,
   };
 }
 
@@ -1203,11 +1219,11 @@ function sourceCounts() {
 let pickPending = false;
 let lastBoxText = null;
 function autoPickTab() {
-  if (!pickPending || !isSourceTab() || S.loading || S.storico.loading || S.arS.loading) return;
+  if (!pickPending || !isSourceTab() || S.loading || S.storico.loading || S.arS.loading || S.kbS.loading) return;
   pickPending = false;
   const c = sourceCounts();
   if (c[S.tab]) return;
-  const next = ["touch", "ar", "storico"].find((k) => c[k]);
+  const next = ["touch", "ar", "storico", "kb"].find((k) => c[k]);
   if (next && next !== S.tab) {
     S.tab = next;
     S.cursor = -1;
@@ -1267,7 +1283,7 @@ async function warmNames() {
 
 /** Riga del Vecchio Cruscotto con i nomi al posto dei codici, dove li conosciamo. */
 function withArNames(r) {
-  if (!r || r.source !== "ar") return r;
+  if (!r || (r.source !== "ar" && r.source !== "kb")) return r;
   const L = S.stLookups;
   const group = r.ownerGroupId && L.groups[r.ownerGroupId];
   const oper = r.assignedId && L.operators[r.assignedId];
@@ -1445,6 +1461,171 @@ function clearArKey(key) {
   if (key === "group") return arSetFilter({ group: "", groupLabel: "" });
   if (key === "groupIn") return arSetFilter({ groupIn: "", groupInLabel: "" });
   arSetFilter(key, e[key]);
+}
+
+// ---------------------------------------------------------------- Knowledge Base (schede SKB dell'Area Riservata)
+
+/**
+ * Cosa cercare nella Knowledge Base: le parole della casella in alto più i filtri della sua scheda, oppure una scheda
+ * per numero ("SKB#12345"). Un numero ticket (7 cifre o più, o con la "Z") non è una scheda: qui non si cerca.
+ */
+function kbQuery() {
+  const text = String(S.filters.text || "").trim();
+  const num = kbNumberFrom(text);
+  if (num) return { number: num };
+  const tid = ticketIdFrom(text);
+  if (tid && (/z$/i.test(tid) || ticketNumber(tid).length > 6)) return null;
+  const filters = S.kbS.filters;
+  if (!text && !hasKbFilter(filters)) return null;
+  return { text, filters: { ...filters } };
+}
+
+/** Ordine dell'elenco; se nella casella c'è solo un numero, la scheda con quel numero va in cima. */
+function sortKbRows(rows) {
+  const sorted = sortUnifiedRows(rows || []);
+  const t = String(S.filters.text || "").trim();
+  const n = /^\d{3,6}$/.test(t) ? String(Number(t)) : "";
+  return n ? [...sorted.filter((r) => r.kbId === n), ...sorted.filter((r) => r.kbId !== n)] : sorted;
+}
+
+const KB_RESULT_TTL = 2 * 60 * 1000;
+let kbSeq = 0;
+let kbInflight = null; // { key, promise }
+function runKb({ fresh = false } = {}) {
+  const st = S.kbS;
+  const q = kb ? kbQuery() : null;
+  const key = q ? JSON.stringify(q) : "";
+  if (!q) {
+    kbSeq++;
+    kbInflight = null;
+    Object.assign(st, { results: [], loading: false, error: null, key: "", notices: [] });
+    return Promise.resolve([]);
+  }
+  if (!fresh && kbInflight && kbInflight.key === key) return kbInflight.promise;
+  if (!fresh && key === st.key && !st.error && Date.now() - st.at < (st.full ? 5 : 1) * KB_RESULT_TTL) {
+    st.results = sortKbRows(st.results); // l'ordinamento può essere cambiato
+    return Promise.resolve(st.results);
+  }
+  const my = ++kbSeq;
+  Object.assign(st, { results: [], loading: true, error: null, key: "", notices: [], full: false, progress: "" });
+  renderResults();
+  const info = {};
+  const promise = ensureCentre()
+    .then(() => kb.search(q, info))
+    .then((rows) => {
+      if (ar.state.connected) setArConn(true);
+      if (my !== kbSeq) return rows || [];
+      st.results = sortKbRows(rows || []);
+      st.key = key;
+      st.at = Date.now();
+      if (!q.number && info.max && info.raw >= info.max) {
+        st.notices.push({
+          text: `La Knowledge Base restituisce al massimo ${info.max} schede per ricerca: qui ne mancano. Posso cercarle tutte un anno alla volta (più richieste al portale), oppure restringi tu con il periodo o con un'altra parola.`,
+          action: () => runKbAll(),
+          actionLabel: "Cerca tutte",
+        });
+      }
+      if (ar.state.connected && !ctx.arCentre() && st.results.length) {
+        st.notices.push("Knowledge Base: non conosco il tuo centro servizi, quindi qui compaiono anche le schede degli altri centri. Scrivilo in Diagnostica → Impostazioni → «Centro servizi dell'Area Riservata».");
+      }
+      return st.results;
+    })
+    .catch((e) => {
+      log(`knowledge base: ${e.message}`);
+      if (my === kbSeq) st.error = e;
+      return [];
+    })
+    .finally(() => {
+      if (kbInflight && kbInflight.promise === promise) kbInflight = null;
+      if (my !== kbSeq) return;
+      st.loading = false;
+      autoPickTab();
+      renderResults();
+    });
+  kbInflight = { key, promise };
+  return promise;
+}
+
+/** La ricerca in corso, completa: oltre il limite del portale, un anno alla volta. */
+async function runKbAll() {
+  const st = S.kbS;
+  const q = kb ? kbQuery() : null;
+  if (!q || q.number) return;
+  const key = JSON.stringify(q);
+  const my = ++kbSeq;
+  kbInflight = null;
+  Object.assign(st, { loading: true, error: null, notices: [], progress: "" });
+  renderResults();
+  try {
+    await ensureCentre();
+    const res = await kb.searchAll(q, {
+      isCancelled: () => my !== kbSeq,
+      onProgress: (p) => {
+        if (my !== kbSeq) return;
+        st.progress = `${p.rows.toLocaleString("it-IT")} schede finora · ${p.queries} richieste`;
+        const n = document.querySelector("#results .loading .ar-progress");
+        if (n) n.textContent = st.progress;
+      },
+    });
+    if (my !== kbSeq || res.cancelled) return;
+    st.results = sortKbRows(res.rows);
+    Object.assign(st, { key, at: Date.now(), full: true });
+    st.notices.push(`Ricerca completa: ${res.rows.length.toLocaleString("it-IT")} schede, cercate un anno alla volta (${res.queries} richieste).`);
+    if (res.cappedYears.length) st.notices.push(`Per ${res.cappedYears.length === 1 ? "l'anno" : "gli anni"} ${res.cappedYears.join(", ")} il portale ha troncato comunque: lì può mancare qualche scheda. Aggiungi una parola o un filtro.`);
+    log(`knowledge base, ricerca completa: ${res.rows.length} schede in ${res.queries} richieste`);
+  } catch (e) {
+    log(`knowledge base, ricerca completa: ${e.message}`);
+    if (my === kbSeq) st.error = e;
+  } finally {
+    if (my === kbSeq) {
+      Object.assign(st, { loading: false, progress: "" });
+      renderResults();
+    }
+  }
+}
+
+// Come quelli del Vecchio Cruscotto, i filtri della Knowledge Base valgono finché l'app resta aperta.
+function kbChanged() {
+  refreshSidebar();
+  runKb();
+  renderResults();
+}
+
+/** kbSetFilter("visibility", "I") oppure kbSetFilter({ dateFrom: "2026-01-01", dateTo: "2026-12-31" }) */
+function kbSetFilter(key, val) {
+  if (key && typeof key === "object") Object.assign(S.kbS.filters, key);
+  else S.kbS.filters[key] = val;
+  kbChanged();
+}
+
+function kbReset() {
+  S.kbS.filters = emptyKbFilters();
+  kbChanged();
+}
+
+/** Etichette dei filtri attivi nella scheda Knowledge Base. */
+function describeKb() {
+  const f = S.kbS.filters;
+  const text = String(S.filters.text || "").trim();
+  const day = (d) => d.split("-").reverse().join("/");
+  const chips = [];
+  const num = kbNumberFrom(text);
+  if (text) chips.push({ key: "text", label: num ? `Scheda SKB#${num}` : `Testo: “${text}”` });
+  if (num) return chips; // con un numero di scheda i filtri non contano
+  if (text && f.mode !== "all" && queryTerms(text).length > 1) chips.push({ key: "mode", label: f.mode === "any" ? "Almeno una parola" : "Frase esatta" });
+  if (f.dateFrom || f.dateTo) {
+    chips.push({ key: "period", label: `${f.dateRef === "pub" ? "Pubblicazione" : "Ultima modifica"}${f.dateFrom ? " dal " + day(f.dateFrom) : ""}${f.dateTo ? " al " + day(f.dateTo) : ""}` });
+  }
+  if (f.visibility) chips.push({ key: "visibility", label: `Visibilità: ${(KB_VISIBILITY[f.visibility] || f.visibility).toLowerCase()}` });
+  if (f.published === false) chips.push({ key: "published", label: "Anche non pubblicate" });
+  if (f.definitive === false) chips.push({ key: "definitive", label: "Anche non definitive" });
+  return chips;
+}
+
+function clearKbKey(key) {
+  if (key === "text") return clearFilterKey("text");
+  if (key === "period") return kbSetFilter({ dateFrom: "", dateTo: "" });
+  kbSetFilter(key, emptyKbFilters()[key]);
 }
 
 // ---------------------------------------------------------------- Storico (ricerca avanzata dell'Area Riservata)
@@ -1674,6 +1855,7 @@ function visibleItems() {
   if (S.tab === "touch") return touchRows().map((row) => ({ row }));
   if (S.tab === "ar") return arRows().map((row) => ({ row }));
   if (S.tab === "storico") return S.storico.results.map((row) => ({ row }));
+  if (S.tab === "kb") return S.kbS.results.map((row) => ({ row }));
   if (S.tab === "archive") return S.archiveHits.map((x) => ({ row: x.row, snippet: x.snippet }));
   if (S.tab === "favorites") return S.favorites.map((x) => ({ row: reviveRow(x.row) || { id: x.id } }));
   if (S.tab === "recent") return S.recent.map((x) => ({ row: reviveRow(x.row) || { id: x.id } }));
@@ -1688,21 +1870,30 @@ function itemEl(it, i) {
   const arch = S.archived.get(r.id);
   const when = S.sort.key === "lastChange" ? r.lastChange : r.date;
   const snip = it.snippet || snippetOf(r);
+  const isKb = sourceOf(r) === "kb";
   const el = h("div", {
     class: `item src-${sourceOf(r)}` + (r.id === S.current ? " sel" : "") + (seen ? " seen" : ""),
     tabindex: "0",
     dataset: { id: r.id, i: String(i), source: sourceOf(r) },
-    onclick: () => { S.cursor = i; openTicket(r.id, r); },
+    // Ctrl+clic (o clic con la rotella): il ticket si apre in una nuova pagina e qui non cambia niente
+    onclick: (e) => { if (e.ctrlKey || e.metaKey) return openInNewPage(r.id, r, { background: true }); S.cursor = i; openTicket(r.id, r); },
+    onmousedown: (e) => { if (e.button === 1) e.preventDefault(); },
+    onauxclick: (e) => { if (e.button === 1) { e.preventDefault(); openInNewPage(r.id, r, { background: true }); } },
   },
     h("div", { class: "item-l1" },
-      r.statusId || r.statusText ? h("span", { class: `pill ${st.group}`, title: r.statusId || "" }, st.label) : null,
-      h("span", { class: "num", title: `${SOURCES[sourceOf(r)].title}: ${r.id}` }, ticketNumber(r.id)),
+      isKb
+        ? h("span", { class: `pill kb-${r.visibility === "I" ? "int" : "ext"}`, title: r.visibility === "I" ? "Visibilità interna: il cliente non la vede" : "Visibilità esterna: la vede anche il cliente" }, KB_VISIBILITY[r.visibility] || "Scheda")
+        : r.statusId || r.statusText ? h("span", { class: `pill ${st.group}`, title: r.statusId || "" }, st.label) : null,
+      h("span", { class: "num", title: `${SOURCES[sourceOf(r)].title}: ${numberOf(r)}` }, numberOf(r)),
       // nelle schede miste (archivio, preferiti, recenti) ogni riga dice da dove viene
       !isSourceTab() ? h("span", { class: `src-badge src-${sourceOf(r)}`, title: SOURCES[sourceOf(r)].title }, SOURCES[sourceOf(r)].label) : null,
       h("span", { class: "subj", title: r.subject || "" }, r.subject || "(senza oggetto)"),
       arch ? h("span", { class: "tag-mini", title: `Nell'archivio locale (salvato il ${fmtDateTime(arch.savedAt)})` }, icon("archive")) : null,
+      isKb && r.hasAttachments ? h("span", { class: "tag-mini", title: "La scheda ha degli allegati" }, icon("clip")) : null,
       fav ? h("span", { class: "star-on", title: "Preferito" }, icon("star")) : null,
-      h("span", { class: "when", title: when ? fmtDateTime(when) : "" }, fmtRelative(when))),
+      h("span", { class: "when", title: when ? (isKb ? fmtDate(when) : fmtDateTime(when)) : "" }, isKb ? fmtDate(when) : fmtRelative(when)),
+      h("button", { class: "item-open", type: "button", title: "Apri in una nuova pagina (anche con Ctrl+clic sulla riga)", "aria-label": "Apri in una nuova pagina",
+        onclick: (e) => { e.stopPropagation(); openInNewPage(r.id, r); } }, icon("external"))),
     metaEl(r),
     snip ? h("div", { class: "snip" }, snip) : null);
   return el;
@@ -1710,13 +1901,16 @@ function itemEl(it, i) {
 
 /** La riga «cliente · gruppo · → operatore» di un ticket in elenco. */
 function metaEl(r) {
-  const meta = [r.account, r.ownerGroup, r.assigned && `→ ${r.assigned}`].filter(Boolean);
+  const meta = r.source === "kb"
+    ? [r.catalog, r.version && `vers. ${r.version}`, r.typeText, r.assigned && `→ ${r.assigned}`].filter(Boolean)
+    : [r.account, r.ownerGroup, r.assigned && `→ ${r.assigned}`].filter(Boolean);
   return meta.length ? h("div", { class: "meta" }, meta.flatMap((m, k) => [k ? h("span", { class: "sep" }, "·") : null, h("span", { title: m }, m)])) : null;
 }
 
 /** Tutto il testo di un ticket su cui agisce «Filtra in elenco» (con i nomi al posto dei codici, dove si conoscono). */
 function filterTextOf(row) {
   const r = withArNames(row);
+  if (r.source === "kb") return [numberOf(r), r.kbId, r.subject, r.problem, r.catalog, r.version, r.typeText, r.assigned, KB_VISIBILITY[r.visibility]].filter(Boolean).join(" ");
   return [ticketNumber(r.id), r.subject, r.problem, r.solution, r.fullText, r.account, r.customerCode, r.contact, r.ownerGroup, r.assigned, r.catalog, r.topic, statusInfo(r.statusId, r.statusText).label].filter(Boolean).join(" ");
 }
 
@@ -1769,7 +1963,7 @@ function leaveTabForSearch(text) {
   if (!isSourceTab() || S.tab === "storico") S.tab = "touch";
 }
 
-const sidebarMode = (t) => (t === "storico" || t === "ar" ? t : "touch");
+const sidebarMode = (t) => (t === "storico" || t === "ar" || t === "kb" ? t : "touch");
 
 function pickTab(key) {
   pickPending = false; // la scheda l'ha scelta l'operatore
@@ -1789,10 +1983,10 @@ function openFound(row) {
   openTicket(row.id, row);
 }
 
-/** Le tre schede delle fonti: ognuna con il suo colore e il numero di ticket trovati. */
+/** Le schede delle fonti: ognuna con il suo colore e il numero di ticket trovati. */
 function sourceTabs(fmtN) {
   const c = sourceCounts();
-  const busy = { touch: S.loading, ar: S.arS.loading, storico: S.storico.loading };
+  const busy = { touch: S.loading, ar: S.arS.loading, storico: S.storico.loading, kb: S.kbS.loading };
   return h("div", { class: "src-tabs", role: "tablist" },
     Object.entries(SOURCES).map(([key, src]) =>
       h("button", { class: `src-tab src-${key}` + (S.tab === key ? " on" : ""), role: "tab", title: src.title, dataset: { source: key }, onclick: () => pickTab(key) },
@@ -1813,7 +2007,10 @@ function renderResults() {
   const items = visibleItems();
   const counts = sourceCounts();
   const arS = S.arS;
-  const busy = S.tab === "storico" ? st.loading : S.tab === "ar" ? arS.loading : src && S.loading;
+  const kbS = S.kbS;
+  const isKbTab = S.tab === "kb";
+  const unitOf = (n) => (isKbTab ? (Number(n) === 1 ? "scheda" : "schede") : "ticket");
+  const busy = S.tab === "storico" ? st.loading : S.tab === "ar" ? arS.loading : isKbTab ? kbS.loading : src && S.loading;
 
   // intestazione
   const sortSel = h("select", { class: "input", title: "Ordina per", onchange: (e) => { S.sort.key = e.target.value; kvSet("sort", S.sort); search(); } },
@@ -1823,9 +2020,9 @@ function renderResults() {
   const total = src ? counts[S.tab] : items.length;
   const what = { archive: "nell'archivio", favorites: "preferiti", recent: "recenti" }[S.tab];
   // una scheda a cui non si è chiesto niente non dice «0 ticket»
-  const asked = S.tab === "touch" ? !isUnconstrained(S.filters) : S.tab === "ar" ? !!arQuery() : S.tab === "storico" ? !!storicoQuery() : true;
+  const asked = S.tab === "touch" ? !isUnconstrained(S.filters) : S.tab === "ar" ? !!arQuery() : S.tab === "storico" ? !!storicoQuery() : isKbTab ? !!kbQuery() : true;
   const countText = src
-    ? (busy && !items.length ? "Cerco…" : busy ? `${fmtN(items.length)} ticket finora…` : !asked && !items.length ? "Nessuna ricerca" : `${fmtN(total)} ticket`)
+    ? (busy && !items.length ? "Cerco…" : busy ? `${fmtN(items.length)} ${unitOf(items.length)} finora…` : !asked && !items.length ? "Nessuna ricerca" : `${fmtN(total)} ${unitOf(total)}`)
     : `${fmtN(items.length)} ${what}`;
 
   const head = h("div", { class: "res-head" },
@@ -1834,9 +2031,9 @@ function renderResults() {
       h("button", { class: "btn btn-small" + (ui.showFilters ? " on" : ""), title: "Mostra/nascondi i filtri", onclick: toggleFilters }, icon("filter"), "Filtri"),
       h("div", { class: "res-count" }, countText,
         src && !busy && items.length && total > items.length ? h("small", null, ` · ne vedi ${fmtN(items.length)}`) : null),
-      S.tab === "touch" || S.tab === "ar" ? [sortSel, S.sort.key === "relevance" ? null : dirBtn] : null,
+      S.tab === "touch" || S.tab === "ar" || isKbTab ? [sortSel, S.sort.key === "relevance" ? null : dirBtn] : null,
       S.tab === "storico" ? h("span", { class: "hint" }, "dal più recente") : null,
-      src ? h("button", { class: "btn btn-small btn-icon", onclick: () => (S.tab === "storico" ? runStorico({ fresh: true }) : S.tab === "ar" ? runAr({ fresh: true }) : search({ fresh: true })), title: "Aggiorna (rifà la ricerca sul portale)" }, icon("reload")) : null),
+      src ? h("button", { class: "btn btn-small btn-icon", onclick: () => (S.tab === "storico" ? runStorico({ fresh: true }) : S.tab === "ar" ? runAr({ fresh: true }) : isKbTab ? runKb({ fresh: true }) : search({ fresh: true })), title: "Aggiorna (rifà la ricerca sul portale)" }, icon("reload")) : null),
     h("div", { class: "res-tools" },
       S.tab === "touch"
         ? [
@@ -1854,13 +2051,13 @@ function renderResults() {
         tabBtn("recent", "Recenti", S.recent.length || null))));
 
   if (src && (items.length > 5 || listFilters[S.tab])) head.appendChild(listFilterBox());
-  const chips = S.tab === "storico" ? describeStorico() : S.tab === "ar" ? describeAr() : describeFilters(S.filters);
+  const chips = S.tab === "storico" ? describeStorico() : S.tab === "ar" ? describeAr() : isKbTab ? describeKb() : describeFilters(S.filters);
   if (chips.length && (src || S.tab === "archive")) {
-    const drop = S.tab === "storico" ? clearStoricoKey : S.tab === "ar" ? clearArKey : clearFilterKey;
+    const drop = S.tab === "storico" ? clearStoricoKey : S.tab === "ar" ? clearArKey : isKbTab ? clearKbKey : clearFilterKey;
     head.appendChild(h("div", { class: "chips" },
       chips.map((c) => h("span", { class: "chip", title: c.label }, h("span", null, c.label),
         h("button", { title: "Togli questo filtro", onclick: () => drop(c.key) }, "×"))),
-      chips.length > 1 ? h("button", { class: "linkbtn", onclick: S.tab === "storico" ? storicoReset : S.tab === "ar" ? () => { arReset(); if (S.filters.text) clearFilterKey("text"); } : resetFilters }, "Azzera tutto") : null));
+      chips.length > 1 ? h("button", { class: "linkbtn", onclick: S.tab === "storico" ? storicoReset : S.tab === "ar" ? () => { arReset(); if (S.filters.text) clearFilterKey("text"); } : isKbTab ? () => { kbReset(); if (S.filters.text) clearFilterKey("text"); } : resetFilters }, "Azzera tutto") : null));
   }
   el.appendChild(head);
 
@@ -1879,6 +2076,17 @@ function renderResults() {
         h("div", null,
           h("button", { class: "btn", onclick: () => openArHome() }, icon("external"), "Apri l'Area Riservata"), " ",
           h("button", { class: "btn", onclick: () => runAr({ fresh: true }) }, "Riprova"))));
+    }
+  }
+  if (isKbTab) {
+    for (const n of kbS.notices) el.appendChild(noticeEl(n));
+    if (S.arConnected !== true) {
+      el.appendChild(noticeEl({ text: "L'Area Riservata non è collegata: aprila ed esegui l'accesso, poi torna qui. La Knowledge Base si legge da lì.", action: () => openArHome(), actionLabel: "Apri l'Area Riservata" }));
+    } else if (kbS.error) {
+      el.appendChild(h("div", { class: "err-box" }, "La ricerca nella Knowledge Base non è riuscita: " + kbS.error.message,
+        h("div", null,
+          h("button", { class: "btn", onclick: () => openArHome() }, icon("external"), "Apri l'Area Riservata"), " ",
+          h("button", { class: "btn", onclick: () => runKb({ fresh: true }) }, "Riprova"))));
     }
   }
   if (S.tab === "touch") {
@@ -1917,7 +2125,7 @@ function renderResults() {
 
   const list = h("div", { class: "list" });
   items.forEach((it, i) => list.appendChild(itemEl(it, i)));
-  if (!items.length && !busy && !(S.tab === "touch" && S.error) && !(S.tab === "ar" && arS.error) && !(S.tab === "storico" && st.error)) {
+  if (!items.length && !busy && !(S.tab === "touch" && S.error) && !(S.tab === "ar" && arS.error) && !(S.tab === "storico" && st.error) && !(isKbTab && kbS.error)) {
     const empty = {
       touch: isUnconstrained(S.filters)
         ? ["HDA Touch: scrivi cosa cercare", "Scrivi delle parole o un numero ticket nella casella in alto, oppure scegli un filtro a sinistra (per esempio lo stato «Aperti» o il tuo gruppo). Senza una richiesta qui non si carica nessun ticket."]
@@ -1928,6 +2136,9 @@ function renderResults() {
       storico: storicoQuery()
         ? ["Nessun ticket trovato nello Storico", "Prova ad allargare il periodo o a togliere un filtro."]
         : ["Storico: tutti i ticket del Vecchio Cruscotto, anche prima del 2024", "Qui non si cerca per parole. Scrivi un numero ticket nella casella in alto, oppure scegli a sinistra un periodo, un cliente, un gruppo o un operatore."],
+      kb: kbQuery()
+        ? ["Nessuna scheda trovata nella Knowledge Base", "Prova con altre parole, con «Almeno una parola» o togliendo un filtro (periodo, visibilità, solo pubblicate)."]
+        : ["Knowledge Base: le schede SKB dell'Area Riservata", "Scrivi delle parole nella casella in alto (o il numero di una scheda, per esempio SKB#12345), oppure scegli a sinistra un periodo o la visibilità per sfogliare le schede."],
       archive: [S.filters.text ? "Nessun ticket dell'archivio contiene queste parole" : "Scrivi una o più parole nella casella in alto", ""],
       favorites: ["Nessun preferito", "Apri un ticket e premi la stella per ritrovarlo qui."],
       recent: ["Nessun ticket aperto di recente", ""],
@@ -1936,7 +2147,7 @@ function renderResults() {
   }
   if (src && items.length) {
     list.appendChild(h("div", { class: "empty-state lf-none", hidden: true }, h("h3", null, "Nessun ticket dell'elenco passa il filtro"),
-      "Togli una parola dalla casella «Filtra in elenco»: i ticket trovati sono ancora tutti qui."));
+      isKbTab ? "Togli una parola dalla casella «Filtra in elenco»: le schede trovate sono ancora tutte qui." : "Togli una parola dalla casella «Filtra in elenco»: i ticket trovati sono ancora tutti qui."));
   }
   if (busy) {
     const still = S.tab === "touch" && S.pending && S.pending.size ? [...S.pending].join(", ") : "";
@@ -1944,6 +2155,8 @@ function renderResults() {
       ? (items.length ? "Carico altri…" : "Cerco nello Storico…")
       : S.tab === "ar"
         ? ["Cerco nel Vecchio Cruscotto… ", h("span", { class: "ar-progress" }, arS.progress || "")]
+        : isKbTab
+        ? ["Cerco nella Knowledge Base… ", h("span", { class: "ar-progress" }, kbS.progress || "")]
         : still
         ? (S.results.length ? `Sto ancora cercando in: ${still}…` : `Cerco in: ${still}…`)
         : S.results.length ? "Carico altri…" : "Cerco i ticket…";
@@ -1989,7 +2202,7 @@ async function openTicket(id, row, { force = false } = {}) {
   if (!row && id) {
     // prima la riga con lo stesso ID esatto, poi quella con lo stesso numero (mai un ticket con la Z al posto di uno senza)
     const want = String(id).trim();
-    row = S.results.find((r) => r.id === want) || (ticketIdFrom(want) ? pickExactTicket(mergeRowLists(S.results, S.arS.results), want, { allowSingle: false }) : null) || S.arS.results.find((r) => r.id === want) || S.storico.results.find((r) => r.id === want) || null;
+    row = S.results.find((r) => r.id === want) || (ticketIdFrom(want) ? pickExactTicket(mergeRowLists(S.results, S.arS.results), want, { allowSingle: false }) : null) || S.arS.results.find((r) => r.id === want) || S.storico.results.find((r) => r.id === want) || S.kbS.results.find((r) => r.id === want) || null;
   }
   id = row && row.id ? String(row.id) : ticketIdFrom(id) || String(id || "").trim();
   if (!id) return;
@@ -2002,9 +2215,13 @@ async function openTicket(id, row, { force = false } = {}) {
   ui.readerSearch = "";
   renderReaderLoading(ctx, id, row);
   try {
+    const isKb = (row && row.source === "kb") || (!row && isKbId(id));
     const loaded = row && row.source === "storico"
       ? await storico.loadTicket(id, { row })
-      : await loadTicket(hda, id, { row, rowReader, conditionsFor: conditionsForId, caps: S.caps, ar, log });
+      : isKb
+        ? await kb.loadDoc(id, { row })
+        : await loadTicket(hda, id, { row, rowReader, conditionsFor: conditionsForId, caps: S.caps, ar, log });
+    if (isKb) setArConn(true);
     let full = loaded;
     if (full.source === "ar") {
       setArConn(true);
@@ -2023,6 +2240,7 @@ async function openTicket(id, row, { force = false } = {}) {
     }
     if (my !== openSeq) return;
     renderReader(ctx, full);
+    soloTitle(full.row);
   } catch (e) {
     log(`ticket ${id}: ${e.message}`);
     if (e instanceof AuthError) setConn(false);
@@ -2030,7 +2248,7 @@ async function openTicket(id, row, { force = false } = {}) {
     let rec = null;
     try {
       // stesso ticket nell'archivio locale: l'ID esatto oppure, per un numero senza "Z", la forma con la "Z"
-      rec = (await getTicket(id)) || (!isTouchNativeId(id) && !(row && row.source === "ar") ? await getTicket(ticketNumber(id) + "Z") : null);
+      rec = (await getTicket(id)) || (!isTouchNativeId(id) && !isKbId(id) && !(row && row.source === "ar") ? await getTicket(ticketNumber(id) + "Z") : null);
     } catch {
       /* archivio non disponibile */
     }
@@ -2084,7 +2302,104 @@ async function completeArTicket(full) {
   return { ...out, row: named, timeline };
 }
 
+/**
+ * «Apri in una nuova pagina»: il ticket si apre in un'altra scheda del browser, dove si vede solo lui.
+ * Così se ne tengono aperti più di uno. La riga passa da una pagina all'altra nella memoria locale del browser.
+ */
+const OPEN_PREFIX = "rtkt-open:";
+/** background: la nuova pagina si apre dietro, senza lasciare quella in cui si sta lavorando (Ctrl+clic, rotella). */
+function openInNewPage(id, row, { background = false } = {}) {
+  id = String((row && row.id) || id || "").trim();
+  if (!id) return;
+  const token = Date.now().toString(36) + Math.random().toString(36).slice(2, 8);
+  try {
+    localStorage.setItem(OPEN_PREFIX + token, JSON.stringify({ id, row: slim(row), at: Date.now() }));
+  } catch (e) {
+    log("nuova pagina: " + e.message);
+  }
+  const url = `${location.href.split("#")[0]}#open=${token}&id=${encodeURIComponent(id)}`;
+  // Nell'estensione la scheda la crea il browser (accanto a questa): così la nuova pagina ha tutte le funzioni dell'estensione.
+  if (inExtension && chrome.tabs && chrome.tabs.create) {
+    const create = (cur) =>
+      chrome.tabs.create({ url, active: !background, ...(cur && cur.id != null ? { index: cur.index + 1, openerTabId: cur.id } : {}) })
+        .catch((e) => { log("nuova pagina: " + e.message); toast("Non sono riuscito ad aprire la nuova pagina: " + e.message, "err", 5000); });
+    if (chrome.tabs.getCurrent) chrome.tabs.getCurrent((cur) => create(cur));
+    else create(null);
+    if (background) toast(`${numberOf(row || { id })} aperto in una nuova pagina`, "ok", 1600);
+    return;
+  }
+  const w = window.open(url, "_blank");
+  if (!w) toast("Il browser ha bloccato la nuova pagina: consenti i popup per questa pagina.", "err", 5000);
+}
+
+/** Chiude la pagina aperta per un solo ticket. */
+function closeSoloPage() {
+  if (inExtension && chrome.tabs && chrome.tabs.getCurrent && chrome.tabs.remove) {
+    chrome.tabs.getCurrent((cur) => {
+      if (cur && cur.id != null) chrome.tabs.remove(cur.id);
+      else window.close();
+    });
+  } else window.close();
+}
+
+/** La richiesta con cui è stata aperta questa pagina (#open=…&id=…), se c'è: { id, row }. */
+function readOpenRequest() {
+  const m = /[#&]open=([a-z0-9]{6,40})/i.exec(location.hash);
+  const idm = /[#&]id=([A-Za-z0-9]{3,14})/.exec(location.hash);
+  // le righe passate a pagine mai aperte non restano in memoria più di un giorno
+  try {
+    for (const k of Object.keys(localStorage)) {
+      if (!k.startsWith(OPEN_PREFIX) || (m && k === OPEN_PREFIX + m[1])) continue;
+      let at = 0;
+      try { at = JSON.parse(localStorage.getItem(k)).at || 0; } catch { /* voce rovinata */ }
+      if (Date.now() - at > DAY) localStorage.removeItem(k);
+    }
+  } catch { /* memoria locale non disponibile */ }
+  if (!m) return null;
+  let saved = null;
+  try {
+    // dopo la prima lettura la riga resta solo in questa scheda (serve se si ricarica la pagina)
+    const key = OPEN_PREFIX + m[1];
+    const raw = sessionStorage.getItem(key) || localStorage.getItem(key);
+    if (raw) {
+      sessionStorage.setItem(key, raw);
+      localStorage.removeItem(key);
+      saved = JSON.parse(raw);
+    }
+  } catch { /* si prova con il solo numero */ }
+  const id = String((saved && saved.id) || (idm && idm[1]) || "").trim();
+  return id ? { id, row: saved && saved.row ? reviveRow(saved.row) : null } : null;
+}
+
+function enterSolo() {
+  S.solo = true;
+  document.body.classList.add("solo");
+}
+
+/** Dalla pagina di un solo ticket all'app intera, nella stessa pagina. */
+function leaveSolo() {
+  if (!S.solo) return;
+  S.solo = false;
+  document.body.classList.remove("solo");
+  document.title = "Ricerca TKT";
+  try { history.replaceState(null, "", location.pathname + location.search); } catch { /* */ }
+  renderSidebar(ctx);
+  renderResults();
+}
+
+/** Nella pagina di un solo ticket il titolo della scheda del browser dice quale: così si distinguono. */
+function soloTitle(row) {
+  if (!S.solo || !row) return;
+  document.title = `${numberOf(row)}${row.subject ? " · " + row.subject : ""}`.slice(0, 120);
+}
+
 function closeReader() {
+  if (S.solo) {
+    // la pagina era stata aperta solo per questo ticket: si chiude; se il browser non lo permette resta l'app intera
+    closeSoloPage();
+    setTimeout(() => { if (S.solo) { leaveSolo(); closeReader(); } }, 600);
+    return;
+  }
   openSeq++;
   S.current = null;
   const r = $("#reader");
@@ -2271,7 +2586,7 @@ function onKey(e) {
   if (document.querySelector("dialog[open]")) return;
   if (e.key === "Escape") {
     if (typing && t.id === "q") return t.blur();
-    if (!$("#reader").hidden) closeReader();
+    if (!$("#reader").hidden && !S.solo) closeReader();
     return;
   }
   if (typing || e.ctrlKey || e.metaKey || e.altKey) return;
@@ -2323,6 +2638,10 @@ async function init() {
   log(`lingua del portale: ${hda.lang}${touchLang ? " (come Touch)" : ""}, richieste ${transport.mode === "proxy" ? "dalla scheda di Touch" : "dirette"}`);
   ar = makeAr({ log });
   storico = makeStorico({ log, request: (path, o) => ar.request(path, o), centro: () => ar.state.idCenSer || S.caps.arCentro || "" });
+  kb = makeKb({ log, solr: (q, area) => ar.solr(q, area), readDetail: (url, o) => ar.readDetail(url, o), centro: () => ar.state.idCenSer || S.caps.arCentro || "" });
+  // pagina aperta con «Apri in una nuova pagina»: si vede solo quel ticket
+  const openReq = readOpenRequest();
+  if (openReq) enterSolo();
   lookups = makeLookups(hda, { kvGet, kvSet, log });
   await lookups.restore();
   refreshArchiveCount();
@@ -2338,6 +2657,10 @@ async function init() {
     if (ch.learned) S.calib.learned = ch.learned.newValue || {};
     if (ch.captures) S.captures = ch.captures.newValue || [];
     if (ch.learned || ch.captures) refreshSidebar();
+    // con più pagine dell'app aperte, preferiti e recenti restano gli stessi in tutte
+    if (ch.recent) S.recent = ch.recent.newValue || [];
+    if (ch.favorites) S.favorites = ch.favorites.newValue || [];
+    if (ch.recent || ch.favorites) renderResults();
   });
 
   $("#layout").classList.toggle("nofilters", !ui.showFilters);
@@ -2367,6 +2690,8 @@ async function init() {
   const arConnEl = $("#arConn");
   if (arConnEl) arConnEl.addEventListener("click", () => openArHome());
   $("#diagBtn").addEventListener("click", () => openDiag(ctx));
+  const soloBack = $("#soloBack");
+  if (soloBack) soloBack.addEventListener("click", () => { leaveSolo(); $("#q").focus(); });
   $("#sidebar").addEventListener("focusout", (e) => {
     if (pendingSidebar && !(e.relatedTarget && $("#sidebar").contains(e.relatedTarget))) setTimeout(refreshSidebar, 0);
   });
@@ -2382,7 +2707,8 @@ async function init() {
     const p = search();
     // collegamento diretto: index.html#t=10500123 apre quel ticket
     const m = /[#&]t=(\d{5,10})/.exec(location.hash);
-    if (m) await openTicket(m[1], null);
+    if (S.solo && openReq) await openTicket(openReq.id, openReq.row, { force: true });
+    else if (m) await openTicket(m[1], null);
     await p;
   };
   window.addEventListener("focus", async () => {
@@ -2390,6 +2716,8 @@ async function init() {
     else if (S.arConnected !== true && (await checkArConnection())) {
       if (S.current && isLegacyTicketNumber(S.current)) openTicket(S.current, null, { force: true });
       else if (arQuery()) runAr({ fresh: true }); // parole, numero o filtri del Vecchio Cruscotto: si rifà la sua ricerca
+      if (S.current && isKbId(S.current)) openTicket(S.current, null, { force: true });
+      if (kbQuery()) runKb({ fresh: true });
       if (S.storico.error) runStorico({ fresh: true });
     }
   });
@@ -2399,6 +2727,8 @@ async function init() {
   } else {
     if (!S.error) S.error = new AuthError();
     renderResults();
+    // senza Touch: il ticket di questa pagina si apre lo stesso (Vecchio Cruscotto, Storico e Knowledge Base non ne hanno bisogno)
+    if (S.solo && openReq) openTicket(openReq.id, openReq.row, { force: true });
   }
 }
 

@@ -367,3 +367,33 @@ select.input { height: 30px; width: auto; padding: 0 6px; }
 .list-filter.on { color: var(--accent); }
 .list-filter .lf-count { font-size: 12.5px; color: var(--muted); white-space: nowrap; font-variant-numeric: tabular-nums; }
 .loading .ar-progress { color: var(--muted); }
+
+/* ------------------------------------------------------------------ Knowledge Base (v4.5) */
+:root { --src-kb: #0f7b6c; --src-kb-bg: #e3f5f1; }
+.src-kb { --src: var(--src-kb); --src-bg: var(--src-kb-bg); }
+#sidebar[data-source="kb"] .side-head h2 { color: var(--src-kb); }
+#sidebar[data-source="kb"] .preset.on { border-color: var(--src-kb); color: var(--src-kb); background: var(--src-kb-bg); }
+.pill.kb-ext { background: #e2f4e8; color: #17663a; }
+.pill.kb-int { background: #fdebd0; color: #9a4b00; }
+.msg.doc .role { color: var(--src-kb); }
+.msg.doc .msg-card { border-left-color: var(--src-kb); }
+/* quattro fonti: nella colonna stretta le schede vanno su due righe */
+.src-tabs { flex-wrap: wrap; }
+.src-tab { flex: 1 1 130px; }
+
+/* ------------------------------------------------------------------ apri in una nuova pagina (v4.5) */
+.item-open { flex: none; display: inline-flex; align-items: center; justify-content: center; width: 22px; height: 22px; padding: 0; border: 1px solid transparent; border-radius: 5px; background: none; color: var(--faint); cursor: pointer; opacity: 0; }
+.item:hover .item-open, .item:focus-within .item-open, .item-open:focus-visible { opacity: 1; }
+.item-open:hover { color: var(--accent); border-color: var(--line-strong); background: #fff; }
+.item-open svg { width: 14px; height: 14px; }
+/* pagina aperta per un solo ticket: niente ricerca, filtri ed elenco */
+#soloBack { display: none; }
+body.solo #soloBack { display: inline-flex; margin-right: auto; }
+body.solo .searchbox { display: none; }
+body.solo #layout, body.solo #layout.reading, body.solo #layout.nofilters, body.solo #layout.reading.nofilters { grid-template-columns: minmax(0, 1fr); }
+body.solo .sidebar, body.solo .results { display: none; }
+body.solo .reader { border-left: 0; }
+body.solo .rd-head, body.solo .rd-body { padding-left: max(18px, calc((100% - 1100px) / 2)); padding-right: max(18px, calc((100% - 1100px) / 2)); }
+/* i pulsanti del lettore vanno a capo quando la colonna è stretta, invece di uscire dal bordo */
+.rd-top { flex-wrap: wrap; row-gap: 6px; }
+.rd-actions { flex-wrap: wrap; justify-content: flex-end; }
