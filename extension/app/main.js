@@ -452,19 +452,6 @@ function twoYearsAgoDate() {
   return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())}`;
 }
 
-const OPEN_ALL_SLOW_TTL = 12 * 3600 * 1000;
-
-function userGroupOrAssignedFallback(f) {
-  const gId =
-    S.caps.defaultGroupId ||
-    (S.calib.learned.OwnerUserGroupID && String(S.calib.learned.OwnerUserGroupID.value || "").split("|")[0]);
-  if (gId) return { ...f, statuses: OPEN_STATUS_IDS, ownerGroups: [{ id: gId, label: gId }] };
-  if (hda && hda.currentUserId) {
-    return { ...f, statuses: OPEN_STATUS_IDS, assigned: [{ id: hda.currentUserId, label: S.caps.userFullName || hda.currentUserId }] };
-  }
-  return null;
-}
-
 /**
  * Unisce in un unico elenco i risultati di HDA TOUCH e del Vecchio Cruscotto senza doppioni.
  * I ticket nativi di Touch (con la "Z", es. 9876543Z) restano sempre distinti dai ticket del Vecchio Cruscotto
@@ -683,7 +670,7 @@ async function search({ more = false, fresh = false } = {}) {
   // solo una nuova ricerca dalla casella in alto può far passare da sola alla scheda che ha trovato qualcosa
   if (!more && f.text !== lastBoxText) {
     lastBoxText = f.text;
-    pickPending = true;
+    pickPending = !!String(f.text || "").trim(); // casella vuota (anche all'avvio): si resta sulla scheda aperta
     listFilters.touch = listFilters.ar = listFilters.storico = "";
   }
   const size = Number(S.settings.pageSize) || 50;
@@ -798,6 +785,7 @@ async function search({ more = false, fresh = false } = {}) {
     return rawRows.map((r) => rowReader.read(r));
   };
 
+  let touchIdle = false; // vero se a Touch non si è chiesto niente
   try {
     let rows = [];
     let total = 0;
@@ -810,42 +798,10 @@ async function search({ more = false, fresh = false } = {}) {
       total = res.total;
       touchTotal = res.total || 0;
     } else if (isUnconstrained(f)) {
-      // Un'interrogazione senza alcun filtro su 10+ anni di storico scade a 25s su SQL Server nelle ore di punta:
-      // mostriamo i ticket negli stati aperti (come fa Touch all'avvio) e, se anche quello andasse in timeout, restringiamo al gruppo dell'operatore.
-      // Se di recente gli aperti di tutti i gruppi sono andati in timeout si parte subito dal proprio gruppo
-      // (all'avvio si risparmiano i 25 s del tentativo destinato a fallire).
-      const openF = { ...f, statuses: OPEN_STATUS_IDS };
-      const groupNotice =
-        "Vista iniziale: il portale era sovraccarico su tutti i gruppi, mostro i ticket aperti del tuo gruppo. Usa la ricerca o i filtri a sinistra per cercare su tutti i gruppi, nei ticket chiusi e nei messaggi.";
-      const fbNow = Date.now() - (S.openAllSlowAt || 0) < OPEN_ALL_SLOW_TTL ? userGroupOrAssignedFallback(f) : null;
-      let res;
-      if (fbNow) {
-        log("vista iniziale: gli aperti di tutti i gruppi sono andati in timeout da poco, parto dal gruppo/operatore");
-        res = await run(fbNow, size);
-        S.activeEffectiveFilters = fbNow;
-        S.notices.push(groupNotice);
-      } else {
-        try {
-          res = await run(openF, size);
-          S.activeEffectiveFilters = openF;
-          S.notices.push(
-            "Vista iniziale: mostro i ticket aperti per evitare il timeout del portale (25 s). Scrivi nella casella di ricerca o scegli un filtro a sinistra per cercare automaticamente anche in tutti i ticket chiusi e nei messaggi."
-          );
-        } catch (e) {
-          const fb = isTimeoutError(e) && userGroupOrAssignedFallback(f);
-          if (!fb) throw e;
-          log("timeout anche sugli aperti di tutti i gruppi: restringo al gruppo/operatore");
-          S.openAllSlowAt = Date.now();
-          kvSet("openAllSlowAt", S.openAllSlowAt);
-          res = await run(fb, size);
-          S.activeEffectiveFilters = fb;
-          S.notices.push(groupNotice);
-        }
-      }
-      if (ac.signal.aborted) return;
-      rows = readRawRows(res.rows);
-      total = res.total;
-      touchTotal = res.total || 0;
+      // Senza parole né filtri in HDA Touch non si cerca niente: l'elenco parte solo quando l'operatore chiede qualcosa
+      // (prima qui si caricavano da soli tutti i ticket aperti del portale).
+      touchIdle = true;
+      S.activeEffectiveFilters = null;
     } else if (f.text && !tid) {
       // Ricerca nei messaggi sempre attiva. In parallelo:
       //  1) FullText/eq[INCLUDECONVERSATIONITEM] su HDA TOUCH (cerca dentro i messaggi delle conversazioni e nell'oggetto)
@@ -1026,14 +982,14 @@ async function search({ more = false, fresh = false } = {}) {
     S.results = more ? sortUnifiedRows(mergeRowLists(S.results, rows), exactNum) : rows;
     S.total = Math.max(total, S.results.length);
     S.touchTotal = Math.max(touchTotal, touchRows().length);
-    log(`ricerca completata: ${S.results.length} ticket in ${Date.now() - t0} ms`);
+    log(touchIdle ? "HDA Touch: nessuna parola e nessun filtro, non cerco" : `ricerca completata: ${S.results.length} ticket in ${Date.now() - t0} ms`);
     const firstTouch = rows.find((r) => r.source !== "ar" && r.id && r.subject);
     if (!S.sampleTicket && firstTouch) {
       S.sampleTicket = { id: firstTouch.id, subject: firstTouch.subject };
     }
     lookups.harvest(rows.filter((r) => r.source !== "ar"));
     harvestTypes(rows.filter((r) => r.source !== "ar"));
-    if (S.connected !== true) setConn(true);
+    if (S.connected !== true && !touchIdle) setConn(true);
     if (cacheKey) cachePut(cacheKey, { results: S.results, total: S.total, touchTotal: S.touchTotal, notices: S.notices, eff: S.activeEffectiveFilters && JSON.parse(JSON.stringify(S.activeEffectiveFilters)) });
     archivedMap(rows.map((r) => r.id))
       .then((m) => { for (const [k, v] of m) S.archived.set(k, v); renderResults(); })
@@ -1746,8 +1702,10 @@ function renderResults() {
     icon("sort"), S.sort.dir === "DESC" ? "Recenti" : "Vecchi");
   const total = src ? counts[S.tab] : items.length;
   const what = { archive: "nell'archivio", favorites: "preferiti", recent: "recenti" }[S.tab];
+  // una scheda a cui non si è chiesto niente non dice «0 ticket»
+  const asked = S.tab === "touch" ? !isUnconstrained(S.filters) : S.tab === "ar" ? !!arQuery() : S.tab === "storico" ? !!storicoQuery() : true;
   const countText = src
-    ? (busy && !items.length ? "Cerco…" : busy ? `${fmtN(items.length)} ticket finora…` : `${fmtN(total)} ticket`)
+    ? (busy && !items.length ? "Cerco…" : busy ? `${fmtN(items.length)} ticket finora…` : !asked && !items.length ? "Nessuna ricerca" : `${fmtN(total)} ticket`)
     : `${fmtN(items.length)} ${what}`;
 
   const head = h("div", { class: "res-head" },
@@ -1839,7 +1797,9 @@ function renderResults() {
   items.forEach((it, i) => list.appendChild(itemEl(it, i)));
   if (!items.length && !busy && !(S.tab === "touch" && S.error) && !(S.tab === "ar" && arS.error) && !(S.tab === "storico" && st.error)) {
     const empty = {
-      touch: ["Nessun ticket trovato in HDA Touch", "Prova a togliere qualche filtro o a cambiare le parole."],
+      touch: isUnconstrained(S.filters)
+        ? ["HDA Touch: scrivi cosa cercare", "Scrivi delle parole o un numero ticket nella casella in alto, oppure scegli un filtro a sinistra (per esempio lo stato «Aperti» o il tuo gruppo). Senza una richiesta qui non si carica nessun ticket."]
+        : ["Nessun ticket trovato in HDA Touch", "Prova a togliere qualche filtro o a cambiare le parole."],
       ar: arQuery()
         ? ["Nessun ticket trovato nel Vecchio Cruscotto", "Prova a togliere un filtro o ad allargare il periodo. Qui ci sono solo gli anni più recenti: per i ticket più vecchi guarda la scheda Storico."]
         : ["Vecchio Cruscotto: la Ricerca rapida dell'Area Riservata", "Scrivi delle parole o un numero ticket nella casella in alto, oppure scegli a sinistra un filtro (gruppo, operatore, cliente, stato, periodo): si può cercare anche senza parole."],
@@ -2075,7 +2035,7 @@ function updateJob() {
 /** Tutte le righe della ricerca corrente (a pagine), fino a max */
 async function fetchAllRows(max, job) {
   const out = [];
-  const f = S.activeEffectiveFilters || (isUnconstrained(S.filters) ? { ...S.filters, statuses: OPEN_STATUS_IDS } : S.filters);
+  const f = S.activeEffectiveFilters || S.filters;
   const conditions = buildConditions(f, S.calib);
   const size = 200;
   for (let page = 1; out.length < max; page++) {
@@ -2201,14 +2161,13 @@ function onKey(e) {
 // ---------------------------------------------------------------- avvio
 
 async function init() {
-  const [settings, savedUi, lastFilters, sort, saved, favorites, recent, learned, captures, caps, typesSeen, touchLang, transportMode, openAllSlowAt, storicoFilters, stLookups] = await Promise.all([
+  const [settings, savedUi, lastFilters, sort, saved, favorites, recent, learned, captures, caps, typesSeen, touchLang, transportMode, storicoFilters, stLookups] = await Promise.all([
     kvGet("settings", null), kvGet("ui", null), kvGet("lastFilters", null), kvGet("sort", null), kvGet("saved", []),
     kvGet("favorites", []), kvGet("recent", []), kvGet("learned", {}), kvGet("captures", []), kvGet("caps", {}), kvGet("typesSeen", {}),
-    kvGet("touchLang", null), kvGet("transportMode", null), kvGet("openAllSlowAt", 0), kvGet("storicoFilters", null), kvGet("stLookups", null),
+    kvGet("touchLang", null), kvGet("transportMode", null), kvGet("storicoFilters", null), kvGet("stLookups", null),
   ]);
   if (storicoFilters) S.storico.filters = { ...emptyStoricoFilters(), ...storicoFilters };
   if (stLookups) S.stLookups = { groups: stLookups.groups || {}, operators: stLookups.operators || {}, clients: stLookups.clients || {} };
-  S.openAllSlowAt = Number(openAllSlowAt) || 0;
   Object.assign(S.settings, settings || {});
   Object.assign(ui, savedUi || {});
   ui.openSections = ui.openSections || {};
@@ -2308,7 +2267,7 @@ async function init() {
     if (S.connected === false && (await checkConnection())) start();
     else if (S.arConnected !== true && (await checkArConnection())) {
       if (S.current && isLegacyTicketNumber(S.current)) openTicket(S.current, null, { force: true });
-      else if (S.filters.text || S.filters.subject) search();
+      else if (arQuery()) runAr({ fresh: true }); // parole, numero o filtri del Vecchio Cruscotto: si rifà la sua ricerca
       if (S.storico.error) runStorico({ fresh: true });
     }
   });

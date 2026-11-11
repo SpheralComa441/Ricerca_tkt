@@ -45,6 +45,7 @@ Sopra l'elenco ci sono tre schede, ognuna con il suo colore e il numero di ticke
 | **Storico** (viola) | La *Ricerca avanzata* dell'Area Riservata: tutti i ticket, anche prima del 2024 | Numero ticket, periodo (riferito all'ultimo aggiornamento o all'apertura), stato aperto/chiuso, codice cliente, gruppo, operatore. **Non cerca per parole** (nel portale i campi oggetto e testo sono disattivati) |
 
 - **Numero ticket** nella casella in alto: si cerca nelle tre fonti insieme. Il ticket si apre da solo e la scheda passa a quella della sua fonte. Se il ticket c'è solo nello Storico si apre da lì.
+- **Niente ricerche non richieste**: ogni scheda cerca solo quando c'è qualcosa da cercare (parole o numero nella casella, oppure un suo filtro). Una scheda a cui non si è chiesto niente dice «Nessuna ricerca».
 - **Parole** nella casella in alto: si cercano in HDA Touch e nel Vecchio Cruscotto. La scheda Storico lo dice e propone i suoi filtri.
 - **Ogni scheda ha i suoi filtri**: quelli a sinistra cambiano con la scheda e valgono solo per quella fonte. Cambiare un filtro rifà la ricerca solo lì e non fa cambiare scheda. Solo una nuova ricerca dalla casella in alto può portare da sola alla scheda che ha trovato qualcosa.
 - **Scheda Vecchio Cruscotto**: i filtri sono quelli della Ricerca rapida del portale. «Gruppo che ha partecipato» trova i ticket a cui un gruppo ha lavorato anche se ora li ha in carico un altro. Il periodo va a mesi interi e si riferisce all'ultimo aggiornamento o all'apertura. Il portale restituisce al massimo 210 ticket per ricerca (i più rilevanti): quando succede un avviso lo dice. Con un numero ticket nella casella i filtri non contano. *Excel* scarica i ticket in elenco.
@@ -110,7 +111,7 @@ Tutto calcolato nel browser: nessun testo dei ticket esce dal PC.
 - Le ricerche fatte negli ultimi 2 minuti tornano **subito dalla memoria**; il pulsante ↻ (Aggiorna) le rifà sempre sul portale.
 - Mentre scrivi si cerca dopo una breve pausa e da 3 caratteri (o un numero ticket completo); <kbd>Invio</kbd> cerca subito.
 - Quando la ricerca nei messaggi di Touch (che copre anche l'oggetto) ha risposto, quella sull'oggetto non si aspetta più: su tutto lo storico può arrivare al timeout di 25 s.
-- Se all'avvio i ticket aperti di tutti i gruppi vanno in timeout, per 12 ore l'app parte direttamente dai ticket aperti del tuo gruppo (senza aspettare di nuovo i 25 s).
+- **Senza parole né filtri HDA Touch non carica niente**: all'avvio, o svuotando casella e filtri, l'elenco resta vuoto e al portale non si chiede nessun elenco. Per vedere i ticket aperti basta scegliere lo stato «Aperti» (o il proprio gruppo) a sinistra.
 - Aprendo un ticket dall'elenco, dati, conversazione e allegati si caricano insieme.
 - I filtri di HDA Touch non valgono nel Vecchio Cruscotto, che ha i suoi. Nei suoi filtri i gruppi si scelgono per nome: il gruppo di Touch `G10663HR` è il gruppo `10663` dell'Area Riservata.
 
