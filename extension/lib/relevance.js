@@ -1,7 +1,10 @@
 // Attinenza di un ticket rispetto alle parole cercate, calcolata nel browser (nessun dato esce dal PC).
 //
-// Conta: dove compare la parola (oggetto più del testo), se è la parola esatta o una sua variante
-// (cedolino/cedolini), se le parole stanno vicine o formano la frase scritta, quante parole su quante.
+// L'ordine è a fasce, come lavorano gli operatori (dalla più alta):
+//   1. tutte le parole vicine nel testo      2. tutte le parole vicine nell'oggetto
+//   3. alcune parole nel testo               4. alcune nell'oggetto e nel testo      5. alcune solo nell'oggetto
+// Tra la 2 e la 3 stanno i ticket che hanno tutte le parole ma non vicine (nel testo, nell'oggetto, divise tra i due).
+// Singolare e plurale valgono come la stessa parola (cedolino/cedolini).
 // Nessuna dipendenza dal DOM: testabile con node --test.
 
 import { norm, tokens } from "./util.js";
@@ -62,14 +65,6 @@ function wordMatches(term, w) {
   return w === term.text || w.includes(term.text) || (term.stem.length >= 3 && stem(w) === term.stem);
 }
 
-/** Quante volte il termine compare tra le parole. */
-function countOf(term, words, plain) {
-  if (term.phrase) return plain.split(term.text).length - 1;
-  let n = 0;
-  for (const w of words) if (wordMatches(term, w)) n++;
-  return n;
-}
-
 /**
  * Vero se TUTTE le parole compaiono nel testo, contando anche le varianti della parola (plurale/singolare).
  * È più largo di un confronto lettera per lettera: "premio" trova anche "premi".
@@ -87,101 +82,156 @@ export function matchesAllTerms(haystack, qOrWords) {
   });
 }
 
-/** La finestra di parole più corta che contiene tutti i termini (Infinity se non ci sono tutti). */
-function smallestWindow(terms, words) {
-  const single = terms.filter((t) => !t.phrase);
-  if (single.length < 2) return single.length ? 1 : Infinity;
-  const last = new Array(single.length).fill(-1);
+/** Posizioni (indice di parola) in cui un termine compare. Una frase vale dove comincia, parola per parola. */
+function positionsOf(term, words) {
+  const out = [];
+  if (!term.phrase) {
+    for (let i = 0; i < words.length; i++) if (wordMatches(term, words[i])) out.push(i);
+    return out;
+  }
+  const pw = term.text.match(WORD_RE) || [];
+  if (!pw.length) return out;
+  for (let i = 0; i + pw.length <= words.length; i++) {
+    let ok = true;
+    for (let k = 0; k < pw.length; k++) if (words[i + k] !== pw[k]) { ok = false; break; }
+    if (ok) out.push(i);
+  }
+  return out;
+}
+
+/** Il tratto di testo più corto (in parole) che contiene tutti i termini. `pos` = posizioni per termine, tutte non vuote. */
+function smallestWindow(pos) {
+  if (pos.length === 1) return 1;
+  const ev = [];
+  pos.forEach((list, k) => list.forEach((at) => ev.push([at, k])));
+  ev.sort((x, y) => x[0] - y[0]);
+  const have = new Array(pos.length).fill(0);
+  let missing = pos.length;
   let best = Infinity;
-  for (let i = 0; i < words.length; i++) {
-    let hit = false;
-    for (let k = 0; k < single.length; k++) {
-      if (wordMatches(single[k], words[i])) {
-        last[k] = i;
-        hit = true;
-      }
+  let left = 0;
+  for (let right = 0; right < ev.length; right++) {
+    if (have[ev[right][1]]++ === 0) missing--;
+    while (!missing) {
+      best = Math.min(best, ev[right][0] - ev[left][0] + 1);
+      if (--have[ev[left][1]] === 0) missing++;
+      left++;
     }
-    if (!hit) continue;
-    let min = i;
-    for (const p of last) {
-      if (p < 0) { min = -1; break; }
-      if (p < min) min = p;
-    }
-    if (min >= 0 && i - min + 1 < best) best = i - min + 1;
   }
   return best;
 }
 
 /** Vero se i termini compaiono uno dopo l'altro, nell'ordine scritto. */
-function inOrder(terms, words) {
-  const single = terms.filter((t) => !t.phrase);
-  if (single.length < 2) return false;
-  for (let i = 0; i + single.length <= words.length; i++) {
-    let ok = true;
-    for (let k = 0; k < single.length; k++) {
-      if (!wordMatches(single[k], words[i + k])) { ok = false; break; }
-    }
-    if (ok) return true;
-  }
-  return false;
+function inOrder(pos) {
+  if (pos.length < 2) return false;
+  const sets = pos.map((l) => new Set(l));
+  return pos[0].some((at) => sets.every((set, k) => set.has(at + k)));
 }
 
-const FIELD_WEIGHT = { subject: 6, problem: 2.5, text: 1.5, extra: 0.6 };
+/** Come le parole cercate compaiono in un pezzo di testo. */
+function analyse(text, terms) {
+  // la richiesta di Touch può essere HTML: i tag non sono parole
+  const plain = norm(/<\w/.test(text) ? String(text).replace(/<[^>]+>/g, " ") : text);
+  const words = wordsOf(plain);
+  const pos = terms.map((t) => positionsOf(t, words));
+  const hits = pos.map((l) => l.length > 0);
+  const found = hits.filter(Boolean).length;
+  const all = found === terms.length;
+  let kind = 0;
+  terms.forEach((t, k) => { if (hits[k]) kind += matchKind(t, words, plain) || 0.5; });
+  return {
+    hits,
+    found,
+    window: all ? smallestWindow(pos) : Infinity,
+    ordered: all && inOrder(pos),
+    kind: found ? kind / found : 0, // 1 = parole esatte, meno = varianti
+    count: pos.reduce((n, l) => n + l.length, 0),
+  };
+}
+
+/** Più pezzi di testo (richiesta, messaggi) visti come uno solo: le parole sono «vicine» se lo sono dentro un pezzo. */
+function mergeParts(parts, n) {
+  const out = { hits: new Array(n).fill(false), found: 0, window: Infinity, ordered: false, kind: 0, count: 0 };
+  for (const p of parts) {
+    p.hits.forEach((h, k) => { if (h) out.hits[k] = true; });
+    out.window = Math.min(out.window, p.window);
+    out.ordered = out.ordered || p.ordered;
+    out.kind = Math.max(out.kind, p.kind);
+    out.count += p.count;
+  }
+  out.found = out.hits.filter(Boolean).length;
+  return out;
+}
+
+/** Quante parole di distanza valgono ancora come «vicine» per n parole cercate (2 parole: entro 6; 3: entro 8). */
+const nearSpan = (n) => (n <= 1 ? 1 : n * 2 + 2);
 
 /**
- * Punteggio di attinenza di un ticket (0 = nessuna parola trovata). Campi letti: subject (oggetto), problem
- * (richiesta o estratto), fullText (testo dei messaggi, quando c'è), account/catalog/topic.
+ * Fasce di attinenza, dalla più alta. L'ordine è quello scelto dagli operatori: il testo dei messaggi conta più
+ * dell'oggetto, e avere tutte le parole vicine conta più di tutto.
  */
-export function scoreRow(row, termsOrQuery) {
+export const TIERS = {
+  ALL_NEAR_TEXT: 8, // tutte le parole vicine nel testo
+  ALL_NEAR_SUBJECT: 7, // tutte le parole vicine nell'oggetto
+  ALL_TEXT: 6, // tutte nel testo, ma lontane tra loro
+  ALL_SUBJECT: 5, // tutte nell'oggetto, ma lontane tra loro
+  ALL_SPLIT: 4, // tutte, divise tra oggetto e testo
+  SOME_TEXT: 3, // alcune parole, solo nel testo
+  SOME_BOTH: 2, // alcune parole, nell'oggetto e nel testo
+  SOME_SUBJECT: 1, // alcune parole, solo nell'oggetto
+  NONE: 0,
+};
+
+/**
+ * Attinenza di un ticket: { tier, score }. `score` = fascia × 1000 + dettaglio (0-999), così la fascia decide sempre
+ * e il dettaglio ordina dentro la fascia (parole più strette, in ordine, esatte, più parole trovate).
+ * Campi letti: subject (oggetto); il testo è problem (richiesta o estratto) più fullText (messaggi, quando ci sono).
+ */
+export function relevance(row, termsOrQuery) {
   const terms = Array.isArray(termsOrQuery) && termsOrQuery.length && typeof termsOrQuery[0] === "object" ? termsOrQuery : searchTerms(termsOrQuery);
-  if (!row || !terms.length) return 0;
-  const fields = [
-    ["subject", row.subject],
-    ["problem", row.problem],
-    ["text", row.fullText],
-    ["extra", [row.account, row.catalog, row.topic].filter(Boolean).join(" ")],
-  ]
-    .filter(([, v]) => v)
-    .map(([name, v]) => {
-      const plain = norm(v);
-      return { name, plain, words: wordsOf(plain) };
-    });
-  if (!fields.length) return 0;
+  if (!row || !terms.length) return { tier: 0, score: 0 };
+  const n = terms.length;
+  const subjNorm = norm(row.subject);
+  // Il testo completo del Vecchio Cruscotto è fatto dei messaggi separati da due spazi: ogni messaggio è un pezzo
+  // (le parole sono «vicine» solo dentro lo stesso messaggio). Il pezzo che ripete l'oggetto non è «testo».
+  const messages = row.fullText ? String(row.fullText).split(/ {2,}/).filter((m) => m.trim() && norm(m) !== subjNorm) : [];
+  const S = analyse(row.subject || "", terms);
+  const T = mergeParts([row.problem, ...messages].filter(Boolean).map((t) => analyse(t, terms)), n);
+  const union = S.hits.filter((h, k) => h || T.hits[k]).length;
+  if (!union) return { tier: 0, score: 0 };
 
-  let score = 0;
-  let found = 0;
-  let inSubject = 0;
-  for (const t of terms) {
-    let best = 0;
-    for (const f of fields) {
-      const kind = matchKind(t, f.words, f.plain);
-      if (!kind) continue;
-      // più occorrenze contano poco di più (un messaggio lungo non deve vincere solo perché ripete la parola)
-      const repeat = f.name === "subject" ? 1 : 1 + Math.min(countOf(t, f.words, f.plain) - 1, 4) * 0.12;
-      best = Math.max(best, FIELD_WEIGHT[f.name] * kind * repeat);
-      if (f.name === "subject") inSubject++;
-    }
-    if (best) found++;
-    score += best;
-  }
-  if (!found) return 0;
+  const span = nearSpan(n);
+  const allT = T.found === n;
+  const allS = S.found === n;
+  let tier;
+  if (allT && T.window <= span) tier = TIERS.ALL_NEAR_TEXT;
+  else if (allS && S.window <= span) tier = TIERS.ALL_NEAR_SUBJECT;
+  else if (allT) tier = TIERS.ALL_TEXT;
+  else if (allS) tier = TIERS.ALL_SUBJECT;
+  else if (union === n) tier = TIERS.ALL_SPLIT;
+  else if (T.found && !S.found) tier = TIERS.SOME_TEXT;
+  else if (T.found && S.found) tier = TIERS.SOME_BOTH;
+  else tier = TIERS.SOME_SUBJECT;
 
-  if (terms.length > 1) {
-    const subj = fields.find((f) => f.name === "subject");
-    if (subj && inSubject === terms.length) score += 4; // tutte le parole nell'oggetto
-    for (const f of fields) {
-      if (f.name === "extra") continue;
-      const w = FIELD_WEIGHT[f.name] / FIELD_WEIGHT.subject;
-      if (inOrder(terms, f.words)) score += 6 * w; // la frase così com'è scritta
-      else {
-        const win = smallestWindow(terms, f.words);
-        if (win <= terms.length + 3) score += (3 - 0.5 * (win - terms.length)) * w; // parole vicine: più sono strette, più vale
-        else if (win <= 15) score += 1.2 * w;
-      }
-    }
+  // dettaglio dentro la fascia
+  const main = tier === TIERS.ALL_NEAR_SUBJECT || tier === TIERS.ALL_SUBJECT || tier === TIERS.SOME_SUBJECT ? S : T;
+  const other = main === S ? T : S;
+  let fine = 0;
+  if (tier >= TIERS.ALL_SUBJECT) {
+    fine += (n / main.window) * 400; // più strette sono le parole, meglio è
+    if (main.ordered) fine += 150; // la frase così com'è scritta
+    if (other.found === n) fine += other.window <= span ? 200 : 120; // tutte anche nell'altro campo
+  } else {
+    fine += (union / n) * 450; // più parole trovate, meglio è
+    fine += (T.found / n) * 100;
   }
-  // un ticket con tutte le parole vale più di uno che ne ha solo alcune
-  return score * (found / terms.length) ** 2;
+  fine += Math.max(main.kind, 0) * 150; // parole esatte più delle varianti
+  fine += Math.min(T.count, 10) * 5; // qualche ripetizione nel testo conta poco
+  return { tier, score: tier * 1000 + Math.min(Math.round(fine), 999) };
+}
+
+/** Punteggio di attinenza (0 = nessuna parola trovata). */
+export function scoreRow(row, termsOrQuery) {
+  return relevance(row, termsOrQuery).score;
 }
 
 /**

@@ -89,8 +89,16 @@ Scrivi il numero nella barra principale (vanno bene anche `#`, `tk`, `ticket n.`
 
 Tutto calcolato nel browser: nessun testo dei ticket esce dal PC.
 
-- **Ordina per «Attinenza»** (ordinamento di partenza, si cambia dal menu accanto al numero di ticket): in alto i ticket più vicini alle parole cercate. Conta di più una parola nell'oggetto che nel testo, la parola esatta più di una sua variante, le parole vicine tra loro o scritte come frase, e avere tutte le parole invece di alcune. A parità, prima il più recente. Senza parole nella casella l'ordine è dal più recente.
-  - Nel Vecchio Cruscotto l'attinenza guarda tutto il testo dei messaggi. In HDA Touch guarda oggetto e richiesta dei ticket caricati (i primi 150; con *Mostra altri* se ne aggiungono).
+- **Ordina per «Attinenza»** (ordinamento di partenza, si cambia dal menu accanto al numero di ticket): in alto i ticket più vicini alle parole cercate. L'ordine è a fasce, dalla più alta:
+  1. tutte le parole vicine nel testo;
+  2. tutte le parole vicine nell'oggetto;
+  3. tutte le parole ma lontane tra loro (prima nel testo, poi nell'oggetto, poi divise tra oggetto e testo);
+  4. alcune parole nel testo;
+  5. alcune parole nell'oggetto e nel testo;
+  6. alcune parole solo nell'oggetto.
+
+  «Vicine» vuol dire entro poche parole l'una dall'altra, nello stesso messaggio (due parole: entro sei). Dentro una fascia vengono prima le parole più strette o scritte come frase, la parola esatta rispetto alla variante e chi ha più parole; a parità, il ticket più recente. Con una parola sola: prima chi l'ha nel testo, poi chi l'ha solo nell'oggetto. Senza parole nella casella l'ordine è dal più recente.
+  - «Testo» è la richiesta più i messaggi. Nel Vecchio Cruscotto ci sono tutti i messaggi; in HDA Touch c'è la richiesta dei ticket caricati (i primi 150; con *Mostra altri* se ne aggiungono).
 - **Singolare e plurale**: «cedolino» vale anche per «cedolini», «premio» per «premi». Le varianti contano nella verifica «tutte le parole», nell'attinenza e sono evidenziate in giallo. Una "frase tra virgolette" si cerca invece così com'è scritta.
 - **Estratto**: sotto l'oggetto si vede il punto del testo dove compaiono le parole cercate, non l'inizio del messaggio.
 - **Filtra in elenco** (casella sopra i risultati): restringe i ticket già trovati mentre scrivi, senza interrogare il portale. Tutte le parole devono comparire; `-parola` toglie i ticket che la contengono. Cerca anche in numero, cliente, gruppo, operatore e stato. *Esc* la svuota; si azzera a ogni nuova ricerca dalla casella in alto.

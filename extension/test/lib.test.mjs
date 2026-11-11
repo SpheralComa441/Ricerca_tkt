@@ -803,8 +803,8 @@ test("ar: filtri della Ricerca rapida (gruppo, operatore, cliente, stato, chi ha
 
 // ---------------------------------------------------------------- attinenza (calcolata nel browser)
 
-test("attinenza: radici italiane, tutte le parole con le varianti, punteggio, estratto, filtro dell'elenco", async () => {
-  const { stem, matchesAllTerms, scoreRow, sortByRelevance, bestSnippet, listFilter, highlightPatterns, searchTerms } = await import("../lib/relevance.js");
+test("attinenza: radici italiane, tutte le parole con le varianti, fasce di attinenza, estratto, filtro dell'elenco", async () => {
+  const { stem, matchesAllTerms, scoreRow, relevance, TIERS, sortByRelevance, bestSnippet, listFilter, highlightPatterns, searchTerms } = await import("../lib/relevance.js");
   for (const [a, b] of [["cedolino", "cedolini"], ["premio", "premi"], ["paga", "paghe"], ["malattia", "malattie"], ["voce", "voci"], ["detassazione", "detassazioni"]]) {
     assert.equal(stem(a), stem(b), `${a}/${b}`);
   }
@@ -820,19 +820,48 @@ test("attinenza: radici italiane, tutte le parole con le varianti, punteggio, es
   assert.equal(matchesAllTerms("unico libro", '"libro unico"'), false, "una frase tra virgolette va trovata intera");
   assert.equal(matchesAllTerms("qualsiasi", ""), true);
 
-  const rows = [
-    { id: "A", subject: "Detassazione premi di risultato", problem: "come applico la detassazione ai premi", date: new Date(2026, 1, 1) },
-    { id: "B", subject: "Cedolino errato", problem: "il premio non risulta", fullText: "il premio non risulta. serve la detassazione del premio di risultato aziendale", date: new Date(2026, 5, 1) },
-    { id: "C", subject: "Stampa libro unico", problem: "non stampa", fullText: "detassazione citata di passaggio " + "bla ".repeat(200) + " premi", date: new Date(2026, 8, 1) },
-    { id: "D", subject: "Solo premio", problem: "nulla", date: new Date(2026, 9, 1) },
-    { id: "E", subject: "Altro", problem: "niente", date: new Date(2026, 10, 1) },
-  ];
-  const order = sortByRelevance(rows, "detassazione premio").map((r) => r.id);
-  assert.deepEqual(order, ["A", "B", "C", "D", "E"], "oggetto > testo con parole vicine > parole lontane > una parola sola > nessuna");
-  assert.equal(scoreRow(rows[4], "detassazione premio"), 0);
-  assert.ok(scoreRow(rows[0], "detassazione premi") > scoreRow(rows[0], "detassazione premio"), "la parola esatta vale più della variante");
-  assert.ok(scoreRow({ subject: "premi di risultato" }, "premi risultato") > scoreRow({ subject: "risultato dei controlli sui premi" }, "premi risultato"), "parole vicine");
-  assert.deepEqual(sortByRelevance(rows, "").map((r) => r.id), ["A", "B", "C", "D", "E"], "senza parole l'ordine non cambia");
+  // Fasce nell'ordine scelto dagli operatori: il testo conta più dell'oggetto, le parole vicine più di tutto.
+  const far = " " + "bla ".repeat(30);
+  const cases = {
+    nearText: { subject: "Quesito", problem: "serve la detassazione del premio aziendale" },
+    nearSubject: { subject: "Detassazione premio", problem: "vedi allegato" },
+    allTextFar: { subject: "Quesito", problem: "detassazione" + far + "premio" },
+    allSubjectFar: { subject: "Detassazione" + far + "premio", problem: "vedi allegato" },
+    allSplit: { subject: "Detassazione", problem: "il premio non risulta" },
+    someText: { subject: "Quesito", problem: "il premio non risulta" },
+    someBoth: { subject: "Premio di produzione", problem: "il premio non risulta" },
+    someSubject: { subject: "Premio di produzione", problem: "vedi allegato" },
+    none: { subject: "Altro", problem: "niente" },
+  };
+  const tierOf = (k) => relevance(cases[k], "detassazione premio").tier;
+  assert.deepEqual(
+    Object.keys(cases).map(tierOf),
+    [TIERS.ALL_NEAR_TEXT, TIERS.ALL_NEAR_SUBJECT, TIERS.ALL_TEXT, TIERS.ALL_SUBJECT, TIERS.ALL_SPLIT, TIERS.SOME_TEXT, TIERS.SOME_BOTH, TIERS.SOME_SUBJECT, TIERS.NONE],
+  );
+  const shuffled = ["someSubject", "allSplit", "none", "nearSubject", "someText", "allTextFar", "nearText", "someBoth", "allSubjectFar"].map((k) => ({ id: k, ...cases[k] }));
+  assert.deepEqual(sortByRelevance(shuffled, "detassazione premio").map((r) => r.id), Object.keys(cases), "l'ordine dell'elenco segue le fasce");
+  assert.equal(scoreRow(cases.none, "detassazione premio"), 0);
+  // la fascia decide sempre: il testo vicino batte l'oggetto perfetto
+  assert.ok(scoreRow(cases.nearText, "detassazione premio") > scoreRow({ subject: "Detassazione premio", problem: "" }, "detassazione premio"));
+  // una parola sola: nel testo vale più che nel solo oggetto
+  assert.ok(scoreRow({ subject: "x", problem: "la detassazione" }, "detassazione") > scoreRow({ subject: "Detassazione", problem: "vedi allegato" }, "detassazione"));
+  // dentro la stessa fascia: parole più strette, parola esatta più della variante, più parole trovate
+  assert.ok(scoreRow({ problem: "detassazione premio" }, "detassazione premio") > scoreRow({ problem: "detassazione applicata al solo premio" }, "detassazione premio"), "più strette");
+  assert.ok(scoreRow({ problem: "detassazione dei premi" }, "detassazione premi") > scoreRow({ problem: "detassazione dei premi" }, "detassazione premio"), "esatta > variante");
+  assert.ok(scoreRow({ problem: "premio e conguaglio" }, "detassazione premio conguaglio") > scoreRow({ problem: "solo premio" }, "detassazione premio conguaglio"), "più parole trovate");
+  // «vicine» = entro poche parole (2 parole: 6); oltre, è la fascia «tutte ma lontane»
+  assert.equal(relevance({ problem: "detassazione uno due tre quattro premio" }, "detassazione premio").tier, TIERS.ALL_NEAR_TEXT);
+  assert.equal(relevance({ problem: "detassazione uno due tre quattro cinque premio" }, "detassazione premio").tier, TIERS.ALL_TEXT);
+  // vicine vuol dire nello stesso pezzo di testo: richiesta e messaggi non si attaccano
+  assert.equal(relevance({ problem: "chiede la detassazione", fullText: "premio di produzione" }, "detassazione premio").tier, TIERS.ALL_TEXT);
+  // nel testo completo del Vecchio Cruscotto l'oggetto ripetuto all'inizio non conta come testo
+  assert.equal(relevance({ subject: "Detassazione premio", fullText: "Detassazione premio  vedi allegato  risposto" }, "detassazione premio").tier, TIERS.ALL_NEAR_SUBJECT);
+  // i messaggi del Vecchio Cruscotto (separati da due spazi) sono pezzi distinti; i tag HTML non sono parole
+  assert.equal(relevance({ fullText: "chiede la detassazione  premio di produzione" }, "detassazione premio").tier, TIERS.ALL_TEXT);
+  assert.equal(relevance({ problem: "la <b>detassazione</b><br><br><br><br><br>del <i>premio</i>" }, "detassazione premio").tier, TIERS.ALL_NEAR_TEXT);
+  // una frase tra virgolette è un termine solo
+  assert.equal(relevance({ problem: "il libro unico del lavoro non stampa" }, '"libro unico" stampa').tier, TIERS.ALL_NEAR_TEXT);
+  assert.deepEqual(sortByRelevance(shuffled, "").map((r) => r.id), shuffled.map((r) => r.id), "senza parole l'ordine non cambia");
   // a parità di punteggio, dal più recente
   const same = [{ id: "old", subject: "premio", date: new Date(2020, 0, 1) }, { id: "new", subject: "premio", date: new Date(2026, 0, 1) }];
   assert.deepEqual(sortByRelevance(same, "premio").map((r) => r.id), ["new", "old"]);
