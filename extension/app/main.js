@@ -13,7 +13,7 @@ import { makeAr, emptyArFilters, hasArFilter } from "../lib/ar.js";
 import { sortByRelevance, matchesAllTerms, bestSnippet, searchTerms, highlightPatterns, listFilter } from "../lib/relevance.js";
 import { makeStorico, emptyStoricoFilters, hasStoricoFilter, enrichArTicket, movePeople } from "../lib/storico.js";
 import { makeRowReader } from "../lib/rows.js";
-import { emptyFilters, buildConditions, describeFilters, ruleFor, DEF, DOMAIN_CONDITION, OPEN_STATUS_IDS, FILTER_DEFS, isEmptyFilter, isUnconstrained, hasNarrowingFilter } from "../lib/filters.js";
+import { emptyFilters, buildConditions, describeFilters, ruleFor, DEF, DOMAIN_CONDITION, OPEN_STATUS_IDS, FILTER_DEFS, isEmptyFilter, isUnconstrained, hasNarrowingFilter, primaryTerm } from "../lib/filters.js";
 import { statusInfo, mergePortalStatuses } from "../lib/statuses.js";
 import { loadTicket, TICKET_COLUMNS } from "../lib/ticket.js";
 import { saveTicket, getTicket, searchArchive, archivedMap, archiveInfo, kvGet, kvSet, onKvChange, reviveRow } from "../lib/store.js";
@@ -61,6 +61,9 @@ const S = {
   notices: [],
   tab: "touch", // touch | ar | storico (le tre fonti) | archive | favorites | recent
   touchTotal: 0,
+  // Più parole in Touch: al portale si chiede la parola più lunga e le altre si verificano qui, a blocchi.
+  // { filters, word, step, examined, total, running, stopped, error }: quanti dei ticket trovati dal portale sono già stati controllati.
+  touchScan: null,
   // Vecchio Cruscotto: ricerca a sé, con i suoi filtri (quelli della Ricerca rapida dell'Area Riservata)
   arS: { filters: emptyArFilters(), results: [], loading: false, error: null, key: "", at: 0, notices: [] },
   storico: { filters: emptyStoricoFilters(), results: [], total: 0, loading: false, error: null, key: "" },
@@ -726,6 +729,7 @@ async function search({ more = false, fresh = false } = {}) {
     S.results = [];
     S.total = 0;
     S.touchTotal = 0;
+    S.touchScan = null;
     S.cursor = -1;
     S.notices = [];
     runArchiveSearch(f.text);
@@ -830,7 +834,7 @@ async function search({ more = false, fresh = false } = {}) {
           try {
             const r = await run(f, fetchLimit);
             S.activeEffectiveFilters = f;
-            return { rows: await verifyTouchRowsAllWords(readRawRows(r.rows), f), total: r.total, complete: true };
+            return { rows: await verifyTouchRowsAllWords(readRawRows(r.rows), f), total: r.total, read: r.rows.length, complete: true };
           } catch (e) {
             if (e instanceof AuthError || e.name === "AbortError") throw e;
             log(`FullText su tutto lo storico (${e.message}): riprovo sugli ultimi 24 mesi / aperti`);
@@ -844,7 +848,7 @@ async function search({ more = false, fresh = false } = {}) {
                   ? "La ricerca nei messaggi su tutto lo storico ha superato il limite di 25 secondi del portale: i messaggi sono cercati negli ultimi 24 mesi (gli oggetti su tutto lo storico)."
                   : "La ricerca nei messaggi ha superato il limite di 25 secondi del portale: i messaggi sono cercati nei ticket aperti."
               );
-              return { rows: await verifyTouchRowsAllWords(readRawRows(r2.rows), f), total: r2.total };
+              return { rows: await verifyTouchRowsAllWords(readRawRows(r2.rows), f), total: r2.total, read: r2.rows.length };
             } catch (e2) {
               if (e2 instanceof AuthError || e2.name === "AbortError") throw e2;
               S.activeEffectiveFilters = subF;
@@ -862,6 +866,7 @@ async function search({ more = false, fresh = false } = {}) {
       rows = sortUnifiedRows(mergeRowLists(ftRes.rows, subRows));
       total = multiWord ? rows.length : Math.max(ftRes.total || 0, rows.length);
       touchTotal = multiWord ? 0 : ftRes.total || 0;
+      if (multiWord && !more) noteTouchScan(ftRes.read || 0, ftRes.total || 0, fetchLimit, primaryTerm(textWords), ftRes.rows.length);
       if (hasNarrowingFilter(f) && rows.length < size) S.notices.push(textNarrowsNotice(f));
     } else if (tid) {
       // Ricerca per numero ticket: su HDA TOUCH tutte le varianti dell'ID in parallelo (es. "9876543" e "9876543Z",
@@ -973,6 +978,7 @@ async function search({ more = false, fresh = false } = {}) {
       rows = sortUnifiedRows(found);
       total = multiWord ? rows.length : Math.max(res.total || 0, rows.length);
       touchTotal = multiWord ? 0 : res.total || 0;
+      if (multiWord && !more) noteTouchScan(res.rows.length, res.total || 0, fetchLimit, primaryTerm(subjWords.length > 1 ? subjWords : textWords), found.length);
     }
 
     if (ac.signal.aborted) return;
@@ -988,7 +994,7 @@ async function search({ more = false, fresh = false } = {}) {
     lookups.harvest(rows.filter((r) => r.source !== "ar"));
     harvestTypes(rows.filter((r) => r.source !== "ar"));
     if (S.connected !== true && !touchIdle) setConn(true);
-    if (cacheKey) cachePut(cacheKey, { results: S.results, total: S.total, touchTotal: S.touchTotal, notices: S.notices, eff: S.activeEffectiveFilters && JSON.parse(JSON.stringify(S.activeEffectiveFilters)) });
+    if (cacheKey && !S.touchScan) cachePut(cacheKey, { results: S.results, total: S.total, touchTotal: S.touchTotal, notices: S.notices, eff: S.activeEffectiveFilters && JSON.parse(JSON.stringify(S.activeEffectiveFilters)) });
     archivedMap(rows.map((r) => r.id))
       .then((m) => { for (const [k, v] of m) S.archived.set(k, v); renderResults(); })
       .catch(() => {});
@@ -1012,6 +1018,83 @@ async function search({ more = false, fresh = false } = {}) {
       renderResults();
     }
   }
+}
+
+/**
+ * Ricerca con più parole in Touch: il portale ha trovato `total` ticket con la parola più lunga, ne sono stati letti
+ * e verificati `read`. Se ne restano, lo si dice e si offre di controllarli: prima sparivano senza avviso.
+ */
+function noteTouchScan(read, total, step, word, ok) {
+  log(`touch, più parole: il portale trova ${total} ticket con «${word}»; letti ${read}, ${ok} hanno tutte le parole`);
+  S.touchScan = total > read && read > 0
+    ? { filters: JSON.parse(JSON.stringify(S.activeEffectiveFilters || S.filters)), word, step, examined: read, total, running: false, stopped: false, error: "" }
+    : null;
+}
+
+const TOUCH_SCAN_MAX = 1500; // ticket controllati per ogni «Controlla gli altri»
+
+/** Legge e verifica, a blocchi, i ticket trovati dal portale non ancora controllati. Una nuova ricerca la interrompe. */
+async function scanTouchRest() {
+  const scan = S.touchScan;
+  const ac = searchAbort;
+  if (!scan || scan.running || !hda || !ac) return;
+  Object.assign(scan, { running: true, stopped: false, error: "" });
+  renderResults();
+  const startAt = scan.examined;
+  const live = () => S.touchScan === scan && searchAbort === ac && !ac.signal.aborted;
+  try {
+    while (scan.examined < scan.total) {
+      if (scan.examined - startAt >= TOUCH_SCAN_MAX) {
+        scan.stopped = true;
+        break;
+      }
+      const res = await hda.listData("Incidents", {
+        conditions: buildConditions(scan.filters, { ...S.calib, primaryTermOnly: true }),
+        page: Math.floor(scan.examined / scan.step) + 1,
+        start: scan.examined,
+        limit: scan.step,
+        sort: sortSpec(),
+        signal: ac.signal,
+      });
+      if (!live()) return;
+      if (!res.rows.length) {
+        scan.total = scan.examined;
+        break;
+      }
+      checkReader(res.rows);
+      const ok = await verifyTouchRowsAllWords(res.rows.map((r) => rowReader.read(r)), scan.filters);
+      if (!live()) return;
+      scan.examined += res.rows.length;
+      if (res.total) scan.total = Math.max(res.total, scan.examined);
+      S.results = sortUnifiedRows(mergeRowLists(S.results, ok));
+      S.total = S.results.length;
+      lookups.harvest(ok);
+      renderResults();
+    }
+    log(`touch, più parole: controllati ${scan.examined} di ${scan.total}, ${S.results.length} hanno tutte le parole`);
+  } catch (e) {
+    if (e.name === "AbortError" || !live()) return;
+    log(`touch, controllo degli altri ticket: ${e.message}`);
+    scan.error = e.message;
+  } finally {
+    scan.running = false;
+    if (live()) renderResults();
+  }
+}
+
+/** L'avviso sopra l'elenco di Touch che dice quanti ticket del portale sono stati controllati. */
+function touchScanNotice(fmtN) {
+  const scan = S.touchScan;
+  if (!scan) return null;
+  const left = scan.total - scan.examined;
+  const have = `${fmtN(S.results.filter((r) => r.source !== "ar").length)} hanno tutte le parole`;
+  if (scan.running) return { text: `Controllo gli altri ticket… ${fmtN(scan.examined)} di ${fmtN(scan.total)} (${have} finora).` };
+  if (left <= 0) return { text: `Controllati tutti i ${fmtN(scan.total)} ticket che il portale trova con «${scan.word}»: ${have}.` };
+  return {
+    text: `Il portale trova ${fmtN(scan.total)} ticket con «${scan.word}». Ho controllato i ${fmtN(scan.examined)} più recenti: ${have}. Gli altri ${fmtN(left)} non sono ancora stati controllati${scan.error ? ` (errore: ${scan.error})` : scan.stopped ? " (mi sono fermato per non caricare il portale)" : ""}.`,
+    action: scanTouchRest,
+    actionLabel: scan.stopped || scan.error ? "Continua" : `Controlla gli altri ${fmtN(left)}`,
+  };
 }
 
 function harvestTypes(rows) {
@@ -1759,6 +1842,8 @@ function renderResults() {
     }
   }
   if (S.tab === "touch") {
+    const scanNote = touchScanNotice(fmtN);
+    if (scanNote) el.appendChild(noticeEl(scanNote));
     for (const n of S.notices) el.appendChild(noticeEl(n));
     if (S.error) {
       const auth = S.error instanceof AuthError;

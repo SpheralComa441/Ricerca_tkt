@@ -2,7 +2,6 @@
 // Permette di cercare e leggere i ticket storici a 5-7 cifre (es. 9018200, 8907717) direttamente in Ricerca TKT.
 
 import { queryTerms, ticketNumber } from "./util.js";
-import { matchesAllTerms } from "./relevance.js";
 import { htmlToText, cleanText } from "./richtext.js";
 
 export const AR_ORIGIN = "https://www.zucchetti.it";
@@ -744,13 +743,10 @@ export function makeAr({ log = () => {}, fetch: fetchImpl = globalThis.fetch } =
     }
     // I partner usano lo stesso cruscotto con un loro centro servizi: senza un numero restano solo i ticket del proprio centro
     if (!ticketId && state.idCenSer) rows = rows.filter((r) => !r.cenSer || r.cenSer === state.idCenSer);
-    // Se si cercano più parole, verifichiamo che TUTTE le parole compaiano nel ticket (oggetto, testo completo o riepilogo)
-    const allWords = [...queryTerms(text), ...queryTerms(subject)];
-    if (!ticketId && allWords.length > 1) {
-      rows = rows.filter((r) =>
-        matchesAllTerms(`${r.subject || ""} ${r.fullText || ""} ${r.problem || ""} ${r.catalog || ""}`, allWords),
-      );
-    }
+    // Con più parole la ricerca le chiede già tutte al portale (in «and»). Qui NON si ricontrolla: il portale riconosce
+    // forme della parola e testi che nella risposta possono non esserci per intero, e ricontrollando sul testo ricevuto
+    // si scartavano ticket buoni. L'ordine per attinenza porta comunque in alto quelli con tutte le parole vicine.
+    info.kept = rows.length;
     if (ticketId) {
       const num = ticketNumber(ticketId);
       rows.sort((a, b) => (a.id === num ? -1 : b.id === num ? 1 : 0));

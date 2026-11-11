@@ -85,7 +85,8 @@ Scrivi il numero nella barra principale (vanno bene anche `#`, `tk`, `ticket n.`
 
 - **Gruppo di lavoro** è il *Gruppo owner* del ticket in Touch (es. `Paghe Infinity - Paghe Web P`). Per i ticket assegnati a un gruppo usa *Assegnato a*.
 - Con delle parole nella casella di ricerca e un filtro scelto, si cercano le parole **solo nei ticket del filtro**: sopra l'elenco un avviso lo dice e con *Togli il testo* vedi tutti i ticket del gruppo.
-- Con più parole, i ticket trovati dal portale vengono verificati tutti (anche oltre i primi 60): se i messaggi di un ticket non si possono leggere, il ticket resta nell'elenco.
+- **Più parole in HDA Touch**: al portale si chiede la parola più lunga, e le altre si verificano nell'app (oggetto, richiesta e messaggi). Si leggono 150 ticket alla volta, dal più recente. Se il portale ne trova di più, un avviso dice quanti ne ha trovati, quanti sono stati controllati e quanti restano: *Controlla gli altri* li legge e li verifica tutti (fino a 1.500 per volta). Se i messaggi di un ticket non si possono leggere, il ticket resta nell'elenco.
+- **Più parole nel Vecchio Cruscotto**: le parole si chiedono tutte al portale e i ticket che trova restano tutti in elenco. L'app non li ricontrolla sul testo ricevuto, perché il portale riconosce anche altre forme della parola e il testo nella risposta può non essere completo. L'ordine per attinenza porta comunque in alto quelli con tutte le parole vicine.
 
 ## Trovare il ticket giusto: attinenza, varianti, filtro in elenco
 

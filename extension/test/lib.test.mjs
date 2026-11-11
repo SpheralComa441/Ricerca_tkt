@@ -933,3 +933,32 @@ test("ar: la ricerca usa la radice per singolare/plurale; oltre il limite del po
   const res4 = await ar.searchAll({ text: "cud", filters: emptyArFilters() }, { isCancelled: () => true });
   assert.equal(res4.cancelled, true);
 });
+
+test("ar: con più parole i ticket trovati dal portale non si scartano anche se il testo ricevuto non le contiene tutte", async () => {
+  const queries = [];
+  const fetchImpl = async (url, init = {}) => {
+    let body = "<html></html>";
+    if (/portlet\.jsp$/.test(url)) body = "this.splResults.m_cID='f0f7834fde6879c8685311c282f6734a';";
+    else if (/spsl_fquery_mc$/.test(url)) {
+      queries.push(decodeURIComponent(init.body.split("&")[0].slice(9)));
+      body = arPage([
+        arRow({ num: "8900001", code: "000000008900001", subject: "Detassazione premio di risultato", date: "2026-04-21", testi: "detassazione del premio" }),
+        // il portale lo trova (riconosce «detassato», o la parola è in un pezzo di testo che la risposta non riporta)
+        arRow({ num: "8900002", code: "000000008900002", subject: "Quesito premio", date: "2026-04-22", testi: "il premio va detassato" }),
+        arRow({ num: "8900003", code: "000000008900003", subject: "Conguaglio", date: "2026-04-23", testi: "testo tagliato che non riporta le parole" }),
+      ]);
+    }
+    return { ok: true, status: 200, text: async () => body };
+  };
+  const ar = makeAr({ fetch: fetchImpl });
+  ar.setCentre("PAOW");
+  const info = {};
+  const rows = await ar.search({ text: "detassazione premio", filters: emptyArFilters() }, info);
+  assert.match(queries[0], /Testi:\(detassazione or detassazion\*\).* and .*Testi:\(premio or premi\*\)/, "le parole sono già chieste tutte al portale");
+  assert.deepEqual(rows.map((r) => r.id), ["8900001", "8900002", "8900003"], "restano tutti i ticket che il portale ha trovato");
+  assert.equal(info.raw, 3);
+  assert.equal(info.kept, 3);
+  // l'attinenza li mette comunque in ordine: prima chi ha tutte le parole vicine
+  const { sortByRelevance } = await import("../lib/relevance.js");
+  assert.deepEqual(sortByRelevance(rows, "detassazione premio").map((r) => r.id), ["8900001", "8900002", "8900003"]);
+});
