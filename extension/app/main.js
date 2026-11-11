@@ -342,7 +342,6 @@ function refreshSidebar() {
 const searchSoon = debounce(() => search(), 350);
 
 function filtersChanged(immediate) {
-  kvSet("lastFilters", S.filters);
   refreshSidebar();
   syncSearchBox();
   if (immediate) search();
@@ -662,7 +661,6 @@ async function search({ more = false, fresh = false } = {}) {
   const qEl = $("#q");
   if (qEl && !more && qEl.value.trim() !== S.filters.text) {
     S.filters.text = qEl.value.trim();
-    kvSet("lastFilters", S.filters);
     refreshSidebar();
   }
 
@@ -1506,7 +1504,6 @@ async function storicoLookup(kind, q) {
 }
 
 function storicoChanged() {
-  kvSet("storicoFilters", S.storico.filters);
   refreshSidebar();
   runStorico();
   renderResults();
@@ -2161,17 +2158,16 @@ function onKey(e) {
 // ---------------------------------------------------------------- avvio
 
 async function init() {
-  const [settings, savedUi, lastFilters, sort, saved, favorites, recent, learned, captures, caps, typesSeen, touchLang, transportMode, storicoFilters, stLookups] = await Promise.all([
-    kvGet("settings", null), kvGet("ui", null), kvGet("lastFilters", null), kvGet("sort", null), kvGet("saved", []),
+  // Parole e filtri dell'ultima volta non si rileggono: l'app si apre sempre vuota (le ricerche da ritrovare sono quelle salvate).
+  const [settings, savedUi, sort, saved, favorites, recent, learned, captures, caps, typesSeen, touchLang, transportMode, stLookups] = await Promise.all([
+    kvGet("settings", null), kvGet("ui", null), kvGet("sort", null), kvGet("saved", []),
     kvGet("favorites", []), kvGet("recent", []), kvGet("learned", {}), kvGet("captures", []), kvGet("caps", {}), kvGet("typesSeen", {}),
-    kvGet("touchLang", null), kvGet("transportMode", null), kvGet("storicoFilters", null), kvGet("stLookups", null),
+    kvGet("touchLang", null), kvGet("transportMode", null), kvGet("stLookups", null),
   ]);
-  if (storicoFilters) S.storico.filters = { ...emptyStoricoFilters(), ...storicoFilters };
   if (stLookups) S.stLookups = { groups: stLookups.groups || {}, operators: stLookups.operators || {}, clients: stLookups.clients || {} };
   Object.assign(S.settings, settings || {});
   Object.assign(ui, savedUi || {});
   ui.openSections = ui.openSections || {};
-  if (lastFilters) S.filters = { ...emptyFilters(), ...lastFilters };
   if (sort && SORTS[sort.key]) S.sort = sort;
   if (!(await kvGet("sortRelevanceOffered", false))) {
     S.sort = { key: "relevance", dir: "DESC" };
