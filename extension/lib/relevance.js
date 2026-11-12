@@ -38,11 +38,18 @@ function wordsOf(text) {
  * Le parole che iniziano con "-" non sono termini da cercare (servono solo al filtro dell'elenco).
  */
 export function searchTerms(q) {
-  const list = Array.isArray(q) ? q.map(norm).filter(Boolean) : tokens(q);
-  return list
-    .filter((t) => !t.startsWith("-"))
+  // «parola*» (asterisco scritto dall'operatore): vale per tutte le parole che iniziano così, senza togliere desinenze
+  const raw = Array.isArray(q) ? q.map(String) : [...String(q || "").matchAll(/"([^"]+)"|(\S+)/g)].map((m) => (m[1] != null ? m[1] : m[2]));
+  const out = [];
+  for (const r of raw) {
+    const t = norm(r.replace(/\*/g, ""));
+    if (!t || t.startsWith("-")) continue;
     // "phrase": frasi tra virgolette e parole con segni (26.05.00, f24/ep): si cercano così come sono scritte
-    .map((t) => ({ text: t, phrase: /[^a-z0-9]/.test(t), stem: /[^a-z0-9]/.test(t) ? t : stem(t) }));
+    const phrase = /[^a-z0-9]/.test(t);
+    const prefix = !phrase && /\*\s*$/.test(r);
+    out.push({ text: t, phrase, stem: phrase || prefix ? t : stem(t), prefix });
+  }
+  return out;
 }
 
 /**
@@ -54,7 +61,10 @@ function matchKind(term, words, plain) {
   let best = 0;
   for (const w of words) {
     if (w === term.text) return 1;
-    if (best < 0.8 && term.stem.length >= 3 && stem(w) === term.stem) best = 0.8;
+    if (term.prefix && best < 0.9 && w.startsWith(term.text)) best = 0.9;
+    else if (best < 0.8 && term.stem.length >= 3 && stem(w) === term.stem) best = 0.8;
+    // la parola comincia con la radice («centrale» per «centro»): è quello che trova la ricerca con l'asterisco
+    else if (best < 0.6 && term.stem.length >= 4 && w.startsWith(term.stem)) best = 0.6;
     else if (best < 0.5 && w.includes(term.text)) best = 0.5;
   }
   return best;
@@ -62,7 +72,7 @@ function matchKind(term, words, plain) {
 
 /** Vero se la parola del testo `w` vale per il termine (esatta, variante o che la contiene). */
 function wordMatches(term, w) {
-  return w === term.text || w.includes(term.text) || (term.stem.length >= 3 && stem(w) === term.stem);
+  return w === term.text || w.includes(term.text) || (term.stem.length >= 3 && stem(w) === term.stem) || (term.stem.length >= 4 && w.startsWith(term.stem));
 }
 
 /**
@@ -328,7 +338,10 @@ export function highlightPatterns(words) {
   const out = [];
   for (const t of searchTerms(words)) {
     if (t.text.length < 2) continue;
-    out.push({ text: t.text, stem: !t.phrase && t.stem !== t.text && t.stem.length >= 4 ? t.stem : "" });
+    // prefix: radice scritta dall'operatore («centr», «centr*») → si evidenzia tutta la parola che inizia così
+    const p = { text: t.text, stem: !t.phrase && t.stem !== t.text && t.stem.length >= 4 ? t.stem : "" };
+    if (!t.phrase && t.text.length >= 4 && (t.prefix || t.stem === t.text)) p.prefix = true;
+    out.push(p);
   }
   return out;
 }

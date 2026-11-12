@@ -45,7 +45,7 @@ export function highlight(root, words) {
   if (!ws.length) return 0;
   const esc = (s) => s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
   // confronto senza accenti: si cerca sulla forma normalizzata carattere per carattere
-  const alts = [...ws.map((w) => esc(w.text)), ...ws.filter((w) => w.stem).map((w) => `\\b${esc(w.stem)}[a-z]{0,3}\\b`)];
+  const alts = [...ws.filter((w) => w.prefix).map((w) => `\\b${esc(w.text)}[a-z]*`), ...ws.map((w) => esc(w.text)), ...ws.filter((w) => w.stem).map((w) => `\\b${esc(w.stem)}[a-z]{0,3}\\b`)];
   const re = new RegExp(alts.join("|"), "gi");
   let count = 0;
   const walker = document.createTreeWalker(root, NodeFilter.SHOW_TEXT, {

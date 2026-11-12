@@ -8,7 +8,8 @@
 //   2. la configurazione dell'elenco (campi "isFilter" con "filterOperator");
 //   3. i valori predefiniti qui sotto.
 
-import { ticketIdFrom, queryTerms } from "./util.js";
+import { ticketIdFrom, queryTerms, norm } from "./util.js";
+import { stem } from "./relevance.js";
 import { statusInfo, STATUS_GROUPS, statusesOfGroup } from "./statuses.js";
 
 export const DOMAIN_CONDITION = { property: "id", value: "1", op: "eq", extKey: "TICKETDOMAIN", id: "Domain" };
@@ -134,6 +135,33 @@ export function primaryTerm(terms) {
   return [...terms].sort((a, b) => b.length - a.length)[0];
 }
 
+// parole di servizio: con l'asterisco allargherebbero la ricerca senza aiutare («dell*», «nell*»)
+const NO_WILDCARD = new Set("alla alle allo agli anche come dagli dalla dalle dallo degli della delle dello dopo dove negli nella nelle nello ogni perche prima quale quali quando quanto quella quelle quello quelli questa queste questo questi senza sono sugli sulla sulle sullo tutta tutte tutti tutto".split(" "));
+
+/**
+ * Una parola come la si scrive per la ricerca di HDA Touch con l'asterisco: la radice più "*", così valgono singolare,
+ * plurale e le parole che iniziano allo stesso modo («centro» → «centr*», «costi» → «cost*», «cedolino» → «cedolin*»).
+ * Restano come sono: le parole che hanno già un asterisco, quelle corte (fino a 3 lettere), i numeri e le sigle con
+ * cifre o segni (L307, 26.05.00), le parole di servizio.
+ */
+export function wildcardWord(word) {
+  const s = String(word || "");
+  if (!s || s.includes("*")) return s;
+  const n = norm(s);
+  if (n.length < 4 || /[^a-z]/.test(n) || NO_WILDCARD.has(n)) return s;
+  let root = stem(n);
+  // radice troppo corta («paghe» → «pag»): si toglie solo la vocale finale, se restano almeno 4 lettere
+  if (root.length < 4) root = /[aeiou]$/.test(n) && n.length >= 5 ? n.slice(0, -1) : n;
+  return `${root}*`;
+}
+
+/** Tutto il testo della casella con l'asterisco automatico. Con una "frase tra virgolette" resta com'è. */
+export function wildcardText(text) {
+  const s = String(text || "").trim();
+  if (!s || /"/.test(s)) return s;
+  return queryTerms(s).map(wildcardWord).join(" ");
+}
+
 function cond(def, rule, value) {
   const c = { property: rule.property, value, op: rule.op, id: def.touchId };
   if (rule.extKey) c.extKey = rule.extKey;
@@ -179,7 +207,8 @@ export function buildConditions(f, calib = {}) {
           out.push(cond(def, rule, t));
         }
       } else {
-        out.push(cond(def, rule, s));
+        // asterisco automatico: solo sul testo della casella mandato a Touch in una sola condizione
+        out.push(cond(def, rule, def.key === "text" && calib.autoWildcard ? wildcardText(s) : s));
       }
     }
   }

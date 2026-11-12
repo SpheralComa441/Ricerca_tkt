@@ -14,7 +14,7 @@ import { sortByRelevance, matchesAllTerms, bestSnippet, searchTerms, highlightPa
 import { makeStorico, emptyStoricoFilters, hasStoricoFilter, enrichArTicket, movePeople } from "../lib/storico.js";
 import { makeKb, emptyKbFilters, hasKbFilter, kbNumberFrom, kbLabel, isKbId, KB_VISIBILITY } from "../lib/kb.js";
 import { makeRowReader } from "../lib/rows.js";
-import { emptyFilters, buildConditions, describeFilters, ruleFor, DEF, DOMAIN_CONDITION, OPEN_STATUS_IDS, FILTER_DEFS, isEmptyFilter, isUnconstrained, hasNarrowingFilter, primaryTerm } from "../lib/filters.js";
+import { emptyFilters, buildConditions, describeFilters, ruleFor, DEF, DOMAIN_CONDITION, OPEN_STATUS_IDS, FILTER_DEFS, isEmptyFilter, isUnconstrained, hasNarrowingFilter, primaryTerm, wildcardText } from "../lib/filters.js";
 import { statusInfo, mergePortalStatuses } from "../lib/statuses.js";
 import { loadTicket, TICKET_COLUMNS } from "../lib/ticket.js";
 import { saveTicket, getTicket, searchArchive, archivedMap, archiveInfo, kvGet, kvSet, onKvChange, reviveRow } from "../lib/store.js";
@@ -25,7 +25,8 @@ import { ticketIdFrom, ticketIdVariants, ticketNumber, isLegacyTicketNumber, isT
 const inExtension = typeof chrome !== "undefined" && !!(chrome.runtime && chrome.runtime.id);
 const DAY = 86400000;
 // portalLang "auto": la stessa lingua (_pl) che usa la pagina di Touch (registrata dal service worker)
-const DEFAULT_SETTINGS = { pageSize: 50, portalLang: "auto", archiveOnRead: true, archiveCap: 300, arCentro: "" };
+// autoWildcard: le parole della casella vanno a Touch con l'asterisco («centro» → «centr*»), così valgono plurali e parole che iniziano allo stesso modo
+const DEFAULT_SETTINGS = { pageSize: 50, portalLang: "auto", archiveOnRead: true, archiveCap: 300, arCentro: "", autoWildcard: true };
 
 function portalLang(settings, touchLang) {
   const chosen = settings && settings.portalLang;
@@ -131,6 +132,7 @@ const ctx = {
   arReset,
   kbSetFilter,
   kbReset,
+  setAutoWildcard,
   openInNewPage,
   arCentre: () => (ar && ar.state.idCenSer) || S.caps.arCentro || "",
 };
@@ -454,7 +456,27 @@ function saveSearchDialog() {
 // ---------------------------------------------------------------- ricerca
 
 function fallbackToSubject(f) {
-  return { ...f, text: "", subject: [f.subject, f.text].filter(Boolean).join(" ") };
+  // nell'oggetto si cerca "a metà parola": l'asterisco della casella lì non serve
+  return { ...f, text: "", subject: [f.subject, String(f.text || "").replace(/\*/g, "")].filter(Boolean).join(" ").trim() };
+}
+
+/**
+ * Il testo della casella come viene mandato a HDA Touch: con l'asterisco automatico (se attivo) ogni parola diventa
+ * «radice*». Un numero ticket e una "frase tra virgolette" restano come sono.
+ */
+function touchSentText(text) {
+  const s = String(text || "").trim();
+  if (!s || ticketIdFrom(s) || /"/.test(s)) return s;
+  return S.settings.autoWildcard !== false ? wildcardText(s) : s;
+}
+
+/** Interruttore «parole con varianti / parole esatte» della ricerca in HDA Touch: resta scelto anche alle prossime aperture. */
+async function setAutoWildcard(on) {
+  if ((S.settings.autoWildcard !== false) === !!on) return;
+  await saveSettings({ autoWildcard: !!on });
+  refreshSidebar();
+  if (String(S.filters.text || "").trim()) search({ fresh: true });
+  else renderResults();
 }
 
 function isTimeoutError(e) {
@@ -613,7 +635,7 @@ const RESULT_CACHE = new Map();
 const RESULT_CACHE_TTL = 2 * 60 * 1000;
 
 function resultCacheKey(f, size) {
-  return JSON.stringify([f, S.sort, size, S.arConnected === true]);
+  return JSON.stringify([f, S.sort, size, S.arConnected === true, S.settings.autoWildcard !== false]);
 }
 
 function cacheGet(key) {
@@ -791,8 +813,11 @@ async function search({ more = false, fresh = false } = {}) {
   // Più parole nella casella: come fa HDA Touch, tutto il testo va al portale in una sola condizione, ed è il portale
   // a trovare i ticket che le contengono tutte (oggetto, richiesta, soluzione, messaggi). Niente verifica qui.
   // Con una "frase tra virgolette" resta il modo dell'app: parola più lunga al portale, il resto verificato qui.
-  const nativeText = !tid && textWords.length > 1 && !/"/.test(f.text);
-  const calibNative = { ...S.calib, singleFullText: true };
+  // Lo stesso vale per le parole con l'asterisco (messo dall'app o scritto dall'operatore): è Touch che sa a cosa corrispondono.
+  const sentText = touchSentText(f.text);
+  const wildSent = /\*/.test(sentText);
+  const nativeText = !tid && textWords.length > 0 && !/"/.test(f.text) && (textWords.length > 1 || wildSent);
+  const calibNative = { ...S.calib, singleFullText: true, autoWildcard: S.settings.autoWildcard !== false };
   const textCalib = nativeText ? calibNative : calibForSearch;
   /** Filtri per la verifica locale: con la ricerca del portale le parole della casella non si ricontrollano. */
   const checkF = (x) => (nativeText ? { ...x, text: "" } : x);
@@ -894,9 +919,10 @@ async function search({ more = false, fresh = false } = {}) {
       total = multiWord && !portalTotal ? rows.length : Math.max(ftRes.total || 0, rows.length);
       touchTotal = multiWord && !portalTotal ? 0 : ftRes.total || 0;
       if (nativeText && !more) {
-        log(`touch, più parole: il portale trova ${ftRes.total || 0} ticket con tutte le parole («${f.text}» in una sola ricerca)`);
-        // si può sempre allargare: altre forme delle parole (singolare/plurale), controllando i ticket uno per uno
-        S.touchScan = ftRes.complete || ftRes.total
+        log(`touch: il portale trova ${ftRes.total || 0} ticket con «${sentText}»${sentText !== String(f.text).trim() ? ` (scritto: «${f.text}»)` : ""}`);
+        // Senza asterisco si può allargare alle altre forme delle parole (singolare/plurale), controllando i ticket uno per uno.
+        // Con l'asterisco le ha già cercate Touch.
+        S.touchScan = !wildSent && (ftRes.complete || ftRes.total)
           ? { native: true, filters: JSON.parse(JSON.stringify(S.activeEffectiveFilters || f)), word: primaryTerm(textWords), step: fetchLimit, examined: 0, total: null, running: false, stopped: false, error: "" }
           : null;
       } else if (multiWord && !more) noteTouchScan(ftRes.read || 0, ftRes.total || 0, fetchLimit, primaryTerm(textWords), ftRes.rows.length);
@@ -2052,6 +2078,12 @@ function renderResults() {
 
   if (src && (items.length > 5 || listFilters[S.tab])) head.appendChild(listFilterBox());
   const chips = S.tab === "storico" ? describeStorico() : S.tab === "ar" ? describeAr() : isKbTab ? describeKb() : describeFilters(S.filters);
+  if (S.tab === "touch") {
+    // si vede come le parole sono state mandate a Touch («centro di costo» → centr* di cost*)
+    const sent = touchSentText(S.filters.text);
+    const chip = chips.find((c) => c.key === "text");
+    if (chip && sent && sent !== String(S.filters.text || "").trim()) chip.label = `Cercato come: ${sent}`;
+  }
   if (chips.length && (src || S.tab === "archive")) {
     const drop = S.tab === "storico" ? clearStoricoKey : S.tab === "ar" ? clearArKey : isKbTab ? clearKbKey : clearFilterKey;
     head.appendChild(h("div", { class: "chips" },
@@ -2474,7 +2506,7 @@ async function fetchAllRows(max, job) {
   const out = [];
   const f = S.activeEffectiveFilters || S.filters;
   // più parole: come nell'elenco, tutto il testo in una sola condizione (la ricerca del portale)
-  const conditions = buildConditions(f, { ...S.calib, singleFullText: true });
+  const conditions = buildConditions(f, { ...S.calib, singleFullText: true, autoWildcard: S.settings.autoWildcard !== false });
   const size = 200;
   for (let page = 1; out.length < max; page++) {
     if (job && job.cancelled) break;

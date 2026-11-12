@@ -77,6 +77,8 @@ export function fmtSolrTerm(w) {
   const clean = String(w || "").replace(/[()"\\:]/g, " ").trim();
   if (!clean) return "";
   if (/\s/.test(clean)) return `"${clean}"`;
+  // asterisco scritto dall'operatore («centr*»): così com'è, in minuscolo (il jolly non passa dall'analisi del testo)
+  if (/^[A-Za-z0-9\u00C0-\u017F]{2,}\*$/.test(clean)) return clean.toLowerCase();
   if (/^[A-Za-z0-9\u00C0-\u017F]{3,}$/.test(clean)) {
     // Singolare e plurale: si toglie la vocale finale (cedolino → cedolin*: cedolini, cedolino…; premio → premi*),
     // ma solo se ne restano almeno cinque lettere, per non allargare troppo le parole corte.

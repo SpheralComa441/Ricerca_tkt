@@ -991,3 +991,63 @@ test("touch: più parole vanno al portale in una sola condizione, come fa HDA To
   assert.equal(relevance(row, "detassazione maggiorazione").tier, TIERS.ALL_NEAR_TEXT, "le parole nella soluzione valgono come testo");
   assert.equal(relevance({ ...row, solution: "" }, "detassazione maggiorazione").tier, TIERS.NONE);
 });
+
+test("asterisco: automatico per HDA Touch, scritto a mano ovunque", async () => {
+  const { wildcardWord, wildcardText, buildConditions: bc } = await import("../lib/filters.js");
+  const { searchTerms, relevance, matchesAllTerms, TIERS, highlightPatterns } = await import("../lib/relevance.js");
+  const { buildArQuery } = await import("../lib/ar.js");
+  const { buildKbQuery } = await import("../lib/kb.js");
+  const { tokens: toks } = await import("../lib/util.js");
+
+  // la radice più l'asterisco: singolare, plurale e parole che iniziano allo stesso modo
+  assert.equal(wildcardWord("centro"), "centr*");
+  assert.equal(wildcardWord("costi"), "cost*");
+  assert.equal(wildcardWord("centr"), "centr*");
+  assert.equal(wildcardWord("cedolino"), "cedolin*");
+  assert.equal(wildcardWord("premio"), "prem*");
+  assert.equal(wildcardWord("attività"), "attivit*", "senza accento: la radice vale per tutte le forme");
+  assert.equal(wildcardWord("Detassazione"), "detassazion*");
+  assert.equal(wildcardWord("paghe"), "pagh*", "mai meno di quattro lettere prima dell'asterisco");
+  assert.equal(wildcardWord("voce"), "voce*");
+  // restano come sono: asterisco già scritto, parole corte, numeri e sigle, parole di servizio
+  assert.equal(wildcardWord("centr*"), "centr*");
+  assert.equal(wildcardWord("di"), "di");
+  assert.equal(wildcardWord("non"), "non");
+  assert.equal(wildcardWord("730"), "730");
+  assert.equal(wildcardWord("L307"), "L307");
+  assert.equal(wildcardWord("26.05.00"), "26.05.00");
+  assert.equal(wildcardWord("della"), "della");
+  assert.equal(wildcardText("centro di costo"), "centr* di cost*");
+  assert.equal(wildcardText("centr di cost"), "centr* di cost*");
+  assert.equal(wildcardText("centr* di cost*"), "centr* di cost*");
+  assert.equal(wildcardText('"centro di costo" errato'), '"centro di costo" errato', "con una frase tra virgolette non si tocca niente");
+  assert.equal(wildcardText(""), "");
+
+  // a Touch: una sola condizione FullText con il testo così trasformato (come «centr* di cost*» scritto nel portale)
+  const ft = (text, calib) => bc({ ...emptyFilters(), text }, calib).filter((c) => c.property === "FullText").map((c) => c.value);
+  assert.deepEqual(ft("centro di costo", { singleFullText: true, autoWildcard: true }), ["centr* di cost*"]);
+  assert.deepEqual(ft("cedolino", { singleFullText: true, autoWildcard: true }), ["cedolin*"]);
+  assert.deepEqual(ft("centro di costo", { singleFullText: true }), ["centro di costo"], "senza l'opzione: parole esatte");
+  assert.deepEqual(ft("centr* di cost*", { singleFullText: true }), ["centr* di cost*"], "l'asterisco a mano passa sempre");
+  // il numero ticket non diventa mai una parola con l'asterisco
+  assert.deepEqual(ft("10500123", { singleFullText: true, autoWildcard: true }), []);
+
+  // nel browser l'asterisco non è una lettera: «centr*» è la parola che inizia per «centr»
+  assert.deepEqual(toks("centr* di cost*"), ["centr", "di", "cost"]);
+  assert.deepEqual(searchTerms("centr* costo").map((t) => [t.text, t.stem, !!t.prefix]), [["centr", "centr", true], ["costo", "cost", false]]);
+  assert.equal(matchesAllTerms("ripartizione per centri di costo", "centr* di cost*"), true);
+  assert.equal(matchesAllTerms("centrale dei costi", "centr* cost*"), true);
+  assert.equal(matchesAllTerms("nessuna delle due", "centr* cost*"), false);
+  assert.equal(relevance({ subject: "x", problem: "errore sui centri di costo del cantiere" }, "centr* di cost*").tier, TIERS.ALL_NEAR_TEXT);
+  assert.deepEqual(highlightPatterns("centr* di").map((p) => p.text), ["centr", "di"]);
+  // senza asterisco scritto: le parole che iniziano con la radice contano, ma meno della parola o del suo plurale
+  const exact = relevance({ subject: "", problem: "il centro di costo è sbagliato" }, "centro costo");
+  const loose = relevance({ subject: "", problem: "la centrale dei costi è sbagliata" }, "centro costo");
+  assert.equal(loose.tier, exact.tier, "tutte le parole vicine nel testo in tutti e due");
+  assert.ok(exact.score > loose.score, "la parola scritta così viene prima");
+
+  // Vecchio Cruscotto e Knowledge Base: l'asterisco scritto resta, in minuscolo (lì le varianti l'app le chiede già)
+  assert.match(buildArQuery({ text: "Centr* di cost*", idCenSer: "PAOW" }), /Testi:\(centr\*\) or Oggetto:\(centr\*\)/);
+  assert.match(buildArQuery({ text: "Centr* di cost*", idCenSer: "PAOW" }), /Testi:\(cost\*\) or Oggetto:\(cost\*\)/);
+  assert.match(buildKbQuery({ text: "cost*", idCenSer: "PAOW" }), /altDescription:\(cost\*\) OR description:\(cost\*\)/);
+});

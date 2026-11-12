@@ -112,7 +112,11 @@ def matches(t, c):
     if p == "FullText":
         # come Touch con INCLUDECONVERSATIONITEM: oggetto, richiesta e testo dei messaggi
         hay = (t["Subject"] + " " + t["Problem"] + " " + " ".join(str(it.get("Text", "")) for it in conversation(t))).lower()
-        return all(w in hay for w in v.lower().split())
+        def has(w):
+            if w.endswith("*"):
+                return re.search(r"\b" + re.escape(w.rstrip("*")), hay) is not None
+            return re.search(r"\b" + re.escape(w) + r"\b", hay) is not None
+        return all(has(w) for w in v.lower().split())
     if p == "CLASSCLI.TranslatedDescription":
         p = "CLASSCLI"
     if p not in t and p != "AssignedUserOrGroupID":

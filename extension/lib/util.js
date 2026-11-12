@@ -64,7 +64,8 @@ export function norm(s) {
 export function tokens(q) {
   const out = [];
   for (const m of String(q || "").matchAll(/"([^"]+)"|(\S+)/g)) {
-    const w = norm(m[1] || m[2]);
+    // l'asterisco («centr*») vale per il portale: qui si confronta la parte scritta
+    const w = norm(String(m[1] || m[2]).replace(/\*/g, ""));
     if (w) out.push(w);
   }
   return out;

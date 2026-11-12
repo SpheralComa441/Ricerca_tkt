@@ -378,6 +378,15 @@ export function renderSidebar(ctx) {
         h("button", { title: "Elimina", onclick: () => ctx.deleteSaved(i) }, "×")))), ctx));
   }
 
+  // come le parole della casella in alto vanno a HDA Touch
+  const wild = S.settings.autoWildcard !== false;
+  el.appendChild(h("div", { class: "fbody plain word-mode" },
+    field("Parole della casella in alto",
+      h("div", { class: "seg" },
+        h("button", { type: "button", class: "preset" + (wild ? " on" : ""), title: "Ogni parola vale anche al plurale e per le parole che iniziano allo stesso modo: «centro di costo» si cerca come «centr* di cost*»", onclick: () => ctx.setAutoWildcard(true) }, "Con varianti (*)"),
+        h("button", { type: "button", class: "preset" + (!wild ? " on" : ""), title: "Le parole si cercano scritte esattamente così. Puoi sempre mettere l'asterisco a mano dove serve.", onclick: () => ctx.setAutoWildcard(false) }, "Esatte")),
+      wild ? "L'asterisco lo mette l'app: «centro di costo» → centr* di cost*. Parole corte, numeri e sigle restano come sono." : "Si cercano le parole scritte così. L'asterisco si può mettere a mano: centr* di cost*.")));
+
   el.appendChild(section("status", "Stato", n("statuses"), ui.openSections.status ?? true, statusBlock(ctx), ctx));
 
   const me = ctx.hda.currentUserId;
