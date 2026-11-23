@@ -6,7 +6,7 @@
   if (window.__rtktBridge) return;
   window.__rtktBridge = true;
 
-  const ALLOWED = /^\/(WSCView\/(ListData|List|GetObjectAndDescription|GetObjectAndDescriptionHierarchy|GetStaticList|ObjectSearch)|WSC\/(Projection|Get|RunAnalysis))\b/;
+  const ALLOWED = /^\/(WSCView\/(ListData|List|GetObjectAndDescription|GetObjectAndDescriptionHierarchy|GetStaticList|ObjectSearch|GetAttachmentContentType|PreviewAttachment)|WSC\/(Projection|Get|RunAnalysis))\b/;
 
   chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
     if (!msg || msg.type !== "hda-fetch") return;
