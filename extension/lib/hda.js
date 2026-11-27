@@ -180,12 +180,12 @@ export function makeHda(transport, opts = {}) {
         },
       ];
       const { rows } = await this.listData("Attachments", {
-        viewId: "Default",
+        viewId: "AttachmentPreview",
         conditions,
         page: 1,
         start: 0,
         limit: 100,
-        sort: [{ property: "c5", direction: "DESC" }],
+        sort: [{ property: "c6", direction: "DESC" }],
         signal,
       });
       return rows;
@@ -326,10 +326,13 @@ export function normalizePreviewAttachment(r, fallbackParentObject = "", fallbac
   const desc = String(r.Description || r.c1 || r.description || "").trim();
   const contentType = String(r.ContentType || r.c0 || r.contentType || guessMimeFromName(fileName)).trim();
   const author = String(r["FirstUpdateUser.FullName"] || r.c3 || r.author || "").trim();
-  const sizeKb = r.KBSize != null ? Number(r.KBSize) : r.c5 != null && typeof r.c5 === "number" ? Number(r.c5) : null;
-  const date = parseMsDate(r.LastUpdate || r.c6 || r.date);
-  const parentObject = String(r.ParentObject || r.c7 || r.parentObject || fallbackParentObject || "").trim();
-  const parentObjectId = String(r.ParentObjectID || r.c8 || r.parentObjectId || fallbackParentId || "").trim();
+  const hasKbSizeCol = r.c8 !== undefined || typeof r.c5 === "number" || /^\/Date\(/.test(String(r.c6 || ""));
+  const rawSize = r.KBSize != null ? r.KBSize : hasKbSizeCol ? r.c5 : r.sizeKb;
+  const sizeKb = rawSize != null && rawSize !== "" ? Number(rawSize) : null;
+  const date = parseMsDate(r.LastUpdate || (hasKbSizeCol ? r.c6 : r.c5) || r.date);
+  const rawParentObj = String(r.ParentObject || (hasKbSizeCol ? r.c7 : r.c6) || r.parentObject || fallbackParentObject || "").trim();
+  const parentObject = rawParentObj && !/^\/Date\(/.test(rawParentObj) ? rawParentObj : String(fallbackParentObject || "").trim();
+  const parentObjectId = String(r.ParentObjectID || (hasKbSizeCol ? r.c8 : r.c7) || r.parentObjectId || fallbackParentId || "").trim();
   return {
     id,
     fileName,

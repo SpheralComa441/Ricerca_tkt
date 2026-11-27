@@ -364,7 +364,22 @@ export class StoricoError extends Error {}
  * opts.centro() → centro servizi dell'operatore (es. "PAOW"), letto dal Vecchio Cruscotto.
  */
 export function makeStorico({ log = () => {}, request, centro = () => "" } = {}) {
-  const state = { connected: null, cmdhash: "" };
+  const state = { connected: null, cmdhash: "", attachDiag: null };
+
+  function extractAttachHints(html) {
+    const out = [];
+    const lines = String(html || "").split(/\r?\n/);
+    for (const raw of lines) {
+      const line = raw.trim();
+      if (!line || /_VC\(this,/.test(line)) continue;
+      if (!/(dtjAttach|gspv_qviewallegati|gsdm_|TACODFILE|VFCODICE|download|allegat|servlet\/)/i.test(line)) continue;
+      // Sanifica eventuali codici lunghi (numeri ticket / hash) mantenendo solo la struttura JS/URL
+      const safe = line.replace(/\b\d{6,}\b/g, "<NUM>").slice(0, 260);
+      if (!out.includes(safe)) out.push(safe);
+      if (out.length >= 20) break;
+    }
+    return out;
+  }
 
   async function ensureHash(force = false) {
     if (state.cmdhash && !force) return state.cmdhash;
@@ -416,6 +431,11 @@ export function makeStorico({ log = () => {}, request, centro = () => "" } = {})
           ["w_TTCODICE", m.DTCODTIC || row.ttCodice], ["w_TASERIALE", m.DTSERIAL],
         ]);
         const data = parseSqlData(await request("/servlet/SQLDataProviderServer", { method: "POST", body }));
+        if (data && data.rows && data.rows.length) {
+          const sample = data.rows[0];
+          const fieldShapes = Object.fromEntries(Object.entries(sample).map(([k, v]) => [k, v == null ? "null" : `${typeof v}(${String(v).length})`]));
+          state.attachDiag = { ...(state.attachDiag || {}), fields: Object.keys(sample), fieldShapes };
+        }
         for (const a of (data && data.rows) || []) {
           const key = a.TACODFILE || a.TANOMEFILE;
           if (!key || seen.has(key)) continue;
@@ -446,6 +466,8 @@ export function makeStorico({ log = () => {}, request, centro = () => "" } = {})
     if (!moves.length && !/gspv_preview_ticket/.test(html)) {
       throw new StoricoError("Non riesco a leggere il ticket dallo Storico: apri l'Area Riservata, esegui l'accesso e riprova.");
     }
+    const hints = extractAttachHints(html);
+    if (hints.length) state.attachDiag = { ...(state.attachDiag || {}), hints };
     return moves;
   }
 

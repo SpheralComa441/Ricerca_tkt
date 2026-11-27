@@ -220,6 +220,7 @@ function probeSection(ctx, onDone) {
         caps: ctx.S.caps,
         rules: Object.fromEntries(FILTER_DEFS.map((d) => { const r = ruleFor(d, ctx.S.calib); return [d.key, `${r.property} ${r.op}${r.wildcard ? " %…%" : ""}${r.extKey ? " [" + r.extKey + "]" : ""} (${r.source})`]; })),
         lookups: ctx.lookups ? ctx.lookups.sizes() : null,
+        arAttachDiag: (ctx.storico && ctx.storico.state && ctx.storico.state.attachDiag) || null,
       };
       copyBtn.disabled = false;
       onDone();

@@ -390,14 +390,31 @@ class Handler(SimpleHTTPRequestHandler):
                     k = next((x for x in KB_ARTICLES if str(x["ID"]) == pid), None)
                     if k:
                         atts = [{"c0": a["ContentType"], "c1": a["FileName"], "c2": a["FileName"], "c3": a["Author"], "c4": a["ID"], "c5": a["KBSize"], "c6": val(a["LastUpdate"]), "c7": "KBArticle", "c8": pid} for a in k["Attachments"]]
+                elif not po and pid in BY_ID:
+                    t = BY_ID[pid]
+                    atts = [
+                        {"c0": "text/plain", "c1": "log_elaborazione.txt", "c2": "log_elaborazione.txt", "c3": "Customer Portal", "c4": f"A{pid}1", "c5": 12.4, "c6": val(t["Date"] + timedelta(hours=1)), "c7": "Incident", "c8": pid},
+                        {"c0": "text/csv", "c1": "dettaglio_voci.csv", "c2": "dettaglio_voci.csv", "c3": t["AssignedUser.FullName"], "c4": f"A{pid}2", "c5": 44.53, "c6": val(t["Date"] + timedelta(hours=2)), "c7": "TicketConversationItem", "c8": f"{pid}-1"},
+                    ]
                 return self.send_json({"success": True, "data": atts, "total": len(atts)})
             if u.path == "/HDAPortal/WSCView/PreviewAttachment":
                 aid = f.get("ID")
+                poe = (f.get("ParentObjectEntity") or "").strip()
+                poid = (f.get("ParentObjectID") or "").strip()
+                if poe not in ("Incident", "TicketConversationItem", "KBArticle", "Faq") or not poid:
+                    return self.send_json({"success": False}, 404)
                 for k in KB_ARTICLES:
                     for a in k["Attachments"]:
-                        if a["ID"] == aid:
+                        if a["ID"] == aid and poe == "KBArticle" and str(k["ID"]) == poid:
                             model = {"contentType": a["ContentType"].strip(), "fileName": a["FileName"].strip(), "content": base64.b64encode(a["Content"].encode()).decode()}
                             return self.send_js('{"ConfigurationHolder":true,"model":' + json.dumps(json.dumps(model)) + '}')
+                if aid and aid.startswith("A") and poe in ("Incident", "TicketConversationItem"):
+                    is_csv = aid.endswith("2")
+                    fn = "dettaglio_voci.csv" if is_csv else "log_elaborazione.txt"
+                    ct = "text/csv" if is_csv else "text/plain"
+                    body = "Voce;Descrizione;Ore\n001;Straordinario;4,5\n002;Ordinario;160,0\n" if is_csv else f"Allegato di prova per {poid}\nStato: OK\n"
+                    model = {"contentType": ct, "fileName": fn, "content": base64.b64encode(body.encode()).decode()}
+                    return self.send_js('{"ConfigurationHolder":true,"model":' + json.dumps(json.dumps(model)) + '}')
                 return self.send_json({"success": False}, 404)
             if u.path == "/HDAPortal/WSCView/ListData/TicketConversationItems":
                 conds = json.loads(f.get("filter") or "{}").get("conditions", [])

@@ -443,7 +443,30 @@ test("loadTicket: risolve i ticket a 7 cifre senza Z su HDA TOUCH (es. 9042633) 
   assert.equal(full.timeline.length, 3);
 });
 
-test("allegati: normalizeAttachment, parsePreviewAttachmentResponse e hda.listAttachments / previewAttachment", async () => {
+test("allegati: normalizeAttachment (8 e 9 colonne con KBSize), parsePreviewAttachmentResponse e hda.listAttachments / previewAttachment", async () => {
+  // Nuovo schema reale HDA Touch (ViewID=AttachmentPreview, 9 colonne con c5 = KBSize)
+  const rawRow9 = {
+    c0: "image/png",
+    c1: "VC 1 Ass.min-mas.PNG",
+    c2: "VC 1 Ass.min-mas.PNG",
+    c3: "Customer Portal",
+    c4: "A7822660Z",
+    c5: 76.39,
+    c6: "/Date(1795704011180)/",
+    c7: "TicketConversationItem",
+    c8: "T6068607Z",
+  };
+  const att9 = normalizeAttachment(rawRow9, "11973804Z");
+  assert.equal(att9.id, "A7822660Z");
+  assert.equal(att9.fileName, "VC 1 Ass.min-mas.PNG");
+  assert.equal(att9.contentType, "image/png");
+  assert.equal(att9.author, "Customer Portal");
+  assert.equal(att9.sizeKb, 76.39);
+  assert.equal(att9.date.getTime(), 1795704011180);
+  assert.equal(att9.parentObject, "TicketConversationItem");
+  assert.equal(att9.parentObjectId, "T6068607Z");
+
+  // Schema legacy a 8 colonne (senza c5 = KBSize)
   const rawRow = {
     c7: "11944440Z",
     c3: "Customer Portal",

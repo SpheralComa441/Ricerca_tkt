@@ -9,14 +9,14 @@ import { buildArTicket } from "./ar.js";
 export const CONV_COLUMNS = ["ID", "Text", "TextHTML", "FirstUpdate", "UserID", "User.FullName", "ContactID", "Contact.FirstName", "Contact.LastName", "Account.CompanyName", "SiteVisible", "MSGDIR", "TicketConversationItemStat.AttachmentCount"];
 // Alias della vista ConversationHistory di ListData (verificati)
 export const CONV_ALIAS = { c0: "Account.CompanyName", c1: "AccountID", c2: "Contact.FirstName", c3: "Contact.LastName", c4: "ContactID", c5: "FirstUpdate", c6: "FROMMAJINC", c7: "ID", c8: "MSGDIR", c9: "OTHERDEPT", c10: "REMOTETKT", c11: "SiteVisible", c12: "Text", c13: "TicketConversationItemStat.AttachmentCount", c14: "User.FullName", c15: "UserID" };
-// Alias della vista Default di ListData/Attachments (verificati da List_Attachments_Default)
-export const ATTACH_ALIAS = { c0: "ContentType", c1: "Description", c2: "FileName", c3: "FirstUpdateUser.FullName", c4: "ID", c5: "LastUpdate", c6: "ParentObject", c7: "ParentObjectID" };
+// Alias della vista AttachmentPreview di ListData/Attachments (verificati: c5 = KBSize introdotto da Touch)
+export const ATTACH_ALIAS = { c0: "ContentType", c1: "Description", c2: "FileName", c3: "FirstUpdateUser.FullName", c4: "ID", c5: "KBSize", c6: "LastUpdate", c7: "ParentObject", c8: "ParentObjectID" };
 // Campi del ticket (nomi verificati nei dati del dettaglio)
 export const TICKET_COLUMNS = ["ID", "Subject", "ProblemHTML", "Problem", "SolutionHTML", "Solution", "Date", "ClosureDate", "LastChange", "TicketStatusID", "TicketTypeID", "TicketPriorityID", "AccountID", "ContactID", "OwnerUserGroupID", "OwnerUserID", "AssignedUserID", "AssignedUserGroupID", "CTITMDESC", "CLASSCLI", "TKMAILTO", "TicketSourceID", "ParentTicketID", "Tag"];
 
 const LIST_TRUNC = 500; // l'elenco della conversazione tronca il testo a 500 caratteri
 
-/** Riga grezza di ListData/Attachments → allegato normalizzato */
+/** Riga grezza di ListData/Attachments (schema 9 colonne con c5=KBSize o legacy 8 colonne) → allegato normalizzato */
 export function normalizeAttachment(r, ticketId = "") {
   if (!r) return null;
   const id = String(r.ID || r.c4 || r.id || "").trim();
@@ -25,15 +25,21 @@ export function normalizeAttachment(r, ticketId = "") {
   const desc = String(r.Description || r.c1 || r.description || "").trim();
   const contentType = String(r.ContentType || r.c0 || r.contentType || guessMimeFromName(fileName)).trim();
   const author = String(r["FirstUpdateUser.FullName"] || r.c3 || r.author || "").trim();
-  const date = parseMsDate(r.LastUpdate || r.c5 || r.date);
-  const parentObject = String(r.ParentObject || r.c6 || r.parentObject || "Incident").trim();
-  const parentObjectId = String(r.ParentObjectID || r.c7 || r.parentObjectId || ticketId || "").trim();
+  // HDA Touch ha aggiunto c5 = KBSize spostando di +1 LastUpdate (c6), ParentObject (c7) e ParentObjectID (c8).
+  const hasKbSizeCol = r.c8 !== undefined || typeof r.c5 === "number" || /^\/Date\(/.test(String(r.c6 || ""));
+  const rawSize = r.KBSize != null ? r.KBSize : hasKbSizeCol ? r.c5 : r.sizeKb;
+  const sizeKb = rawSize != null && rawSize !== "" ? Number(rawSize) : null;
+  const date = parseMsDate(r.LastUpdate || (hasKbSizeCol ? r.c6 : r.c5) || r.date);
+  const rawParentObj = String(r.ParentObject || (hasKbSizeCol ? r.c7 : r.c6) || r.parentObject || "").trim();
+  const parentObject = rawParentObj && !/^\/Date\(/.test(rawParentObj) ? rawParentObj : "Incident";
+  const parentObjectId = String(r.ParentObjectID || (hasKbSizeCol ? r.c8 : r.c7) || r.parentObjectId || ticketId || "").trim();
   return {
     id,
     fileName,
     description: desc && desc !== fileName ? desc : "",
-    contentType,
+    contentType: contentType || guessMimeFromName(fileName),
     author,
+    sizeKb: Number.isFinite(sizeKb) && sizeKb > 0 ? sizeKb : null,
     date,
     parentObject,
     parentObjectId,

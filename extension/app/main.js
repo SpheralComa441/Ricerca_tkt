@@ -121,6 +121,7 @@ const ctx = {
   ui,
   get hda() { return hda; },
   get ar() { return ar; },
+  get storico() { return storico; },
   get kb() { return kb; },
   get faq() { return faq; },
   get lookups() { return lookups; },
@@ -2824,7 +2825,7 @@ function renderUpdateChrome() {
   const hasUpd = !!(lc && lc.status === "update_available");
 
   if (verEl) {
-    const curVer = (st && st.currentVersion) || (inExtension ? chrome.runtime.getManifest().version : "5.2.0");
+    const curVer = (st && st.currentVersion) || (inExtension ? chrome.runtime.getManifest().version : "5.2.1");
     verEl.textContent = hasUpd ? `↑ v${lc.remoteVersion}` : `v${curVer}`;
   }
   if (diagBtn) diagBtn.classList.toggle("has-update", hasUpd);
