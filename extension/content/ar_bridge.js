@@ -369,6 +369,23 @@
     return { ok: true, status: r.status, text: await r.text() };
   }
 
+  // Scaricamento binario di un allegato dell'Area Riservata (es. /servlet/gsdm_btlk_openfile?...)
+  async function plainFetchBinary({ path }) {
+    if (!/^\/(jsp|servlet)\//.test(String(path || ""))) return { error: "percorso-non-ammesso" };
+    const base = location.origin + "/areariservata";
+    const r = await fetch(base + path, { method: "GET", credentials: "include" });
+    const contentType = r.headers.get("content-type") || "";
+    const contentDisposition = r.headers.get("content-disposition") || "";
+    if (!r.ok) return { ok: false, status: r.status, contentType, contentDisposition };
+    const buf = new Uint8Array(await r.arrayBuffer());
+    const chunk = 0x8000;
+    let bin = "";
+    for (let i = 0; i < buf.length; i += chunk) {
+      bin += String.fromCharCode.apply(null, buf.subarray(i, i + chunk));
+    }
+    return { ok: true, status: r.status, contentType, contentDisposition, base64: btoa(bin) };
+  }
+
   chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
     if (!msg || msg.type !== "ar-cmd") return;
     const run = async () => {
@@ -379,6 +396,7 @@
       if (msg.cmd === "search") return await runSearch(msg);
       if (msg.cmd === "read") return await readDetail(msg.url, msg.deep === true);
       if (msg.cmd === "fetch") return await plainFetch(msg);
+      if (msg.cmd === "fetchBinary") return await plainFetchBinary(msg);
       return { error: "comando-sconosciuto" };
     };
     run().then(sendResponse, (e) => sendResponse({ error: String((e && e.message) || e) }));

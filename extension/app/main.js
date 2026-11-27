@@ -7,7 +7,7 @@
 import { h, clear, $, highlight, toast, icon } from "./dom.js";
 import { renderSidebar, renderDateBar } from "./sidebar.js";
 import { renderReader, renderReaderLoading, renderReaderError } from "./reader.js";
-import { openDiag } from "./diag.js";
+import { openDiag, openUpdates, refreshOpenUpdates } from "./diag.js";
 import { makeTransport, AuthError, PORTAL_BASE } from "../lib/transport.js";
 import { makeHda } from "../lib/hda.js";
 import { makeAr, emptyArFilters, hasArFilter } from "../lib/ar.js";
@@ -2816,19 +2816,21 @@ function bgMsg(msg) {
   });
 }
 
+const AUTO_CHECK_MS = 4 * 60 * 60 * 1000;
+
 function renderUpdateChrome() {
   const st = S.updater;
   const verEl = $("#navVer");
-  const diagBtn = $("#diagBtn");
+  const updBtn = $("#updatesBtn");
   const bar = $("#updateBar");
   const lc = st && st.lastCheck;
   const hasUpd = !!(lc && lc.status === "update_available");
 
   if (verEl) {
-    const curVer = (st && st.currentVersion) || (inExtension ? chrome.runtime.getManifest().version : "5.2.1");
-    verEl.textContent = hasUpd ? `↑ v${lc.remoteVersion}` : `v${curVer}`;
+    const curVer = (st && st.currentVersion) || (inExtension ? chrome.runtime.getManifest().version : "5.2.2");
+    verEl.textContent = hasUpd ? `↑ ${lc.remoteVersion}` : `v${curVer}`;
   }
-  if (diagBtn) diagBtn.classList.toggle("has-update", hasUpd);
+  if (updBtn) updBtn.classList.toggle("has-update", hasUpd);
 
   if (!bar) return;
   if (!hasUpd || S.updateBarDismissed || S.solo) {
@@ -2867,7 +2869,7 @@ function renderUpdateChrome() {
     actions.appendChild(btn);
   } else {
     actions.appendChild(
-      h("button", { type: "button", class: "btn btn-small btn-primary", onclick: () => openDiag(ctx, { focusUpdates: true }) },
+      h("button", { type: "button", class: "btn btn-small btn-primary", onclick: () => openUpdates(ctx) },
         icon("update"), "Attiva aggiornamento automatico"),
     );
   }
@@ -2885,6 +2887,7 @@ async function getUpdateStatus(pingHelper = false) {
   if (st && !st.error) {
     S.updater = st;
     renderUpdateChrome();
+    refreshOpenUpdates(st);
   }
   return st;
 }
@@ -2896,6 +2899,7 @@ async function checkUpdates(autoApply = false) {
     S.updater = st;
     S.updateBarDismissed = false;
     renderUpdateChrome();
+    refreshOpenUpdates(st);
   }
   return st;
 }
@@ -2911,6 +2915,7 @@ async function saveUpdaterConfig(config) {
   if (st && !st.error) {
     S.updater = st;
     renderUpdateChrome();
+    refreshOpenUpdates(st);
   }
   return st;
 }
@@ -2919,6 +2924,20 @@ async function reloadExtension() {
   if (!inExtension) return;
   toast("Ricarico l'estensione…", "info", 2000);
   await bgMsg({ type: "updater:reload" });
+}
+
+async function maybeAutoCheckUpdates() {
+  if (!inExtension) return;
+  try {
+    const st = await getUpdateStatus(false);
+    const autoCheck = !st || !st.config || st.config.autoCheck !== false;
+    const lastAt = (st && st.lastCheck && st.lastCheck.checkedAt) || 0;
+    if (autoCheck && (!lastAt || Date.now() - lastAt >= AUTO_CHECK_MS)) {
+      await checkUpdates(true);
+    }
+  } catch (e) {
+    log("updater: " + e.message);
+  }
 }
 
 async function initUpdates() {
@@ -2930,11 +2949,20 @@ async function initUpdates() {
       toast(`Ricerca TKT aggiornata automaticamente alla v${just.to}!`, "ok", 5500);
       log(`aggiornamento completato: v${just.from} → v${just.to}`);
     }
-    const st = await getUpdateStatus(false);
-    const stale = !st || !st.lastCheck || !st.lastCheck.checkedAt || Date.now() - st.lastCheck.checkedAt > 3600_000;
-    if (st && st.config && st.config.autoCheck !== false && stale) {
-      checkUpdates(false).catch(() => {});
+    await maybeAutoCheckUpdates();
+    // Sincronizza subito la UI quando il controllo automatico ogni 4 ore in background completa
+    if (chrome.storage && chrome.storage.onChanged) {
+      chrome.storage.onChanged.addListener((changes, area) => {
+        if (area !== "local") return;
+        if (changes.updaterLastCheck || changes.updaterConfig || changes.updaterLastApplied) {
+          getUpdateStatus(false).catch(() => {});
+        }
+      });
     }
+    // Verifica di riserva mentre la scheda resta aperta (anche dopo sospensione PC)
+    setInterval(() => {
+      if (document.visibilityState === "visible") maybeAutoCheckUpdates();
+    }, 15 * 60_000);
   } catch (e) {
     log("updater: " + e.message);
   }
@@ -3047,6 +3075,10 @@ async function init() {
   $("#themeBtn").addEventListener("click", toggleTheme);
   const soloThemeBtn = $("#soloThemeBtn");
   if (soloThemeBtn) soloThemeBtn.addEventListener("click", toggleTheme);
+  const updatesBtn = $("#updatesBtn");
+  if (updatesBtn) updatesBtn.addEventListener("click", () => openUpdates(ctx));
+  const soloUpdatesBtn = $("#soloUpdatesBtn");
+  if (soloUpdatesBtn) soloUpdatesBtn.addEventListener("click", () => openUpdates(ctx));
   $("#diagBtn").addEventListener("click", () => openDiag(ctx));
   const soloDiagBtn = $("#soloDiagBtn");
   if (soloDiagBtn) soloDiagBtn.addEventListener("click", () => openDiag(ctx));
@@ -3073,6 +3105,7 @@ async function init() {
   };
 
   window.addEventListener("focus", async () => {
+    maybeAutoCheckUpdates();
     if (S.connected === false && (await checkConnection())) start();
     else if (S.arConnected !== true && (await checkArConnection())) {
       if (S.current && isLegacyTicketNumber(S.current)) openTicket(S.current, null, { force: true });

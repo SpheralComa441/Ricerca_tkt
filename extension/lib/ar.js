@@ -867,6 +867,66 @@ export function makeAr({ log = () => {}, fetch: fetchImpl = globalThis.fetch } =
     return await r.text();
   }
 
+  /** Estrae il nome file dall'header Content-Disposition (RFC 5987 o classico). */
+  function fileNameFromDisposition(cd) {
+    const s = String(cd || "");
+    const mStar = /filename\*\s*=\s*(?:UTF-8''|utf-8'')([^;\r\n]+)/i.exec(s);
+    if (mStar) {
+      try { return decodeURIComponent(mStar[1].trim().replace(/^"|"$/g, "")); } catch { /* */ }
+    }
+    const m = /filename\s*=\s*"?([^";\r\n]+)"?/i.exec(s);
+    return m ? m[1].trim() : "";
+  }
+
+  function decodeBase64Bytes(b64) {
+    const bin = atob(String(b64 || "").replace(/\s+/g, ""));
+    const out = new Uint8Array(bin.length);
+    for (let i = 0; i < bin.length; i++) out[i] = bin.charCodeAt(i);
+    return out;
+  }
+
+  /**
+   * Scarica i byte di un allegato dell'Area Riservata (es. /servlet/gsdm_btlk_openfile?p_VFCODICEID=...&p_VFAUTHCODE=...).
+   * Prova prima dalla scheda Area Riservata aperta, altrimenti direttamente con i cookie di sessione.
+   */
+  async function requestBinary(path, { fileName = "" } = {}) {
+    if (!/^\/(jsp|servlet)\//.test(String(path || ""))) throw new Error("Percorso non ammesso");
+    const checkNotLoginHtml = (bytes, ct, expectedName) => {
+      const cleanCt = String(ct || "").split(";")[0].trim().toLowerCase();
+      const wantsHtml = /\.html?$/i.test(String(expectedName || ""));
+      if (!wantsHtml && cleanCt.includes("text/html") && bytes.length < 200_000) {
+        const head = new TextDecoder("utf-8", { fatal: false }).decode(bytes.subarray(0, 1200));
+        if (/(login|password|accedi|session|autenticazione|error|non autorizzato)/i.test(head) || /^\s*<!doctype html|^\s*<html/i.test(head)) {
+          throw new Error("Sessione Area Riservata scaduta o allegato non accessibile: apri l'Area Riservata, accedi e riprova.");
+        }
+      }
+      return cleanCt;
+    };
+
+    const viaTab = await sendBridge({ cmd: "fetchBinary", path });
+    if (viaTab && viaTab.ok && typeof viaTab.base64 === "string" && viaTab.status < 400) {
+      const bytes = decodeBase64Bytes(viaTab.base64);
+      const cleanCt = checkNotLoginHtml(bytes, viaTab.contentType, fileName);
+      return {
+        bytes,
+        contentType: cleanCt,
+        fileName: fileNameFromDisposition(viaTab.contentDisposition) || fileName,
+      };
+    }
+    if (!fetchImpl) throw new Error("Area Riservata non raggiungibile");
+    const r = await fetchImpl(`${AR_BASE}${path}`, { method: "GET", credentials: "include" });
+    if (!r.ok) throw new Error(`L'Area Riservata ha risposto ${r.status}`);
+    const bytes = new Uint8Array(await r.arrayBuffer());
+    const ct = r.headers && typeof r.headers.get === "function" ? r.headers.get("content-type") || "" : "";
+    const cd = r.headers && typeof r.headers.get === "function" ? r.headers.get("content-disposition") || "" : "";
+    const cleanCt = checkNotLoginHtml(bytes, ct, fileName);
+    return {
+      bytes,
+      contentType: cleanCt,
+      fileName: fileNameFromDisposition(cd) || fileName,
+    };
+  }
+
   /**
    * Il centro servizi dell'operatore (es. "PAOW"). La pagina dei risultati non lo riporta: il portale lo aggiunge
    * alla ricerca dal suo modulo. Lo si legge da quel modulo; di riserva lo si ricava dai ticket del gruppo
@@ -926,6 +986,7 @@ export function makeAr({ log = () => {}, fetch: fetchImpl = globalThis.fetch } =
     readDetail,
     loadTicket,
     request,
+    requestBinary,
     findCentre,
     setCentre,
     openHome,

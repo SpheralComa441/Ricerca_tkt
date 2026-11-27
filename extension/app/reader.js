@@ -81,18 +81,32 @@ function fileExtClass(ext) {
 async function fetchAttachmentData(ctx, att, parentId) {
   const cacheKey = `${parentId || ""}:${att.id}`;
   if (attCache.has(cacheKey)) return attCache.get(cacheKey);
-  if (!ctx || !ctx.hda || typeof ctx.hda.previewAttachment !== "function") {
-    throw new Error("Connessione a HDA TOUCH non disponibile per scaricare l'allegato");
+  let bytes;
+  let fileName;
+  let contentType;
+  if (att.arPath) {
+    if (!ctx || !ctx.ar || typeof ctx.ar.requestBinary !== "function") {
+      throw new Error("Connessione all'Area Riservata non disponibile per aprire l'allegato");
+    }
+    const res = await ctx.ar.requestBinary(att.arPath, { fileName: att.fileName || "" });
+    bytes = res.bytes;
+    fileName = res.fileName || att.fileName || `${att.id}.bin`;
+    const ct = String(res.contentType || "").trim();
+    contentType = ct && ct !== "application/octet-stream" ? ct : att.contentType || guessMimeFromName(fileName);
+  } else {
+    if (!ctx || !ctx.hda || typeof ctx.hda.previewAttachment !== "function") {
+      throw new Error("Connessione a HDA TOUCH non disponibile per scaricare l'allegato");
+    }
+    const res = await ctx.hda.previewAttachment(att.id, {
+      parentObject: att.parentObject || "Incident",
+      parentObjectId: att.parentObjectId || parentId || "",
+      contentType: att.contentType || "",
+      fileName: att.fileName || "",
+    });
+    bytes = b64ToBytes(res.content);
+    fileName = res.fileName || att.fileName || `${att.id}.bin`;
+    contentType = res.contentType || att.contentType || guessMimeFromName(fileName);
   }
-  const res = await ctx.hda.previewAttachment(att.id, {
-    parentObject: att.parentObject || "Incident",
-    parentObjectId: att.parentObjectId || parentId || "",
-    contentType: att.contentType || "",
-    fileName: att.fileName || "",
-  });
-  const bytes = b64ToBytes(res.content);
-  const fileName = res.fileName || att.fileName || `${att.id}.bin`;
-  const contentType = res.contentType || att.contentType || guessMimeFromName(fileName);
   const item = { bytes, fileName, contentType };
   if (attCache.size >= 12) {
     const oldest = attCache.keys().next().value;

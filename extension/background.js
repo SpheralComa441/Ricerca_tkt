@@ -388,6 +388,21 @@ function setUpdateBadge(hasUpdate, version) {
   }
 }
 
+async function getScheduledNextCheck(autoCheckEnabled) {
+  if (!chrome.alarms) return null;
+  try {
+    if (!autoCheckEnabled) return null;
+    let alarm = await chrome.alarms.get(UPDATE_ALARM);
+    if (!alarm) {
+      await ensureUpdateAlarm(true);
+      alarm = await chrome.alarms.get(UPDATE_ALARM);
+    }
+    return alarm ? alarm.scheduledTime : null;
+  } catch {
+    return null;
+  }
+}
+
 async function getUpdaterStatus(ping = false) {
   const manifest = chrome.runtime.getManifest();
   const [cfg, st, helper] = await Promise.all([
@@ -395,6 +410,7 @@ async function getUpdaterStatus(ping = false) {
     chrome.storage.local.get(["updaterLastCheck", "updaterInstalledSha", "updaterLastApplied"]),
     ping ? pingNativeHelper(true) : Promise.resolve(cachedHelper || (await pingNativeHelper(false))),
   ]);
+  const nextCheckAt = await getScheduledNextCheck(cfg.autoCheck);
   return {
     currentVersion: manifest.version,
     extensionId: chrome.runtime.id,
@@ -405,32 +421,51 @@ async function getUpdaterStatus(ping = false) {
     },
     helper,
     lastCheck: st.updaterLastCheck || null,
+    nextCheckAt,
     installedSha: st.updaterInstalledSha || "",
     lastApplied: st.updaterLastApplied || null,
   };
 }
 
-async function runUpdateCheck({ autoApply = false } = {}) {
-  const manifest = chrome.runtime.getManifest();
-  const [cfg, st] = await Promise.all([
-    getUpdaterConfig(),
-    chrome.storage.local.get("updaterInstalledSha"),
-  ]);
-  const res = await checkRemoteUpdate({
-    currentVersion: manifest.version,
-    installedSha: st.updaterInstalledSha || "",
-    token: cfg.githubToken,
-  });
-  await chrome.storage.local.set({ updaterLastCheck: res });
-  setUpdateBadge(res.status === "update_available", res.remoteVersion || "");
+let updateCheckInFlight = null;
 
-  if (autoApply && cfg.autoUpdate && res.status === "update_available") {
-    const helper = await pingNativeHelper(true);
-    if (helper.available) {
-      await applyRemoteUpdate({ reopenApp: false, checkResult: res }).catch(() => {});
+async function runUpdateCheck({ autoApply = false } = {}) {
+  if (updateCheckInFlight) return updateCheckInFlight;
+  updateCheckInFlight = (async () => {
+    const manifest = chrome.runtime.getManifest();
+    const [cfg, st] = await Promise.all([
+      getUpdaterConfig(),
+      chrome.storage.local.get("updaterInstalledSha"),
+    ]);
+    const res = await checkRemoteUpdate({
+      currentVersion: manifest.version,
+      installedSha: st.updaterInstalledSha || "",
+      token: cfg.githubToken,
+    });
+    await chrome.storage.local.set({ updaterLastCheck: res });
+    setUpdateBadge(res.status === "update_available", res.remoteVersion || "");
+    if (cfg.autoCheck) await ensureUpdateAlarm(true, { reset: true });
+
+    if (autoApply && cfg.autoUpdate && res.status === "update_available") {
+      const helper = await pingNativeHelper(true);
+      if (helper.available) {
+        let hasAppOpen = false;
+        try {
+          const tabs = await chrome.tabs.query({ url: chrome.runtime.getURL("app/index.html") + "*" });
+          hasAppOpen = tabs.length > 0;
+        } catch {
+          /* */
+        }
+        await applyRemoteUpdate({ reopenApp: hasAppOpen, checkResult: res }).catch(() => {});
+      }
     }
+    return getUpdaterStatus(!cachedHelper || !cachedHelper.available);
+  })();
+  try {
+    return await updateCheckInFlight;
+  } finally {
+    updateCheckInFlight = null;
   }
-  return getUpdaterStatus(false);
 }
 
 async function applyRemoteUpdate({ reopenApp = true, checkResult = null } = {}) {
@@ -500,7 +535,7 @@ async function applyRemoteUpdate({ reopenApp = true, checkResult = null } = {}) 
   }
 }
 
-async function ensureUpdateAlarm(enabled) {
+async function ensureUpdateAlarm(enabled, { reset = false } = {}) {
   if (!chrome.alarms) return;
   try {
     if (!enabled) {
@@ -508,7 +543,17 @@ async function ensureUpdateAlarm(enabled) {
       return;
     }
     const existing = await chrome.alarms.get(UPDATE_ALARM);
-    if (!existing) chrome.alarms.create(UPDATE_ALARM, { delayInMinutes: 2, periodInMinutes: 240 });
+    if (existing && !reset) return;
+    if (reset) await chrome.alarms.clear(UPDATE_ALARM);
+    const st = await chrome.storage.local.get("updaterLastCheck");
+    const lastAt = (st.updaterLastCheck && st.updaterLastCheck.checkedAt) || 0;
+    const elapsedMin = lastAt ? (Date.now() - lastAt) / 60_000 : Infinity;
+    const delayInMinutes = reset
+      ? 240
+      : elapsedMin >= 240
+        ? 1
+        : Math.max(1, Math.min(240, Math.ceil(240 - elapsedMin)));
+    chrome.alarms.create(UPDATE_ALARM, { delayInMinutes, periodInMinutes: 240 });
   } catch {
     /* */
   }
@@ -534,18 +579,34 @@ async function handlePostReload() {
   }
 }
 
+async function bootstrapUpdater({ runIfOverdue = false } = {}) {
+  try {
+    const [cfg, st] = await Promise.all([
+      getUpdaterConfig(),
+      chrome.storage.local.get("updaterLastCheck"),
+    ]);
+    await ensureUpdateAlarm(cfg.autoCheck);
+    if (runIfOverdue && cfg.autoCheck) {
+      const lastAt = (st.updaterLastCheck && st.updaterLastCheck.checkedAt) || 0;
+      if (!lastAt || Date.now() - lastAt >= 240 * 60_000) {
+        runUpdateCheck({ autoApply: true }).catch(() => {});
+      }
+    }
+  } catch {
+    /* */
+  }
+}
+
 chrome.runtime.onInstalled.addListener(async () => {
-  const cfg = await getUpdaterConfig();
-  await ensureUpdateAlarm(cfg.autoCheck);
+  await bootstrapUpdater({ runIfOverdue: false });
   await handlePostReload();
 });
 
 chrome.runtime.onStartup.addListener(async () => {
-  const cfg = await getUpdaterConfig();
-  await ensureUpdateAlarm(cfg.autoCheck);
-  if (cfg.autoCheck) setTimeout(() => runUpdateCheck({ autoApply: true }).catch(() => {}), 8000);
+  await bootstrapUpdater({ runIfOverdue: true });
 });
 
-// Assicura la riapertura dell'app anche se il service worker riparte subito dopo chrome.runtime.reload()
+// Assicura alarm attivo, riapertura dell'app dopo chrome.runtime.reload() e recupero controlli scaduti ad ogni risveglio del service worker
 handlePostReload();
+bootstrapUpdater({ runIfOverdue: true });
 

@@ -244,3 +244,68 @@ test("nomi: ticket del Vecchio Cruscotto completato con la scheda (chi scrive) e
   assert.equal(onlyInfo.row.account, "ALFA MECCANICA SRL");
   assert.equal(onlyInfo.timeline, full.timeline);
 });
+
+test("storico/ar: allegati Area Riservata con VFCODICEID + VFAUTHCODE → percorso diretto gsdm_btlk_openfile e download binario", async () => {
+  const { storicoAttachmentPath, parseArSizeKb } = await import("../lib/storico.js");
+  const { makeAr } = await import("../lib/ar.js");
+
+  assert.equal(
+    storicoAttachmentPath("30993517", "iqmzdmdyvw"),
+    "/servlet/gsdm_btlk_openfile?p_VFCODICEID=30993517&p_VFAUTHCODE=iqmzdmdyvw",
+  );
+  assert.equal(storicoAttachmentPath("30993517", ""), "");
+  assert.equal(parseArSizeKb("125,5 KB"), 125.5);
+  assert.equal(parseArSizeKb("2 MB"), 2048);
+
+  const request = async (path, { body } = {}) => {
+    if (path === "/jsp/gspv_psearch_res.jsp") return RES_PAGE;
+    if (path === "/servlet/SQLDataProviderServer" && /sqlcmd=gspv_qsearch_tickets/.test(body)) {
+      return sqlResponse([sqlRow("5123456", "Errore Uniemens", "2021-02-22")], 1);
+    }
+    if (path === "/servlet/SQLDataProviderServer" && /gspv_qviewallegati_ope/.test(body)) {
+      return JSON.stringify({
+        Fields: ["TANOMEFILE", "TACODFILE", "VFCODICEID", "VFAUTHCODE", "VFSIZE", "TASERIALE", "DT__DATA"],
+        Data: [["cedolino.pdf", "30993517", "30993517", "iqmzdmdyvw", "125,5 KB", "000000000000003", "2021-02-23 09:30:00.0"], "tf,CCCCCC,1"],
+      });
+    }
+    if (path.startsWith("/jsp/gspv_preview_ticket_frame_portlet.jsp")) return PREVIEW;
+    throw new Error("richiesta inattesa: " + path);
+  };
+  const st = makeStorico({ request, centro: () => "PAOW" });
+  const full = await st.loadTicket("5123456");
+  assert.equal(full.attachments.length, 1);
+  assert.equal(full.attachments[0].fileName, "cedolino.pdf");
+  assert.equal(full.attachments[0].arPath, "/servlet/gsdm_btlk_openfile?p_VFCODICEID=30993517&p_VFAUTHCODE=iqmzdmdyvw");
+  assert.equal(full.attachments[0].url, "");
+  assert.equal(full.attachments[0].sizeKb, 125.5);
+  assert.equal(full.timeline[2].attachmentItems.length, 1);
+  assert.equal(full.timeline[2].attachmentItems[0].fileName, "cedolino.pdf");
+
+  // requestBinary scarica i byte reali e rifiuta una eventuale pagina HTML di login
+  const pdfBytes = new Uint8Array([0x25, 0x50, 0x44, 0x46, 0x2d]);
+  const arClient = makeAr({
+    fetch: async (url) => {
+      assert.match(url, /\/areariservata\/servlet\/gsdm_btlk_openfile\?p_VFCODICEID=30993517&p_VFAUTHCODE=iqmzdmdyvw$/);
+      return {
+        ok: true,
+        status: 200,
+        headers: new Headers({ "content-type": "application/pdf", "content-disposition": 'attachment; filename="cedolino.pdf"' }),
+        arrayBuffer: async () => pdfBytes.buffer,
+      };
+    },
+  });
+  const bin = await arClient.requestBinary(full.attachments[0].arPath, { fileName: "cedolino.pdf" });
+  assert.equal(bin.contentType, "application/pdf");
+  assert.equal(bin.fileName, "cedolino.pdf");
+  assert.deepEqual([...bin.bytes], [0x25, 0x50, 0x44, 0x46, 0x2d]);
+
+  const arLogin = makeAr({
+    fetch: async () => ({
+      ok: true,
+      status: 200,
+      headers: new Headers({ "content-type": "text/html; charset=utf-8" }),
+      arrayBuffer: async () => new TextEncoder().encode("<html><body>Login Area Riservata</body></html>").buffer,
+    }),
+  });
+  await assert.rejects(() => arLogin.requestBinary(full.attachments[0].arPath, { fileName: "cedolino.pdf" }), /Sessione Area Riservata scaduta/);
+});

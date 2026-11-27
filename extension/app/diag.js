@@ -11,22 +11,43 @@ import { isLegacyTicketNumber } from "../lib/util.js";
 import { isKbId } from "../lib/kb.js";
 import { isFaqId } from "../lib/faq.js";
 
-export function openDiag(ctx, opts = {}) {
+let liveUpdatesRender = null;
+
+export function openUpdates(ctx) {
+  const dlg = document.getElementById("updatesDlg") || document.getElementById("diag");
+  clear(dlg);
+  const body = h("div", { class: "dlg-b" });
+  const { sec, setStatus } = updatesSection(ctx);
+  liveUpdatesRender = (st) => {
+    if (dlg.open) setStatus(st);
+  };
+  dlg.onclose = () => { liveUpdatesRender = null; };
+  dlg.append(
+    h("div", { class: "dlg-h" }, h("h2", null, "Aggiornamenti"), h("button", { class: "btn btn-icon", title: "Chiudi", onclick: () => dlg.close() }, icon("close"))),
+    body,
+  );
+  body.append(sec);
+  dlg.showModal();
+}
+
+export function refreshOpenUpdates(st) {
+  if (typeof liveUpdatesRender === "function" && st) liveUpdatesRender(st);
+}
+
+export function openDiag(ctx) {
   const dlg = document.getElementById("diag");
   clear(dlg);
   const body = h("div", { class: "dlg-b" });
   dlg.append(
-    h("div", { class: "dlg-h" }, h("h2", null, "Diagnostica, impostazioni e aggiornamenti"), h("button", { class: "btn btn-icon", title: "Chiudi", onclick: () => dlg.close() }, icon("close"))),
+    h("div", { class: "dlg-h" }, h("h2", null, "Diagnostica e impostazioni"), h("button", { class: "btn btn-icon", title: "Chiudi", onclick: () => dlg.close() }, icon("close"))),
     body,
   );
   let redrawLearned = () => {};
   let redrawLog = () => {};
-  const updSec = updatesSection(ctx);
   const learnedSec = learnedSection(ctx, (fn) => (redrawLearned = fn));
   const logSec = logSection(ctx, (fn) => (redrawLog = fn));
-  body.append(updSec, settingsSection(ctx), probeSection(ctx, () => { redrawLearned(); redrawLog(); }), learnedSec, archiveSection(ctx), logSec);
+  body.append(settingsSection(ctx), probeSection(ctx, () => { redrawLearned(); redrawLog(); }), learnedSec, archiveSection(ctx), logSec);
   dlg.showModal();
-  if (opts && opts.focusUpdates) updSec.scrollIntoView({ behavior: "smooth", block: "start" });
 }
 
 function updatesSection(ctx) {
@@ -37,7 +58,7 @@ function updatesSection(ctx) {
   if (!isExt) {
     clear(box);
     box.appendChild(h("div", { class: "hint" }, "Gli aggiornamenti automatici sono attivi quando l'app è caricata come estensione in Edge o Chrome."));
-    return sec;
+    return { sec, setStatus: () => {} };
   }
 
   let busy = false;
@@ -91,14 +112,17 @@ function updatesSection(ctx) {
         checkBtn.textContent = "Controllo…";
         try {
           const next = await ctx.checkUpdates(false);
+          busy = false;
           render(next);
           if (next && next.lastCheck && next.lastCheck.status === "update_available") {
             toast(`Nuova versione disponibile: v${next.lastCheck.remoteVersion}`, "ok");
           } else if (next && next.lastCheck && next.lastCheck.status === "up_to_date") {
             toast("Ricerca TKT è già aggiornata all'ultima versione", "ok");
           }
-        } finally {
+        } catch (e) {
           busy = false;
+          toast("Controllo aggiornamenti non riuscito: " + e.message, "err", 4000);
+          render(await ctx.getUpdateStatus(true).catch(() => null));
         }
       },
     }, icon("reload"), "Controlla ora");
@@ -156,6 +180,11 @@ function updatesSection(ctx) {
         h("label", { class: "check" }, autoApplyCb, "Installa automaticamente gli aggiornamenti in background (richiede helper locale attivo)")),
     );
 
+    if (cfg.autoCheck !== false && st.nextCheckAt) {
+      box.appendChild(h("div", { class: "hint", style: { marginTop: "0" } },
+        `Prossimo controllo automatico previsto: ${new Date(st.nextCheckAt).toLocaleString("it-IT")}`));
+    }
+
     if (!helper.available) {
       const idCode = h("code", { class: "upd-code" }, st.extensionId || "—");
       box.appendChild(
@@ -173,7 +202,7 @@ function updatesSection(ctx) {
   }
 
   ctx.getUpdateStatus(true).then(render, (e) => render({ error: e.message }));
-  return sec;
+  return { sec, setStatus: (st) => { if (!busy) render(st); } };
 }
 
 function probeSection(ctx, onDone) {
@@ -220,7 +249,6 @@ function probeSection(ctx, onDone) {
         caps: ctx.S.caps,
         rules: Object.fromEntries(FILTER_DEFS.map((d) => { const r = ruleFor(d, ctx.S.calib); return [d.key, `${r.property} ${r.op}${r.wildcard ? " %…%" : ""}${r.extKey ? " [" + r.extKey + "]" : ""} (${r.source})`]; })),
         lookups: ctx.lookups ? ctx.lookups.sizes() : null,
-        arAttachDiag: (ctx.storico && ctx.storico.state && ctx.storico.state.attachDiag) || null,
       };
       copyBtn.disabled = false;
       onDone();

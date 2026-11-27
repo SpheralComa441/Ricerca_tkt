@@ -11,6 +11,8 @@ export const REPO_OWNER = "SpheralComa441";
 export const REPO_NAME = "Ricerca_tkt";
 export const REPO_BRANCH = "main";
 export const NATIVE_HOST_NAME = "it.ricercatkt.updater";
+export const AUTO_CHECK_INTERVAL_MIN = 240;
+export const AUTO_CHECK_INTERVAL_MS = AUTO_CHECK_INTERVAL_MIN * 60 * 1000;
 
 export const REPO_URL = `https://github.com/${REPO_OWNER}/${REPO_NAME}`;
 export const RAW_MANIFEST_URL = `${REPO_URL}/raw/${REPO_BRANCH}/extension/manifest.json`;
@@ -90,7 +92,7 @@ function isGitHubLoginRedirect(res, text = "") {
 }
 
 /**
- * Controlla se su GitHub (`main`) esiste una versione più recente dell'estensione.
+ * Controlla se esiste una versione più recente dell'estensione.
  * Restituisce:
  *  {
  *    status: "update_available" | "up_to_date" | "auth_required" | "error",
@@ -148,7 +150,7 @@ export async function checkRemoteUpdate({
         }
       }
     } else {
-      const mRes = await fetchImpl(RAW_MANIFEST_URL, { credentials: "include", cache: "no-store" });
+      const mRes = await fetchImpl(`${RAW_MANIFEST_URL}?_t=${checkedAt}`, { credentials: "include", cache: "no-store" });
       const mText = await mRes.text();
       if (!mRes.ok || isGitHubLoginRedirect(mRes, mText)) {
         return {
@@ -160,7 +162,7 @@ export async function checkRemoteUpdate({
         };
       }
       manifestJson = JSON.parse(mText);
-      const aRes = await fetchImpl(ATOM_COMMITS_URL, { credentials: "include", cache: "no-store" }).catch(() => null);
+      const aRes = await fetchImpl(`${ATOM_COMMITS_URL}?_t=${checkedAt}`, { credentials: "include", cache: "no-store" }).catch(() => null);
       if (aRes && aRes.ok) {
         const aText = await aRes.text();
         commit = parseAtomLatestCommit(aText);

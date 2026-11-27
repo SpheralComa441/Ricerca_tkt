@@ -228,8 +228,37 @@ export function parsePreview(html) {
   return out;
 }
 
-/** Movimenti dell'anteprima → conversazione nel formato del lettore. */
-export function previewTimeline(moves, row = {}) {
+/** Percorso servlet Area Riservata per anteprima/download diretto di un allegato (verificato da gspv_qviewallegati_ope). */
+export function storicoAttachmentPath(vfId, vfAuth) {
+  const id = String(vfId || "").trim();
+  const auth = String(vfAuth || "").trim();
+  return id && auth ? `/servlet/gsdm_btlk_openfile?p_VFCODICEID=${encodeURIComponent(id)}&p_VFAUTHCODE=${encodeURIComponent(auth)}` : "";
+}
+
+/** Converte VFSIZE dell'Area Riservata ("123,4 KB", "1,2 MB" o byte numerici) in KB. */
+export function parseArSizeKb(raw) {
+  const s = String(raw || "").trim();
+  if (!s) return null;
+  const m = /^([\d.,]+)\s*(kb|mb|b)?$/i.exec(s);
+  if (!m) return null;
+  const num = Number(m[1].replace(/\./g, (d, off, str) => (str.includes(",") ? "" : d)).replace(",", "."));
+  if (!Number.isFinite(num) || num <= 0) return null;
+  const unit = (m[2] || "").toLowerCase();
+  if (unit === "mb") return num * 1024;
+  if (unit === "kb") return num;
+  if (unit === "b") return num / 1024;
+  return num > 1024 ? num / 1024 : num;
+}
+
+/** Movimenti dell'anteprima → conversazione nel formato del lettore (con allegati associati al singolo movimento). */
+export function previewTimeline(moves, row = {}, attachments = []) {
+  const bySerial = new Map();
+  for (const a of attachments || []) {
+    if (!a || !a.serial) continue;
+    const key = String(a.serial).trim();
+    if (!bySerial.has(key)) bySerial.set(key, []);
+    bySerial.get(key).push(a);
+  }
   const timeline = [];
   moves.forEach((v, i) => {
     const mit = Number(v.DTTIPMIT) || 0; // 1 = centro servizi, 2 = cliente
@@ -243,6 +272,8 @@ export function previewTimeline(moves, row = {}) {
     const text = asHtml ? htmlToText(asHtml) : raw;
     const cause = String(v.CRDESCRI || "").trim();
     const internal = !fromCustomer && des !== 2;
+    const serial = String(v.DTSERIAL || "").trim();
+    const msgAtts = serial ? bySerial.get(serial) || [] : [];
     timeline.push({
       kind: i === 0 ? "request" : "message",
       date: parsePreviewDate(v.DTDATA),
@@ -254,8 +285,9 @@ export function previewTimeline(moves, row = {}) {
       to: dest,
       html: asHtml,
       text: text || (cause ? `(${cause})` : ""),
-      attachments: Number(v.TOTALLEGSER) > 0 ? Number(v.TOTALLEGSER) : 0,
-      serial: v.DTSERIAL || "",
+      attachments: msgAtts.length || (Number(v.TOTALLEGSER) > 0 ? Number(v.TOTALLEGSER) : 0),
+      attachmentItems: msgAtts,
+      serial,
     });
   });
   return timeline;
@@ -269,7 +301,7 @@ export function buildStoricoTicket({ row, moves = [], attachments = [] }) {
     typeText: row.typeText || last.TRDESCRI || "",
     priority: row.priority || last.PRDESCRI || "",
   };
-  const timeline = previewTimeline(moves, r);
+  const timeline = previewTimeline(moves, r, attachments);
   if (timeline.length && !r.problem) r.problem = cleanText(String(timeline[0].text || "")).slice(0, 500);
   const extraFacts = [];
   if (r.topic) extraFacts.push(["Argomento", r.topic]);
@@ -340,14 +372,15 @@ export function enrichArTicket(full, { info = null, moves = [], attachments = []
     lastChange: (info && info.lastChange) || base.lastChange || null,
     topic: (info && info.topic) || base.topic || "",
   };
-  const timeline = moves.length ? previewTimeline(moves, row) : full.timeline;
+  const mergedAtts = attachments.length ? attachments : full.attachments || [];
+  const timeline = moves.length ? previewTimeline(moves, row, mergedAtts) : full.timeline;
   const extraFacts = (full.extraFacts || []).filter(([k]) => k !== "Priorità" && k !== "Argomento");
   if (row.topic) extraFacts.unshift(["Argomento", row.topic]);
   return {
     ...full,
     row,
     timeline,
-    attachments: attachments.length ? attachments : full.attachments || [],
+    attachments: mergedAtts,
     extraFacts,
     notes: moves.length
       ? ["Ticket del Vecchio Cruscotto (Area Riservata Zucchetti): conversazione letta dalla scheda del ticket."]
@@ -364,22 +397,7 @@ export class StoricoError extends Error {}
  * opts.centro() → centro servizi dell'operatore (es. "PAOW"), letto dal Vecchio Cruscotto.
  */
 export function makeStorico({ log = () => {}, request, centro = () => "" } = {}) {
-  const state = { connected: null, cmdhash: "", attachDiag: null };
-
-  function extractAttachHints(html) {
-    const out = [];
-    const lines = String(html || "").split(/\r?\n/);
-    for (const raw of lines) {
-      const line = raw.trim();
-      if (!line || /_VC\(this,/.test(line)) continue;
-      if (!/(dtjAttach|gspv_qviewallegati|gsdm_|TACODFILE|VFCODICE|download|allegat|servlet\/)/i.test(line)) continue;
-      // Sanifica eventuali codici lunghi (numeri ticket / hash) mantenendo solo la struttura JS/URL
-      const safe = line.replace(/\b\d{6,}\b/g, "<NUM>").slice(0, 260);
-      if (!out.includes(safe)) out.push(safe);
-      if (out.length >= 20) break;
-    }
-    return out;
-  }
+  const state = { connected: null, cmdhash: "" };
 
   async function ensureHash(force = false) {
     if (state.cmdhash && !force) return state.cmdhash;
@@ -431,25 +449,26 @@ export function makeStorico({ log = () => {}, request, centro = () => "" } = {})
           ["w_TTCODICE", m.DTCODTIC || row.ttCodice], ["w_TASERIALE", m.DTSERIAL],
         ]);
         const data = parseSqlData(await request("/servlet/SQLDataProviderServer", { method: "POST", body }));
-        if (data && data.rows && data.rows.length) {
-          const sample = data.rows[0];
-          const fieldShapes = Object.fromEntries(Object.entries(sample).map(([k, v]) => [k, v == null ? "null" : `${typeof v}(${String(v).length})`]));
-          state.attachDiag = { ...(state.attachDiag || {}), fields: Object.keys(sample), fieldShapes };
-        }
         for (const a of (data && data.rows) || []) {
-          const key = a.TACODFILE || a.TANOMEFILE;
+          const vfId = String(a.VFCODICEID || a.TACODFILE || "").trim();
+          const vfAuth = String(a.VFAUTHCODE || "").trim();
+          const key = vfId || String(a.TANOMEFILE || "").trim();
           if (!key || seen.has(key)) continue;
           seen.add(key);
+          const arPath = storicoAttachmentPath(vfId, vfAuth);
           out.push({
             id: `st-${key}`,
-            fileName: a.TANOMEFILE || `Allegato ${key}`,
-            description: "Si apre dalla scheda del ticket nell'Area Riservata",
+            fileName: String(a.TANOMEFILE || `Allegato ${key}`).trim(),
+            description: arPath ? "" : "Si apre dalla scheda del ticket nell'Area Riservata",
             contentType: "",
             author: "",
+            sizeKb: parseArSizeKb(a.VFSIZE),
             date: parseSqlDate(a.DT__DATA),
             parentObject: "Storico",
             parentObjectId: row.id,
-            url: row.arUrl,
+            serial: String(a.TASERIALE || m.DTSERIAL || "").trim(),
+            arPath,
+            url: arPath ? "" : row.arUrl,
           });
         }
       } catch (e) {
@@ -466,8 +485,6 @@ export function makeStorico({ log = () => {}, request, centro = () => "" } = {})
     if (!moves.length && !/gspv_preview_ticket/.test(html)) {
       throw new StoricoError("Non riesco a leggere il ticket dallo Storico: apri l'Area Riservata, esegui l'accesso e riprova.");
     }
-    const hints = extractAttachHints(html);
-    if (hints.length) state.attachDiag = { ...(state.attachDiag || {}), hints };
     return moves;
   }
 
