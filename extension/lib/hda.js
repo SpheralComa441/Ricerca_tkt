@@ -14,6 +14,7 @@
 import { formBody, query, HdaError } from "./transport.js";
 import { parseListConfig } from "./listconfig.js";
 import { filterPayload } from "./filters.js";
+import { parseMsDate } from "./util.js";
 
 export function makeHda(transport, opts = {}) {
   let pl = opts.lang || "it"; // lingua del portale (_pl): la stessa che usa la pagina di Touch
@@ -37,9 +38,9 @@ export function makeHda(transport, opts = {}) {
     if (expect === "json") noteToken(data);
     return data;
   }
-  async function get(path, signal) {
-    const data = await transport.request({ path, method: "GET", expect: "json", signal });
-    noteToken(data);
+  async function get(path, signal, expect = "json") {
+    const data = await transport.request({ path, method: "GET", expect, signal });
+    if (expect === "json") noteToken(data);
     return data;
   }
 
@@ -100,6 +101,48 @@ export function makeHda(transport, opts = {}) {
       return Array.isArray(data.data) ? data.data : [];
     },
 
+    /** Elenco statico leggero ({ ID, ObjectDescription }) usato dai filtri KB e FAQ; di riserva usa GetStaticList. */
+    async staticSimpleList(entity, limit = 100, signal) {
+      try {
+        const data = await get(`/WSCView/GetStaticSimpleList${query({ _pl: pl, entity, page: 1, start: 0, limit })}`, signal);
+        return Array.isArray(data.data) ? data.data : [];
+      } catch {
+        const data = await get(`/WSCView/GetStaticList${query({ _pl: pl, entity, page: 1, start: 0, limit })}`, signal);
+        return Array.isArray(data.data) ? data.data : [];
+      }
+    },
+
+    /** Albero gerarchico (es. CatalogFolders per Cartella in KB e FAQ). */
+    async treeData(entity, signal) {
+      const data = await post(
+        `/WSCView/TreeData${query({ _pl: pl, entity, _dc: Date.now() })}`,
+        { enableInnerNodeChecking: "true", node: "#ROOT#" },
+        "json",
+        signal,
+      );
+      if (Array.isArray(data)) return data;
+      return Array.isArray(data && data.data) ? data.data : [];
+    },
+
+    /** Albero gerarchico completo (es. Service per i prodotti in KB). */
+    async hierarchyTree(entity, signal) {
+      const data = await post(
+        `/WSCView/GetHierarchyTree${query({ _pl: pl, _dc: Date.now() })}`,
+        { Entity: entity, RootID: "", HierarchyMode: "Full", HierarchyExpansionMode: "ToLeaves", SearchFilters: "", ShowNotFilteredElements: "false", node: "#ROOT#" },
+        "json",
+        signal,
+      );
+      if (Array.isArray(data)) return data;
+      return Array.isArray(data && data.data) ? data.data : [];
+    },
+
+    /** Anteprima HTML in sola lettura di KBArticle o Faq (non blocca mai il record in Touch). */
+    async htmlPreview(entity, id, signal) {
+      const qs = query({ Entity: entity, ContainerId: "rtkt_preview", _pl: pl, _dc: Date.now() });
+      const raw = await get(`/WSCView/HTMLPreview/${encodeURIComponent(id)}${qs}`, signal, "text");
+      return parseHtmlPreviewResponse(raw);
+    },
+
     /** Da verificare: lettura completa di un oggetto (quella che usa il dettaglio di Touch) */
     async wscGet(entity, id) {
       const data = await post(`/WSC/Get/${encodeURIComponent(entity)}/${encodeURIComponent(id)}?_pl=${pl}`, {});
@@ -148,6 +191,28 @@ export function makeHda(transport, opts = {}) {
       return rows;
     },
 
+    /**
+     * Elenco degli allegati di un articolo KB o di una FAQ (vista AttachmentPreview verificata su Touch).
+     * Colonne AttachmentPreview: c0 ContentType, c1 Description, c2 FileName, c3 Author, c4 ID, c5 KBSize, c6 LastUpdate, c7 ParentObject, c8 ParentObjectID.
+     */
+    async listEntityAttachments(parentObject, parentObjectId, signal) {
+      if (!parentObject || !parentObjectId) return [];
+      const conditions = [
+        { property: "ParentObject", value: String(parentObject), op: "eq", lock: false, extKey: null, description: null, parameterControlId: null },
+        { property: "ParentObjectID", value: String(parentObjectId), op: "eq", lock: false, extKey: null, description: null, parameterControlId: null },
+      ];
+      const { rows } = await this.listData("Attachments", {
+        viewId: "AttachmentPreview",
+        conditions,
+        page: 1,
+        start: 0,
+        limit: 100,
+        sort: [{ property: "c6", direction: "DESC" }],
+        signal,
+      });
+      return rows.map((r) => normalizePreviewAttachment(r, parentObject, parentObjectId)).filter(Boolean);
+    },
+
     /** Legge il ContentType di un allegato (GET /WSCView/GetAttachmentContentType/<id>). */
     async getAttachmentContentType(id, { parentObject = "Incident", parentObjectId = "", signal } = {}) {
       const qs = query({
@@ -166,12 +231,13 @@ export function makeHda(transport, opts = {}) {
      * (lo stesso endpoint usato da HDA TOUCH sia per l'anteprima sia per il pulsante Download).
      */
     async previewAttachment(id, { parentObject = "Incident", parentObjectId = "", contentType = "", fileName = "", signal } = {}) {
-      let mime = contentType || "";
+      const cleanName = String(fileName || "").trim();
+      let mime = String(contentType || "").trim();
       if (!mime) {
         try {
-          mime = await this.getAttachmentContentType(id, { parentObject, parentObjectId, signal });
+          mime = String((await this.getAttachmentContentType(id, { parentObject, parentObjectId, signal })) || "").trim();
         } catch {
-          mime = guessMimeFromName(fileName);
+          mime = guessMimeFromName(cleanName);
         }
       }
       const raw = await post(
@@ -189,7 +255,7 @@ export function makeHda(transport, opts = {}) {
         "text",
         signal,
       );
-      return parsePreviewAttachmentResponse(raw, { contentType: mime, fileName });
+      return parsePreviewAttachmentResponse(raw, { contentType: mime, fileName: cleanName });
     },
   };
 }
@@ -220,16 +286,75 @@ export function guessMimeFromName(name = "") {
 }
 
 /**
+ * Estrae `{ data, htmlContents, model }` dalla risposta JS Ext.NET di `/WSCView/HTMLPreview/<id>?Entity=KBArticle|Faq`
+ * (`{"ConfigurationHolder":true,"HTMLPreviewConfig":"{\"data\":{...},\"htmlContents\":[...],\"model\":{...}}"}`).
+ */
+export function parseHtmlPreviewResponse(raw) {
+  if (!raw) throw new HdaError("Risposta vuota da HTMLPreview");
+  if (typeof raw === "object" && raw.data) return raw;
+  const s = String(raw);
+  const m = /"HTMLPreviewConfig"\s*:\s*("(?:\\.|[^"\\])*")/.exec(s);
+  if (m) {
+    try {
+      const inner = JSON.parse(m[1]);
+      const obj = typeof inner === "string" ? JSON.parse(inner) : inner;
+      if (obj && typeof obj === "object") return obj;
+    } catch {
+      /* continua */
+    }
+  }
+  if (s.trim().startsWith("{")) {
+    try {
+      const j = JSON.parse(s);
+      if (j && typeof j === "object") return j;
+    } catch {
+      /* continua */
+    }
+  }
+  throw new HdaError("Contenuto anteprima non trovato nella risposta del portale");
+}
+
+/**
+ * Normalizza una riga di `ListData/Attachments` (vista `AttachmentPreview`) o di `HTMLPreview.Data.Attachments`.
+ * Elimina gli spazi finali dai campi a lunghezza fissa di SQL Server (es. `FileName`, `ContentType`).
+ */
+export function normalizePreviewAttachment(r, fallbackParentObject = "", fallbackParentId = "") {
+  if (!r || typeof r !== "object") return null;
+  const id = String(r.ID || r.c4 || r.id || "").trim();
+  if (!id) return null;
+  const fileName = String(r.FileName || r.c2 || r.fileName || r.Description || r.c1 || id).trim();
+  const desc = String(r.Description || r.c1 || r.description || "").trim();
+  const contentType = String(r.ContentType || r.c0 || r.contentType || guessMimeFromName(fileName)).trim();
+  const author = String(r["FirstUpdateUser.FullName"] || r.c3 || r.author || "").trim();
+  const sizeKb = r.KBSize != null ? Number(r.KBSize) : r.c5 != null && typeof r.c5 === "number" ? Number(r.c5) : null;
+  const date = parseMsDate(r.LastUpdate || r.c6 || r.date);
+  const parentObject = String(r.ParentObject || r.c7 || r.parentObject || fallbackParentObject || "").trim();
+  const parentObjectId = String(r.ParentObjectID || r.c8 || r.parentObjectId || fallbackParentId || "").trim();
+  return {
+    id,
+    fileName,
+    description: desc && desc !== fileName ? desc : "",
+    contentType: contentType || guessMimeFromName(fileName),
+    author,
+    sizeKb: Number.isFinite(sizeKb) && sizeKb > 0 ? sizeKb : null,
+    date,
+    parentObject,
+    parentObjectId,
+    url: r.url || "",
+  };
+}
+
+/**
  * Estrae `{ content, contentType, fileName }` dalla risposta JS Ext.NET di `/WSCView/PreviewAttachment`
  * (`{"ConfigurationHolder":true,"model":"{\"contentType\":\"...\",\"content\":\"<base64>\",\"fileName\":\"...\"}"}`).
  */
 export function parsePreviewAttachmentResponse(raw, fallback = {}) {
   if (!raw) throw new HdaError("Risposta vuota dal portale per l'allegato");
   if (typeof raw === "object" && raw.content) {
-    const fn = raw.fileName || fallback.fileName || "allegato";
+    const fn = String(raw.fileName || fallback.fileName || "allegato").trim();
     return {
       content: String(raw.content),
-      contentType: raw.contentType || fallback.contentType || guessMimeFromName(fn),
+      contentType: String(raw.contentType || fallback.contentType || guessMimeFromName(fn)).trim(),
       fileName: fn,
     };
   }
@@ -240,10 +365,10 @@ export function parsePreviewAttachmentResponse(raw, fallback = {}) {
       const inner = JSON.parse(m[1]);
       const obj = typeof inner === "string" ? JSON.parse(inner) : inner;
       if (obj && obj.content) {
-        const fn = obj.fileName || fallback.fileName || "allegato";
+        const fn = String(obj.fileName || fallback.fileName || "allegato").trim();
         return {
           content: String(obj.content),
-          contentType: obj.contentType || fallback.contentType || guessMimeFromName(fn),
+          contentType: String(obj.contentType || fallback.contentType || guessMimeFromName(fn)).trim(),
           fileName: fn,
         };
       }
@@ -256,10 +381,10 @@ export function parsePreviewAttachmentResponse(raw, fallback = {}) {
       const j = JSON.parse(s);
       const d = j.data || j;
       if (d && d.content) {
-        const fn = d.fileName || fallback.fileName || "allegato";
+        const fn = String(d.fileName || fallback.fileName || "allegato").trim();
         return {
           content: String(d.content),
-          contentType: d.contentType || fallback.contentType || guessMimeFromName(fn),
+          contentType: String(d.contentType || fallback.contentType || guessMimeFromName(fn)).trim(),
           fileName: fn,
         };
       }

@@ -1,8 +1,8 @@
-# Ricerca TKT — Estensione Chrome / Edge (v4.5)
+# Ricerca TKT — Estensione Chrome / Edge (v5.0)
 
-Applicazione dedicata in una scheda del browser per cercare e leggere i ticket di **HDA TOUCH** (`https://zucchetti.support/HDAPortal/`) senza toccare i componenti ExtJS della pagina.
+Applicazione dedicata in una scheda del browser per cercare e leggere **ticket**, **Knowledge Base** e **FAQ** di **HDA TOUCH** (`https://zucchetti.support/HDAPortal/`) — più Vecchio Cruscotto e Storico dell'Area Riservata — con un'interfaccia Helpdesk scura (blu notte / nero con accenti blu) senza toccare i componenti ExtJS della pagina.
 
-Parla in **sola lettura** con gli stessi servizi dati che usa l'interfaccia di Touch (`WSCView/ListData`, `WSCView/List`, `WSC/Projection`, `WSCView/GetStaticList`), usando la sessione già aperta nel browser. Non chiama mai `Detail`, `DoLockObject`, `Save`, `Delete` o `Close`: leggere un ticket qui **non lo blocca** in Touch per gli altri operatori.
+Parla in **sola lettura** con gli stessi servizi dati che usa l'interfaccia di Touch (`WSCView/ListData`, `WSCView/List`, `WSCView/HTMLPreview`, `WSC/Projection`, `WSCView/GetStaticList`, `WSCView/GetStaticSimpleList`, `WSCView/TreeData`), usando la sessione già aperta nel browser. Non chiama mai `Detail`, `DoLockObject`, `Save`, `Delete` o `Close`: leggere un ticket, un articolo KB o una FAQ qui **non blocca mai il record** in Touch per gli altri operatori.
 
 ## Installazione (Chrome o Edge, nessuna compilazione)
 
@@ -17,8 +17,8 @@ Dopo un aggiornamento del codice basta premere il pulsante **Ricarica** (↻) ne
 ## Uso
 
 1. Apri `https://zucchetti.support/HDAPortal/` ed esegui l'accesso normalmente.
-2. Clicca l'icona **Ricerca TKT**: si apre la scheda dell'applicazione con tre colonne (**Filtri** · **Risultati** · **Lettore del ticket**).
-3. **Filtri**:
+2. Clicca l'icona **Ricerca TKT**: si apre la scheda dell'applicazione con la barra di navigazione sinistra (**Fonti**), la colonna **Filtri** (aperta di default e richiudibile con il tasto **Filtri**), l'area **Risultati** con schede sottolineate (*Risultati · Archivio locale · Preferiti · Recenti*) e, a destra, il pannello **Attività recente** che lascia spazio al **Lettore** quando apri un elemento.
+3. **Filtri (HDA Touch)**:
    - **Stato**: tre pulsanti chiari (**Aperti**, **In attesa**, **Chiusi**) più *Scegli i singoli stati* con tutti i 32 stati di Touch in italiano. Nessuno scelto = **tutti gli stati** (compresi i chiusi, che Touch di solito nasconde).
    - **Gruppi e persone**: *Gruppo di lavoro*, *Assegnato a* (operatore o gruppo, con scelta rapida **Solo i miei**), *Responsabile*, *Ultima modifica di*, con suggerimenti immediati e scelta multipla a "gettoni".
    - **Cliente e prodotto**: *Cliente* (per ragione sociale o codice), *Prodotto*, *Classificazione cliente*.
@@ -31,54 +31,59 @@ Dopo un aggiornamento del codice basta premere il pulsante **Ricarica** (↻) ne
    - Barra strumenti della conversazione: mostra/nascondi **Note interne**, ordine **Dal più vecchio / Dal più recente**, **Cerca nel ticket** con evidenziazione immediata, **Copia** tutto il ticket come testo pulito, **Apri in Touch** (apre il dettaglio nella scheda di Touch).
 5. **Cercare dentro il testo delle conversazioni (Archivio locale)**:
    - Ogni ticket che apri viene salvato automaticamente nell'archivio locale del browser (`IndexedDB`) con **tutta la conversazione**.
-   - Con **Archivia risultati** puoi salvare in blocco i ticket della ricerca corrente (2 alla volta con pausa, saltando quelli non modificati).
+   - Con **Archivia** puoi salvare in blocco i ticket della ricerca corrente (2 alla volta con pausa, saltando quelli non modificati).
    - Nella scheda **Archivio locale** la ricerca trova le parole anche dentro tutti i messaggi e le note interne.
 
-## Le fonti: HDA Touch, Vecchio Cruscotto, Storico, Knowledge Base
+## Le fonti: HDA Touch, Vecchio Cruscotto, Storico, Knowledge Base, FAQ
 
-Sopra l'elenco ci sono quattro schede, ognuna con il suo colore e il numero di ticket trovati. Lo stesso colore segna la riga del ticket (striscia a sinistra) e l'etichetta nel lettore, così si vede sempre da dove viene un ticket.
+Nella barra laterale sinistra ci sono cinque fonti, ognuna con il proprio colore distintivo e il conteggio dei risultati trovati. Lo stesso colore segna il bordo sinistro della scheda e il badge nel lettore, così si vede sempre da dove proviene ogni elemento.
 
-| Scheda | Che cos'è | Come si cerca |
+| Fonte | Che cos'è | Come si cerca |
 |---|---|---|
 | **HDA Touch** (blu) | I ticket di HDA TOUCH | Parole, numero e tutti i filtri a sinistra |
 | **Vecchio Cruscotto** (arancio) | La *Ricerca rapida* dell'Area Riservata (anni recenti) | Parole e numero dalla casella in alto, più i suoi filtri a sinistra: periodo, stato, gruppo e operatore che hanno in carico il ticket, cliente, gruppo e operatore che hanno partecipato. Si può cercare anche solo con i filtri |
-| **Storico** (viola) | La *Ricerca avanzata* dell'Area Riservata: tutti i ticket, anche prima del 2024 | Numero ticket, periodo (riferito all'ultimo aggiornamento o all'apertura), stato aperto/chiuso, codice cliente, gruppo, operatore. **Non cerca per parole** (nel portale i campi oggetto e testo sono disattivati) |
-| **Knowledge Base** (verde) | Le schede *SKB* della Knowledge Base dell'Area Riservata, a visibilità esterna e interna | Parole dalla casella in alto (nel titolo e nel testo), numero della scheda scritto come `SKB#12345`, più i suoi filtri a sinistra: tutte le parole / almeno una / frase esatta, visibilità, periodo, pubblicate, definitive |
+| **Storico** (ciano) | La *Ricerca avanzata* dell'Area Riservata: tutti i ticket, anche prima del 2024 | Numero ticket, periodo (riferito all'ultimo aggiornamento o all'apertura), stato aperto/chiuso, codice cliente, gruppo, operatore. **Non cerca per parole** (nel portale i campi oggetto e testo sono disattivati) |
+| **Knowledge Base** (verde) | Gli articoli Knowledge Base di **HDA TOUCH** (`KBArticles`), sostitutivi delle vecchie schede SKB dell'Area Riservata | Parole o codice KB (`KB4335Z`, `KB12051HR`) dalla barra in alto, tasto **Sfoglia tutti**, più tutti i filtri di Touch a sinistra (*Titolo*, *Codice*, *Stato*, *Tipo*, *Cartella*, *Argomento*, *Lingua*, *Prodotto*, *Versione prodotto*, *Data*, *Allegati*) |
+| **FAQ** (azzurro) | Le **FAQ di HDA TOUCH** (`Faqs`), in una scheda completamente dedicata | La barra globale **non** cerca nelle FAQ. Nella scheda FAQ hai sia la **casella unificata** (*Domanda + Risposta*, più parole, singolare/plurale, ordinamento per attinenza), sia le **due caselle separate** *Domanda* e *Risposta* e i filtri di Touch a sinistra |
 
-- **Numero ticket** nella casella in alto: si cerca nelle tre fonti insieme. Il ticket si apre da solo e la scheda passa a quella della sua fonte. Se il ticket c'è solo nello Storico si apre da lì.
-- **Niente ricerche non richieste**: ogni scheda cerca solo quando c'è qualcosa da cercare (parole o numero nella casella, oppure un suo filtro). Una scheda a cui non si è chiesto niente dice «Nessuna ricerca».
-- **L'app si apre sempre vuota**: parole e filtri dell'ultima volta non vengono ricordati, in nessuna scheda. Per ritrovare una ricerca usa *Salva ricerca* (HDA Touch). Restano invece l'ordinamento scelto, le impostazioni, i preferiti e i recenti.
-- **Parole** nella casella in alto: si cercano in HDA Touch e nel Vecchio Cruscotto. La scheda Storico lo dice e propone i suoi filtri.
-- **Ogni scheda ha i suoi filtri**: quelli a sinistra cambiano con la scheda e valgono solo per quella fonte. Cambiare un filtro rifà la ricerca solo lì e non fa cambiare scheda. Solo una nuova ricerca dalla casella in alto può portare da sola alla scheda che ha trovato qualcosa.
-- **Scheda Vecchio Cruscotto**: i filtri sono quelli della Ricerca rapida del portale. «Gruppo che ha partecipato» trova i ticket a cui un gruppo ha lavorato anche se ora li ha in carico un altro. Il periodo va a mesi interi e si riferisce all'ultimo aggiornamento o all'apertura. Il portale restituisce al massimo 210 ticket per ricerca (i più rilevanti): quando succede un avviso lo dice. Con un numero ticket nella casella i filtri non contano. *Excel* scarica i ticket in elenco.
+- **Numero ticket** nella casella in alto: si cerca in HDA Touch, Vecchio Cruscotto e Storico insieme. Il ticket si apre da solo e la fonte passa a quella che lo contiene. Un **codice KB** (es. `KB4335Z`) passa invece alla Knowledge Base e apre l'articolo.
+- **Niente ricerche non richieste**: ogni fonte ticket/KB cerca solo quando c'è qualcosa da cercare (parole, codice/numero o un filtro). La scheda **FAQ** carica invece l'elenco aggiornato di HD Touch appena la apri, pronto per essere filtrato.
+- **L'app si apre sempre vuota**: parole e filtri dell'ultima volta non vengono ricordati. Per ritrovare una ricerca usa *Salva ricerca* (HDA Touch). Restano invece l'ordinamento scelto, le impostazioni, i preferiti e i recenti.
+- **Parole** nella casella in alto: si cercano in HDA Touch, Vecchio Cruscotto e Knowledge Base (mai nelle FAQ). La scheda Storico lo dice e propone i suoi filtri.
+- **Ogni fonte ha i suoi filtri**: la colonna Filtri cambia automaticamente con la fonte attiva e vale solo per quella fonte. Cambiare un filtro rifà la ricerca solo lì e non cambia fonte.
+- **Scheda Vecchio Cruscotto**: i filtri sono quelli della Ricerca rapida del portale. «Gruppo che ha partecipato» trova i ticket a cui un gruppo ha lavorato anche se ora li ha in carico un altro. Il periodo va a mesi interi e si riferisce all'ultimo aggiornamento o all'apertura. Il portale restituisce al massimo 210 ticket per ricerca (i più rilevanti): quando succede un avviso lo dice. Con un numero ticket nella casella i filtri non contano. *Esporta Excel* scarica i ticket in elenco.
 - **Scheda Storico**: a sinistra compaiono i suoi filtri. Di partenza il periodo è «fino al 2023» (i ticket che il Vecchio Cruscotto non mostra più); con *Tutti gli anni* si cerca su tutto. Senza nessun filtro non parte nessuna ricerca.
-- Se la scheda aperta resta vuota e un'altra fonte ha trovato qualcosa, l'app passa da sola a quella.
-- **Centro servizi**: Vecchio Cruscotto e Storico cercano solo tra i ticket del tuo centro (es. `PAOW`); i partner usano lo stesso cruscotto con un loro centro, e i loro ticket non devono comparire. L'app legge il centro dal modulo di ricerca del portale (lo stesso da cui lo prende il portale); di riserva lo ricava dai ticket del tuo gruppo di Touch (`G10663HR` → gruppo 10663), oppure lo si scrive in *Diagnostica → Impostazioni → Centro servizi dell'Area Riservata*. Cercando parole, i ticket di un altro centro vengono comunque scartati. Senza centro le parole si cercherebbero in tutti i centri (ticket dei partner compresi): in quel caso un avviso lo dice. Un numero ticket si cerca comunque anche fuori dal centro.
-- **Nomi nel Vecchio Cruscotto**: la sua ricerca per parole riporta solo i codici di cliente, gruppo e operatore. L'app chiede i nomi allo Storico, un ticket alla volta partendo dall'alto dell'elenco (numero + giorno di apertura), e li scrive nelle righe man mano che arrivano; ogni nome trovato resta in memoria e non viene più richiesto. Se lo Storico non riporta un ticket, o risponde lentamente, restano i codici («Cliente 1234», «Op. 5678»).
-- **Lettura di un ticket del Vecchio Cruscotto**: la conversazione si legge dalla scheda del ticket nell'Area Riservata, quindi ogni messaggio ha il nome di chi l'ha scritto, il destinatario, la data e la causale, e in alto ci sono cliente, contatto, gruppo e operatore. Se la scheda non risponde entro qualche secondo si vede la conversazione ricostruita dal testo della ricerca (senza nomi né date dei singoli messaggi).
-- Per lo Storico serve l'accesso all'Area Riservata (come per il Vecchio Cruscotto). Gli allegati dei ticket dello Storico si aprono dalla scheda del ticket nell'Area Riservata.
-- Nelle schede *Archivio locale*, *Preferiti* e *Recenti* ogni riga porta l'etichetta della sua fonte.
+- **Centro servizi**: Vecchio Cruscotto e Storico cercano solo tra i ticket del tuo centro (es. `PAOW`); i partner usano lo stesso cruscotto con un loro centro, e i loro ticket non devono comparire. L'app legge il centro dal modulo di ricerca del portale (lo stesso da cui lo prende il portale); di riserva lo ricava dai ticket del tuo gruppo di Touch (`G10663HR` → gruppo 10663), oppure lo si scrive in *Diagnostica → Impostazioni → Centro servizi dell'Area Riservata*. Cercando parole, i ticket di un altro centro vengono comunque scartati. Un numero ticket si cerca comunque anche fuori dal centro.
+- **Nomi nel Vecchio Cruscotto**: la sua ricerca per parole riporta solo i codici di cliente, gruppo e operatore. L'app chiede i nomi allo Storico, un ticket alla volta partendo dall'alto dell'elenco (numero + giorno di apertura), e li scrive nelle righe man mano che arrivano; ogni nome trovato resta in memoria e non viene più richiesto.
+- **Lettura di un ticket del Vecchio Cruscotto**: la conversazione si legge dalla scheda del ticket nell'Area Riservata, quindi ogni messaggio ha il nome di chi l'ha scritto, il destinatario, la data e la causale. Se la scheda non risponde entro qualche secondo si vede la conversazione ricostruita dal testo della ricerca.
+- Nelle viste *Archivio locale*, *Preferiti* e *Recenti* ogni scheda porta il badge e il colore della propria fonte.
 
-## Knowledge Base
+## Knowledge Base (HD Touch)
 
-La scheda **Knowledge Base** cerca nelle schede SKB dell'Area Riservata con la stessa ricerca del portale (pagina *Infinity Search*, opzione *Knowledge Base*). Serve l'accesso all'Area Riservata, come per il Vecchio Cruscotto.
+La fonte **Knowledge Base** interroga direttamente `ListData/KBArticles` di **HDA TOUCH**, sostituendo integralmente le vecchie schede SKB dell'Area Riservata. Basta quindi la sessione di HDA TOUCH (non serve più l'Area Riservata).
 
-- **In elenco** ogni scheda mostra: visibilità (**Esterna** in verde, **Interna** in arancio: il cliente non la vede), numero (`SKB#…`), oggetto, data di pubblicazione, prodotto, versione, tipologia, autore e l'estratto del testo con le parole trovate. La graffetta segna le schede con allegati.
-- **Parole**: di partenza devono comparire tutte, nel titolo o nel testo, anche al singolare o al plurale. A sinistra si passa ad *Almeno una* o a *Frase esatta*.
-- **Filtri di partenza**: come nel portale, solo schede pubblicate e definitive; la visibilità è *Tutte* (nel portale parte da *Esterna*) e il periodo è *Tutto* (nel portale parte dagli ultimi tre mesi). Con un filtro scelto si può sfogliare anche senza parole.
-- **Periodo**: al portale si chiedono gli anni dell'ultima modifica; il giorno esatto (di ultima modifica o di pubblicazione) si controlla sulle schede ricevute.
-- **Oltre le 210 schede**: è il limite del portale per ricerca. L'avviso offre *Cerca tutte*, che ripete la ricerca un anno alla volta.
-- **Lettura**: aprendo una scheda l'app legge la sua pagina nel portale (dalla scheda dell'Area Riservata aperta nel browser) e ne mostra i campi, il testo e gli allegati. È una lettura generica della pagina: per vederla con la sua impaginazione e le immagini c'è **Apri nell'Area Riservata**. Se l'Area Riservata non è aperta in una scheda del browser resta l'estratto arrivato con la ricerca.
-- Le schede lette finiscono nell'archivio locale, nei *Recenti* e si possono mettere tra i *Preferiti*, come i ticket.
+- **Ricerca**: dalla barra in alto puoi cercare parole (l'app interroga in parallelo il testo completo `FullText` con varianti/asterisco e il `Titolo`, unendo e ordinando per attinenza) oppure un codice articolo (`KB4335Z`, `KB12051HR`). Con **Sfoglia tutti** o scegliendo un filtro a sinistra puoi esplorare tutti gli articoli senza testo.
+- **Filtri di Touch a sinistra**: *Titolo contiene*, *Codice*, *Stato* (**Pubblicato**, **Pubblicato Internamente**, **Non Pubblicato**, **Archived**), *Tipo* (**Informazione**, **Errore**), *Cartella* (albero `CatalogFolders`), *Argomento* (`CatalogItems`), *Prodotto* (`Services`), *Versione Prodotto*, *Lingua*, *Data creazione (dal – al)* e *Allegati* (**Sì** / **No**).
+- **Lettura in sola lettura**: aprendo una scheda l'app legge il contenuto HTML completo tramite `WSCView/HTMLPreview` e l'elenco allegati tramite `ListData/Attachments` (`AttachmentPreview`), senza bloccare l'articolo. Gli allegati si aprono in anteprima direttamente nel lettore e **Apri in Touch** apre l'articolo (`KBArticle` / `CommKB`) nella scheda di Touch.
+- Le schede lette finiscono nell'archivio locale, nei *Recenti*, in *Attività recente* e si possono aggiungere ai *Preferiti*.
 
-## Più ticket aperti insieme: «Nuova pagina»
+## FAQ (HD Touch)
 
-Un ticket (o una scheda della Knowledge Base) si può aprire in una pagina del browser tutta sua, dove si vede solo il lettore. Le pagine restano aperte una accanto all'altra e il titolo di ognuna dice numero e oggetto.
+La fonte **FAQ** interroga direttamente `ListData/Faqs` di **HDA TOUCH** con una ricerca isolata e dedicata:
+
+- **Ricerca isolata dalla barra principale**: ciò che scrivi nella barra globale per ticket/KB **non** filtra le FAQ. Quando passi alla fonte **FAQ**, la barra in alto diventa automaticamente la **casella di ricerca unificata delle FAQ**.
+- **Casella unificata (Domanda + Risposta)**: cerca contemporaneamente nella **Domanda** e nella **Risposta**, supportando **più parole**, **singolare/plurale italiano**, evidenziazione dei termini e **ordinamento per attinenza**. Per le risposte che superano i 500 caratteri troncati dall'elenco di Touch, l'app verifica automaticamente il testo integrale (`Projection`) così da non perdere corrispondenze.
+- **Due caselle separate + filtri di Touch a sinistra**: nella colonna Filtri trovi anche le due caselle separate **Domanda contiene** e **Risposta contiene** (identiche al cruscotto di Touch), più tutti i filtri funzionanti di HD Touch: **Codice**, **Stato** (*Pubblicato*, *Pubblicato internamente*, *Non Pubblicato*), **Cartella**, **Elemento di catalogo**, **Importanza (min.)**, **Data creazione (dal – al)** e **Data cambio stato (da)**. *(I filtri Categoria e Tags di Touch sono esclusi volutamente perché non funzionanti nel portale).*
+- **Lettura in sola lettura**: apre Domanda, Risposta HTML completa (`WSCView/HTMLPreview`), metadati (codice, stato, importanza, date di pubblicazione/visibilità), allegati in anteprima e tasto **Apri in Touch** (`Entity=Faq`).
+
+## Più schede aperte insieme: «Nuova pagina»
+
+Un ticket, un articolo della Knowledge Base o una FAQ si può aprire in una pagina del browser tutta sua, dove si vede solo il lettore. Le pagine restano aperte una accanto all'altra e il titolo di ognuna dice numero/codice e oggetto.
 
 - **Dal lettore**: pulsante **Nuova pagina**.
-- **Dall'elenco**: il pulsante con la freccia che compare a destra della riga passandoci sopra, oppure **Ctrl+clic** (o clic con la rotella) sulla riga: la pagina si apre dietro e nell'elenco non cambia niente.
-- Nella pagina del ticket la **X** chiude la pagina; **Apri la ricerca**, in alto, mostra lì l'app intera. *Esc* non chiude la pagina.
-- La pagina legge il ticket dal portale per conto suo: serve la stessa sessione aperta (Touch o Area Riservata).
+- **Dall'elenco**: il pulsante con la freccia che compare a destra della scheda passandoci sopra, oppure **Ctrl+clic** (o clic con la rotella) sulla scheda: la pagina si apre dietro e nell'elenco non cambia niente.
+- Nella pagina singola la **X** chiude la pagina; **Apri la ricerca**, in alto, mostra lì l'app intera. *Esc* non chiude la pagina.
+- La pagina legge il contenuto dal portale per conto suo: serve la stessa sessione aperta (Touch o Area Riservata).
 
 ## Se non si collega a Touch
 

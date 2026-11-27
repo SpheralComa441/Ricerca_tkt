@@ -35,8 +35,8 @@ export function clear(el) {
 export const $ = (sel, root = document) => root.querySelector(sel);
 export const $$ = (sel, root = document) => [...root.querySelectorAll(sel)];
 
-/** Evidenzia le parole cercate nei nodi di testo di un elemento */
 /**
+ * Evidenzia le parole cercate nei nodi di testo di un elemento.
  * words: parole da evidenziare (stringhe) oppure { text, stem }: con `stem` si evidenziano anche le varianti
  * della parola (cedolino → cedolini), cioè la radice seguita da una desinenza breve.
  */
@@ -95,7 +95,7 @@ export function icon(name) {
     external: "M14 4h6v6h-2V7.4l-7.3 7.3-1.4-1.4L16.6 6H14zM5 6h6v2H6v10h10v-5h2v6H5z",
     copy: "M8 3h11v13h-2V5H8zM5 7h11v14H5zm2 2v10h7V9z",
     clip: "M16.5 6.5v10a4.5 4.5 0 0 1-9 0V6a3 3 0 0 1 6 0v9.5a1.5 1.5 0 0 1-3 0V7h-1.5v8.5a3 3 0 0 0 6 0V6a4.5 4.5 0 0 0-9 0v10.5a6 6 0 0 0 12 0v-10z",
-    filter: "M3 5h18l-7 8.5V19l-4 2v-7.5z",
+    filter: "M4 6h16v2H4zm3 5h10v2H7zm3 5h4v2h-4z",
     archive: "M3 4h18v4H3zm1 5h16v11H4zm5 2v2h6v-2z",
     download: "M11 4h2v9.6l3.3-3.3 1.4 1.4L12 17.4l-5.7-5.7 1.4-1.4 3.3 3.3zM5 19h14v2H5z",
     sort: "M7 4l4 4H8v12H6V8H3zm10 16l-4-4h3V4h2v12h3z",
@@ -105,6 +105,13 @@ export function icon(name) {
     save: "M5 3h11l3 3v15H5zm2 2v5h8V5zm5 9a2.5 2.5 0 1 0 0 5 2.5 2.5 0 0 0 0-5z",
     reload: "M12 5a7 7 0 1 0 6.9 8h-2.05A5 5 0 1 1 12 7c1.4 0 2.6.6 3.5 1.5L13 11h7V4l-2.6 2.6A7 7 0 0 0 12 5z",
     eye: "M12 5c-5 0-9.27 3.11-11 7.5C2.73 16.89 7 20 12 20s9.27-3.11 11-7.5C21.27 8.11 17 5 12 5zm0 12.5a5 5 0 1 1 0-10 5 5 0 0 1 0 10zm0-8a3 3 0 1 0 0 6 3 3 0 0 0 0-6z",
+    ticket: "M3 7a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2v3a2 2 0 1 0 0 4v3a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-3a2 2 0 1 0 0-4V7zm2 0v1.3a4 4 0 0 1 0 7.4V17h14v-1.3a4 4 0 0 1 0-7.4V7H5zm4 3h6v2H9v-2zm0 3.5h4v1.5H9v-1.5z",
+    layers: "M12 3L2 8l10 5 10-5-10-5zm0 7.75L4.8 7.2 12 3.6l7.2 3.6L12 10.75zM2 12l10 5 10-5-2-1-8 4-8-4-2 1zm0 4l10 5 10-5-2-1-8 4-8-4-2 1z",
+    history: "M13 3a9 9 0 1 0 8.95 10h-2.02A7 7 0 1 1 13 5c1.93 0 3.68.79 4.95 2.05L15 10h7V3l-2.64 2.64A8.96 8.96 0 0 0 13 3zm-1 5v5l4.25 2.52.75-1.23-3.5-2.07V8H12z",
+    book: "M4 4.5A2.5 2.5 0 0 1 6.5 2H20v20H6.5A2.5 2.5 0 0 1 4 19.5v-15zM6.5 4A.5.5 0 0 0 6 4.5V17h12V4H6.5zm0 15a.5.5 0 0 0 0 1H18v-1H6.5zM9 7h7v2H9V7zm0 4h5v2H9v-2z",
+    help: "M12 2a10 10 0 1 0 0 20 10 10 0 0 0 0-20zm0 18a8 8 0 1 1 0-16 8 8 0 0 1 0 16zm-1-5h2v2h-2v-2zm1-9a3.5 3.5 0 0 0-3.5 3.5h2A1.5 1.5 0 1 1 12 11c-.83 0-1.5.67-1.5 1.5V14h2v-1.15A3.5 3.5 0 0 0 12 6z",
+    chat: "M4 4h16a2 2 0 0 1 2 2v10a2 2 0 0 1-2 2H8l-4 4V6a2 2 0 0 1 2-2zm0 2v11.17L7.17 16H20V6H4z",
+    clock: "M12 2a10 10 0 1 0 0 20 10 10 0 0 0 0-20zm0 18a8 8 0 1 1 0-16 8 8 0 0 1 0 16zm-.75-13h1.5v5.25l3.5 2.1-.75 1.23L11.25 13V7z",
   };
   const ns = "http://www.w3.org/2000/svg";
   const svg = document.createElementNS(ns, "svg");

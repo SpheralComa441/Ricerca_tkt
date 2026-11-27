@@ -140,14 +140,15 @@ async function arProxy(msg) {
   return res;
 }
 
-function openDetailInPage(id) {
+function openDetailInPage(id, entity = "Incident", recordView = "") {
   // eseguita nella pagina di Touch (mondo MAIN): stesso meccanismo dei link "openDetail" del portale
   const P = window.Portal;
   if (!P || !P.Actions || typeof P.Actions.onClick !== "function") return "not-ready";
   const el = document.createElement("div");
   el.setAttribute("data-action", "Portal.PageManager.openDetail");
-  el.setAttribute("data-entity", "Incident");
-  el.setAttribute("data-id", id);
+  el.setAttribute("data-entity", entity || "Incident");
+  el.setAttribute("data-id", String(id));
+  if (recordView) el.setAttribute("data-record-view", recordView);
   el.style.display = "none";
   document.body.appendChild(el);
   try {
@@ -160,7 +161,7 @@ function openDetailInPage(id) {
   }
 }
 
-async function openInTouch(id) {
+async function openInTouch(id, entity = "Incident", recordView = "") {
   let tab = await touchTab();
   if (!tab) tab = await chrome.tabs.create({ url: TOUCH_HOME, active: true });
   await chrome.tabs.update(tab.id, { active: true });
@@ -168,7 +169,7 @@ async function openInTouch(id) {
   // aspetta che il portale sia pronto (al massimo ~30 s)
   for (let i = 0; i < 60; i++) {
     try {
-      const [res] = await chrome.scripting.executeScript({ target: { tabId: tab.id }, world: "MAIN", func: openDetailInPage, args: [id] });
+      const [res] = await chrome.scripting.executeScript({ target: { tabId: tab.id }, world: "MAIN", func: openDetailInPage, args: [id, entity, recordView] });
       if (res && res.result && res.result !== "not-ready") return res.result;
     } catch {
       /* pagina in caricamento */
@@ -189,7 +190,7 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
     return true;
   }
   if (msg.type === "open-in-touch") {
-    openInTouch(msg.id).then((r) => sendResponse({ result: r }), (e) => sendResponse({ result: "error: " + (e && e.message) }));
+    openInTouch(msg.id, msg.entity || "Incident", msg.recordView || "").then((r) => sendResponse({ result: r }), (e) => sendResponse({ result: "error: " + (e && e.message) }));
     return true;
   }
   if (msg.type === "touch-tab-status") {

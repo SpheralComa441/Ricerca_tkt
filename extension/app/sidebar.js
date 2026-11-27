@@ -1,4 +1,4 @@
-// Pannello dei filtri.
+// Pannello dei filtri (Opzione B: visibile di default accanto ai risultati, richiudibile dal tasto Filtri).
 
 import { h, clear, icon } from "./dom.js";
 import { STATUS_GROUPS, STATUSES, statusesOfGroup, PRIORITIES } from "../lib/statuses.js";
@@ -7,7 +7,7 @@ import { DEF, ruleFor } from "../lib/filters.js";
 
 /** Casella con suggerimenti e valori scelti come "gettoni" */
 function tokenInput({ values, onChange, search, placeholder }) {
-  let items = values.slice();
+  let items = (values || []).slice();
   let opts = [];
   let active = -1;
   let seq = 0;
@@ -74,7 +74,7 @@ function tokenInput({ values, onChange, search, placeholder }) {
       if (my !== seq) return;
       clear(sug).appendChild(h("div", { class: "empty" }, "Errore: " + e.message));
     }
-  }, 220);
+  }, 200);
   input.addEventListener("input", run);
   input.addEventListener("focus", run);
   input.addEventListener("blur", () => setTimeout(() => (sug.hidden = true), 120));
@@ -108,20 +108,32 @@ function textField(ctx, key, placeholder) {
   inp.addEventListener("input", apply);
   inp.addEventListener("keydown", (e) => {
     if (e.key !== "Enter") return;
-    apply.cancel(); // altrimenti la stessa ricerca ripartirebbe dopo 600 ms
+    apply.cancel();
     ctx.setFilter(key, inp.value, true);
   });
   return inp;
 }
 
-function dateRange(ctx, kFrom, kTo, presets) {
-  const f = ctx.S.filters;
+function liveTextInput(value, placeholder, onApply, { delay = 500, inputmode = null } = {}) {
+  const inp = h("input", { class: "input", type: "text", inputmode, value: value || "", placeholder });
+  const apply = debounce(() => onApply(inp.value), delay);
+  inp.addEventListener("input", apply);
+  inp.addEventListener("keydown", (e) => {
+    if (e.key !== "Enter") return;
+    e.preventDefault();
+    apply.cancel();
+    onApply(inp.value, true);
+  });
+  return inp;
+}
+
+const okDay = (v) => !v || /^(19[89]\d|20\d\d)-\d\d-\d\d$/.test(v);
+
+function dateRangeGeneric(f, kFrom, kTo, onSet, presets = true) {
   const a = h("input", { class: "input", type: "date", value: f[kFrom] || "", "aria-label": "dal" });
   const b = h("input", { class: "input", type: "date", value: f[kTo] || "", "aria-label": "al" });
-  // Chrome manda "change" a ogni cifra dell'anno: si cerca solo con una data completa (anno 1990-2099) o vuota
-  const okDay = (v) => !v || /^(19[89]\d|20\d\d)-\d\d-\d\d$/.test(v);
-  a.addEventListener("change", () => okDay(a.value) && a.value !== (ctx.S.filters[kFrom] || "") && ctx.setFilter(kFrom, a.value));
-  b.addEventListener("change", () => okDay(b.value) && b.value !== (ctx.S.filters[kTo] || "") && ctx.setFilter(kTo, b.value));
+  a.addEventListener("change", () => okDay(a.value) && a.value !== (f[kFrom] || "") && onSet({ [kFrom]: a.value }));
+  b.addEventListener("change", () => okDay(b.value) && b.value !== (f[kTo] || "") && onSet({ [kTo]: b.value }));
   const now = new Date();
   const P = {
     "7 giorni": () => [isoDay(new Date(now.getTime() - 7 * 864e5)), ""],
@@ -133,8 +145,32 @@ function dateRange(ctx, kFrom, kTo, presets) {
   return h("div", null,
     h("div", { class: "row2" }, a, b),
     presets ? h("div", { class: "presets" },
-      Object.entries(P).map(([name, fn]) => h("button", { type: "button", class: "preset", onclick: () => { const [x, y] = fn(); ctx.setFilters({ [kFrom]: x, [kTo]: y }); } }, name)),
-      f[kFrom] || f[kTo] ? h("button", { type: "button", class: "preset", onclick: () => ctx.setFilters({ [kFrom]: "", [kTo]: "" }) }, "Qualsiasi") : null) : null);
+      Object.entries(P).map(([name, fn]) => h("button", { type: "button", class: "preset", onclick: () => { const [x, y] = fn(); onSet({ [kFrom]: x, [kTo]: y }); } }, name)),
+      f[kFrom] || f[kTo] ? h("button", { type: "button", class: "preset", onclick: () => onSet({ [kFrom]: "", [kTo]: "" }) }, "Qualsiasi") : null) : null);
+}
+
+function dateRange(ctx, kFrom, kTo, presets) {
+  return dateRangeGeneric(ctx.S.filters, kFrom, kTo, (obj) => ctx.setFilters(obj), presets);
+}
+
+function multiPills(selected, options, onChange) {
+  const sel = new Set((selected || []).map(String));
+  return h("div", { class: "seg" },
+    options.map((o) => {
+      const id = String(o.id);
+      const on = sel.has(id);
+      return h("button", {
+        type: "button",
+        class: "preset" + (on ? " on" : ""),
+        "aria-pressed": on ? "true" : "false",
+        onclick: () => {
+          const next = new Set(sel);
+          if (next.has(id)) next.delete(id);
+          else next.add(id);
+          onChange([...next]);
+        },
+      }, o.label);
+    }));
 }
 
 function statusBlock(ctx) {
@@ -188,7 +224,6 @@ function checks(ctx, key, entries) {
 }
 
 function uncertain(ctx, key) {
-  // avviso discreto se il filtro non è ancora verificato sul portale
   const r = ruleFor(DEF[key], ctx.S.calib);
   if (r.source === "predefinito") return "Formato da confermare: usalo una volta in Touch e l'estensione lo imparerà.";
   return null;
@@ -199,9 +234,9 @@ function renderStoricoSidebar(ctx) {
   const f = ctx.S.storico.filters;
   const el = clear(document.getElementById("sidebar"));
   el.dataset.source = "storico";
-  el.appendChild(h("div", { class: "side-head" }, h("h2", null, "Filtri dello Storico"), h("button", { class: "linkbtn", onclick: () => ctx.storicoReset() }, "Azzera tutto")));
+  el.appendChild(h("div", { class: "side-head" }, h("h2", null, "Filtri Storico"), h("button", { class: "linkbtn", onclick: () => ctx.storicoReset() }, "Azzera tutto")));
   el.appendChild(h("div", { class: "side-note src-storico" },
-    "Lo Storico è la Ricerca avanzata dell'Area Riservata: contiene tutti i ticket del Vecchio Cruscotto, anche prima del 2024. Non cerca per parole."));
+    "Ricerca avanzata dell'Area Riservata: contiene tutti i ticket storici, anche prima del 2024. Non cerca per parole."));
 
   const text = (key, placeholder, clean = (v) => v.trim()) => {
     const inp = h("input", { class: "input", type: "text", inputmode: key === "number" || key === "clientCode" ? "numeric" : null, value: f[key] || "", placeholder });
@@ -210,7 +245,6 @@ function renderStoricoSidebar(ctx) {
     inp.addEventListener("keydown", (e) => e.key === "Enter" && (e.preventDefault(), apply()));
     return inp;
   };
-  const okDay = (v) => v === "" || /^(19[89]\d|20\d\d)-\d\d-\d\d$/.test(v);
   const day = (key, label) => {
     const inp = h("input", { class: "input", type: "date", value: f[key] || "", "aria-label": label });
     inp.addEventListener("change", () => okDay(inp.value) && inp.value !== (f[key] || "") && ctx.storicoSetFilter(key, inp.value));
@@ -249,19 +283,18 @@ function renderStoricoSidebar(ctx) {
       placeholder: "Nome operatore…",
       onChange: (v) => ctx.storicoSetFilter("operator", v[v.length - 1] || null),
       search: (q) => ctx.storicoLookup("operators", q),
-    }), "Si possono scegliere gli operatori già comparsi nei risultati dello Storico.")));
+    }), "Operatori già comparsi nei risultati dello Storico.")));
 }
 
-/** Filtri della scheda Vecchio Cruscotto: quelli della «Ricerca rapida» dell'Area Riservata. Le parole si scrivono nella casella in alto. */
+/** Filtri della scheda Vecchio Cruscotto: quelli della «Ricerca rapida» dell'Area Riservata. */
 function renderArSidebar(ctx) {
   const f = ctx.S.arS.filters;
   const el = clear(document.getElementById("sidebar"));
   el.dataset.source = "ar";
   el.appendChild(h("div", { class: "side-head" }, h("h2", null, "Filtri Vecchio Cruscotto"), h("button", { class: "linkbtn", onclick: () => ctx.arReset() }, "Azzera tutto")));
   el.appendChild(h("div", { class: "side-note src-ar" },
-    "Sono i filtri della Ricerca rapida dell'Area Riservata. Le parole si scrivono nella casella in alto; si può cercare anche solo con i filtri. Il portale restituisce al massimo 210 ticket per ricerca."));
+    "Filtri della Ricerca rapida dell'Area Riservata. Le parole si scrivono nella barra in alto; si può cercare anche solo con i filtri."));
 
-  const okDay = (v) => v === "" || /^(19[89]\d|20\d\d)-\d\d-\d\d$/.test(v);
   const day = (key, label) => {
     const inp = h("input", { class: "input", type: "date", value: f[key] || "", "aria-label": label });
     inp.addEventListener("change", () => okDay(inp.value) && inp.value !== (f[key] || "") && ctx.arSetFilter(key, inp.value));
@@ -271,7 +304,6 @@ function renderArSidebar(ctx) {
   const iso = (d) => `${d.getFullYear()}-${p2(d.getMonth() + 1)}-${p2(d.getDate())}`;
   const now = new Date();
   const y = now.getFullYear();
-  // come nel portale: gli ultimi tre mesi sono il mese in corso e i due precedenti
   const presets = [
     ["Ultimi 3 mesi", { dateFrom: iso(new Date(y, now.getMonth() - 2, 1)), dateTo: iso(new Date(y, now.getMonth() + 1, 0)) }],
     [String(y), { dateFrom: `${y}-01-01`, dateTo: `${y}-12-31` }],
@@ -304,73 +336,150 @@ function renderArSidebar(ctx) {
         h("div", { class: "row2" }, day("dateFrom", "dal"), day("dateTo", "al")),
         h("div", { class: "presets" }, presets.map(([name, val]) =>
           h("button", { type: "button", class: "preset" + (f.dateFrom === val.dateFrom && f.dateTo === val.dateTo ? " on" : ""), onclick: () => ctx.arSetFilter(val) }, name)))),
-      "Il portale ragiona a mesi interi: conta il mese delle date scelte. «Tutto» = gli anni che il Vecchio Cruscotto ha ancora."),
+      "Il portale ragiona a mesi interi. Limite: 210 ticket per ricerca (espandibile con «Cerca tutti»)."),
     field("Il periodo si riferisce a", seg("dateRef", [["1", "Ultimo aggiornamento"], ["2", "Apertura"]], "1")),
     field("Stato", seg("statoBase", [["", "Tutti"], ["A", "Aperti"], ["C", "Chiusi"]], "")),
-    field("Gruppo che ha in carico il ticket", groupField("group", "groupLabel", "es. Paghe Infinity…")),
-    field("Operatore che ha in carico il ticket", operatorField("operator")),
-    field("Cliente (codice)", client, "Il codice dell'azienda, come nella Ricerca rapida del portale."),
-    field("Gruppo che ha partecipato", groupField("groupIn", "groupInLabel", "es. Paghe Infinity - Test…"), "Trova i ticket a cui il gruppo ha lavorato, anche se ora li ha in carico un altro."),
-    field("Operatore che ha partecipato", operatorField("operatorIn"), "Si possono scegliere gli operatori già comparsi nei ticket letti o nello Storico."),
-    field("Le parole si cercano in", seg("searchIn", [["2", "Testo e oggetto"], ["0", "Solo testo"], ["1", "Solo oggetto"]], "2"))));
+    field("Gruppo in carico", groupField("group", "groupLabel", "es. Paghe Infinity…")),
+    field("Operatore in carico", operatorField("operator")),
+    field("Cliente (codice)", client),
+    field("Gruppo partecipante", groupField("groupIn", "groupInLabel", "es. Paghe Infinity - Test…")),
+    field("Operatore partecipante", operatorField("operatorIn")),
+    field("Dove cercare le parole", seg("searchIn", [["2", "Testo e oggetto"], ["0", "Solo testo"], ["1", "Solo oggetto"]], "2"))));
 }
 
-/** Filtri della scheda Knowledge Base: quelli del modulo di ricerca del portale. Le parole si scrivono nella casella in alto. */
+/** Filtri della scheda Knowledge Base (HD Touch — Articoli Knowledge Base). */
 function renderKbSidebar(ctx) {
   const f = ctx.S.kbS.filters;
   const el = clear(document.getElementById("sidebar"));
   el.dataset.source = "kb";
+  const ui = ctx.ui;
+  const n = (...keys) => keys.reduce((a, k) => a + (Array.isArray(f[k]) ? f[k].length : f[k] ? 1 : 0), 0);
+
   el.appendChild(h("div", { class: "side-head" }, h("h2", null, "Filtri Knowledge Base"), h("button", { class: "linkbtn", onclick: () => ctx.kbReset() }, "Azzera tutto")));
   el.appendChild(h("div", { class: "side-note src-kb" },
-    "Le schede della Knowledge Base dell'Area Riservata (SKB). Le parole si scrivono nella casella in alto e si cercano nel titolo e nel testo; per una scheda precisa scrivi SKB# e il numero."));
+    "Articoli Knowledge Base aggiornati di HDA Touch. Scrivi parole o un codice (es. KB25631HR) nella barra in alto, oppure filtra qui sotto."));
 
-  const okDay = (v) => v === "" || /^(19[89]\d|20\d\d)-\d\d-\d\d$/.test(v);
-  const day = (key, label) => {
-    const inp = h("input", { class: "input", type: "date", value: f[key] || "", "aria-label": label });
-    inp.addEventListener("change", () => okDay(inp.value) && inp.value !== (f[key] || "") && ctx.kbSetFilter(key, inp.value));
-    return inp;
-  };
-  const p2 = (n) => String(n).padStart(2, "0");
-  const iso = (d) => `${d.getFullYear()}-${p2(d.getMonth() + 1)}-${p2(d.getDate())}`;
-  const now = new Date();
-  const y = now.getFullYear();
-  const presets = [
-    ["Ultimi 3 mesi", { dateFrom: iso(new Date(y, now.getMonth() - 2, 1)), dateTo: iso(new Date(y, now.getMonth() + 1, 0)) }],
-    [String(y), { dateFrom: `${y}-01-01`, dateTo: `${y}-12-31` }],
-    [String(y - 1), { dateFrom: `${y - 1}-01-01`, dateTo: `${y - 1}-12-31` }],
-    ["Tutto", { dateFrom: "", dateTo: "" }],
-  ];
-  const seg = (key, options) => h("div", { class: "seg" },
-    options.map(([v, name, title]) => h("button", { type: "button", class: "preset" + (f[key] === v ? " on" : ""), title: title || null, onclick: () => f[key] !== v && ctx.kbSetFilter(key, v) }, name)));
+  const wild = ctx.S.settings.autoWildcard !== false;
+  el.appendChild(h("div", { class: "fbody plain", style: { marginBottom: "10px" } },
+    field("Parole della casella in alto",
+      h("div", { class: "seg" },
+        h("button", { type: "button", class: "preset" + (wild ? " on" : ""), onclick: () => ctx.setAutoWildcard(true) }, "Con varianti (*)"),
+        h("button", { type: "button", class: "preset" + (!wild ? " on" : ""), onclick: () => ctx.setAutoWildcard(false) }, "Esatte")))));
 
-  el.appendChild(h("div", { class: "fbody plain" },
-    field("Le parole", seg("mode", [["all", "Tutte"], ["any", "Almeno una"], ["phrase", "Frase esatta"]]),
-      "«Tutte»: ogni parola deve comparire nel titolo o nel testo, anche al singolare o al plurale."),
-    field("Visibilità", seg("visibility", [["", "Tutte"], ["E", "Esterna", "Schede che vede anche il cliente"], ["I", "Interna", "Schede riservate agli operatori"]]),
-      "In elenco ogni scheda dice se è esterna o interna."),
-    field("Periodo (dal – al)",
-      h("div", null,
-        h("div", { class: "row2" }, day("dateFrom", "dal"), day("dateTo", "al")),
-        h("div", { class: "presets" }, presets.map(([name, val]) =>
-          h("button", { type: "button", class: "preset" + (f.dateFrom === val.dateFrom && f.dateTo === val.dateTo ? " on" : ""), onclick: () => ctx.kbSetFilter(val) }, name)))),
-      "«Tutto» = tutte le schede, dal 2007 a oggi."),
-    field("Il periodo si riferisce a", seg("dateRef", [["ult", "Ultima modifica"], ["pub", "Pubblicazione"]])),
-    field("Stato", seg("published", [[true, "Pubblicate"], [false, "Tutte"]])),
-    field("Versione della scheda", seg("definitive", [[true, "Definitive"], [false, "Tutte"]]),
-      "Come nel portale, di solito si cercano le schede pubblicate e definitive.")));
+  const kbStatuses = ctx.kb ? ctx.kb.statuses : [];
+  const kbTypes = ctx.kb ? ctx.kb.types : [];
+  const kbLanguages = ctx.kb ? ctx.kb.languages : [];
+
+  el.appendChild(section("kbStatus", "Stato, tipo e allegati", n("statuses", "types", "hasAttachments"), ui.openSections.kbStatus ?? true, [
+    field("Stato", multiPills(f.statuses, kbStatuses, (v) => ctx.kbSetFilter("statuses", v)),
+      f.statuses.length ? null : "Nessuno scelto = tutti gli stati."),
+    field("Tipo", multiPills(f.types, kbTypes, (v) => ctx.kbSetFilter("types", v))),
+    field("Allegati", h("div", { class: "seg" },
+      [["", "Tutti"], ["true", "Con allegati"], ["false", "Senza allegati"]].map(([v, label]) =>
+        h("button", { type: "button", class: "preset" + ((f.hasAttachments || "") === v ? " on" : ""), onclick: () => (f.hasAttachments || "") !== v && ctx.kbSetFilter("hasAttachments", v) }, label)))),
+  ], ctx));
+
+  el.appendChild(section("kbClass", "Prodotto e classificazione", n("products", "version", "topics", "folders"), ui.openSections.kbClass ?? true, [
+    field("Prodotto", tokenInput({
+      values: f.products,
+      placeholder: "es. Paghe Infinity…",
+      onChange: (v) => ctx.kbSetFilter("products", v),
+      search: (q) => ctx.lookups.search("services", q),
+    })),
+    field("Versione Prodotto", liveTextInput(f.version, "es. 26.12.00", (v) => ctx.kbSetFilter("version", v))),
+    field("Argomento", tokenInput({
+      values: f.topics,
+      placeholder: "Cerca argomento…",
+      onChange: (v) => ctx.kbSetFilter("topics", v),
+      search: (q) => ctx.lookups.search("catalogItems", q),
+    })),
+    field("Cartella", tokenInput({
+      values: f.folders,
+      placeholder: "es. HR › Paghe…",
+      onChange: (v) => ctx.kbSetFilter("folders", v),
+      search: (q) => ctx.lookups.search("catalogFolders", q),
+    })),
+  ], ctx));
+
+  el.appendChild(section("kbText", "Titolo, codice e lingua", n("title", "code", "languages"), ui.openSections.kbText ?? false, [
+    field("Titolo contiene", liveTextInput(f.title, "parole del titolo…", (v) => ctx.kbSetFilter("title", v))),
+    field("Codice articolo", liveTextInput(f.code, "es. KB25631HR", (v) => ctx.kbSetFilter("code", v))),
+    field("Lingua", multiPills(f.languages, kbLanguages.slice(0, 8), (v) => ctx.kbSetFilter("languages", v))),
+  ], ctx));
+
+  el.appendChild(section("kbDates", "Data creazione", n("dateFrom", "dateTo"), ui.openSections.kbDates ?? false, [
+    field("Creato (dal – al)", dateRangeGeneric(f, "dateFrom", "dateTo", (obj) => ctx.kbSetFilter(obj), true)),
+  ], ctx));
+}
+
+/** Filtri della scheda FAQ (HD Touch — Faqs; Categoria e Tags omessi perché non funzionanti in Touch). */
+function renderFaqSidebar(ctx) {
+  const f = ctx.S.faqS.filters;
+  const el = clear(document.getElementById("sidebar"));
+  el.dataset.source = "faq";
+  const ui = ctx.ui;
+  const n = (...keys) => keys.reduce((a, k) => a + (Array.isArray(f[k]) ? f[k].length : String(f[k] ?? "").trim() !== "" ? 1 : 0), 0);
+
+  el.appendChild(h("div", { class: "side-head" }, h("h2", null, "Filtri FAQ"), h("button", { class: "linkbtn", onclick: () => ctx.faqReset() }, "Azzera tutto")));
+  el.appendChild(h("div", { class: "side-note src-faq" },
+    "La barra in alto cerca in Domanda e Risposta insieme (con più parole, singolare/plurale e attinenza). Qui sotto trovi anche i campi separati di HD Touch."));
+
+  const faqStatuses = ctx.faq ? ctx.faq.statuses : [];
+
+  el.appendChild(section("faqText", "Domanda, Risposta e Codice", n("question", "answer", "code"), ui.openSections.faqText ?? true, [
+    field("Domanda", liveTextInput(f.question, "Parole nella domanda…", (v) => ctx.faqSetFilter("question", v)),
+      "Filtro separato di HD Touch sul campo Domanda."),
+    field("Risposta", liveTextInput(f.answer, "Parole nella risposta…", (v) => ctx.faqSetFilter("answer", v)),
+      "Filtro separato di HD Touch sul campo Risposta."),
+    field("Codice", liveTextInput(f.code, "es. FAQ25598HR", (v) => ctx.faqSetFilter("code", v))),
+  ], ctx));
+
+  el.appendChild(section("faqClass", "Stato, cartella e catalogo", n("statuses", "folders", "catalogItems", "importance"), ui.openSections.faqClass ?? true, [
+    field("Stato", multiPills(f.statuses, faqStatuses, (v) => ctx.faqSetFilter("statuses", v)),
+      f.statuses.length ? null : "Nessuno scelto = tutti gli stati."),
+    field("Cartella", tokenInput({
+      values: f.folders,
+      placeholder: "es. HR › Paghe…",
+      onChange: (v) => ctx.faqSetFilter("folders", v),
+      search: (q) => ctx.lookups.search("catalogFolders", q),
+    })),
+    field("Elemento di catalogo", tokenInput({
+      values: f.catalogItems,
+      placeholder: "Cerca elemento…",
+      onChange: (v) => ctx.faqSetFilter("catalogItems", v),
+      search: (q) => ctx.lookups.search("catalogItems", q),
+    })),
+    field("Importanza (minima)", (() => {
+      const inp = h("input", { class: "input", type: "number", min: "0", step: "1", value: f.importance ?? "", placeholder: "es. 1" });
+      const apply = debounce(() => ctx.faqSetFilter("importance", inp.value.trim()), 450);
+      inp.addEventListener("input", apply);
+      inp.addEventListener("change", () => { apply.cancel(); ctx.faqSetFilter("importance", inp.value.trim()); });
+      return inp;
+    })()),
+  ], ctx));
+
+  const statusDateInp = h("input", { class: "input", type: "date", value: f.statusDateFrom || "", "aria-label": "Data cambio stato da" });
+  statusDateInp.addEventListener("change", () => okDay(statusDateInp.value) && statusDateInp.value !== (f.statusDateFrom || "") && ctx.faqSetFilter("statusDateFrom", statusDateInp.value));
+
+  el.appendChild(section("faqDates", "Date", n("dateFrom", "dateTo", "statusDateFrom"), ui.openSections.faqDates ?? false, [
+    field("Data creazione (dal – al)", dateRangeGeneric(f, "dateFrom", "dateTo", (obj) => ctx.faqSetFilter(obj), true)),
+    field("Data cambio stato (da)", statusDateInp),
+  ], ctx));
 }
 
 export function renderSidebar(ctx) {
   const { S, ui } = ctx;
-  if (S.tab === "storico") return renderStoricoSidebar(ctx);
-  if (S.tab === "ar") return renderArSidebar(ctx);
-  if (S.tab === "kb") return renderKbSidebar(ctx);
+  if (S.source === "storico") return renderStoricoSidebar(ctx);
+  if (S.source === "ar") return renderArSidebar(ctx);
+  if (S.source === "kb") return renderKbSidebar(ctx);
+  if (S.source === "faq") return renderFaqSidebar(ctx);
+
   const f = S.filters;
   const el = clear(document.getElementById("sidebar"));
   el.dataset.source = "touch";
   const n = (...keys) => keys.reduce((a, k) => a + (Array.isArray(f[k]) ? f[k].length : f[k] ? 1 : 0), 0);
 
-  el.appendChild(h("div", { class: "side-head" }, h("h2", null, "Filtri"), h("button", { class: "linkbtn", onclick: () => ctx.resetFilters() }, "Azzera tutto")));
+  el.appendChild(h("div", { class: "side-head" }, h("h2", null, "Filtri HDA Touch"), h("button", { class: "linkbtn", onclick: () => ctx.resetFilters() }, "Azzera tutto")));
   if (S.saved.length) {
     el.appendChild(section("saved", "Ricerche salvate", 0, ui.openSections.saved ?? true,
       h("div", { class: "presets" }, S.saved.map((s, i) => h("span", { class: "chip" },
@@ -378,21 +487,20 @@ export function renderSidebar(ctx) {
         h("button", { title: "Elimina", onclick: () => ctx.deleteSaved(i) }, "×")))), ctx));
   }
 
-  // come le parole della casella in alto vanno a HDA Touch
   const wild = S.settings.autoWildcard !== false;
-  el.appendChild(h("div", { class: "fbody plain word-mode" },
+  el.appendChild(h("div", { class: "fbody plain", style: { marginBottom: "10px" } },
     field("Parole della casella in alto",
       h("div", { class: "seg" },
         h("button", { type: "button", class: "preset" + (wild ? " on" : ""), title: "Ogni parola vale anche al plurale e per le parole che iniziano allo stesso modo: «centro di costo» si cerca come «centr* di cost*»", onclick: () => ctx.setAutoWildcard(true) }, "Con varianti (*)"),
         h("button", { type: "button", class: "preset" + (!wild ? " on" : ""), title: "Le parole si cercano scritte esattamente così. Puoi sempre mettere l'asterisco a mano dove serve.", onclick: () => ctx.setAutoWildcard(false) }, "Esatte")),
-      wild ? "L'asterisco lo mette l'app: «centro di costo» → centr* di cost*. Parole corte, numeri e sigle restano come sono." : "Si cercano le parole scritte così. L'asterisco si può mettere a mano: centr* di cost*.")));
+      wild ? "L'asterisco lo mette l'app: «centro di costo» → centr* di cost*." : "Si cercano le parole esatte. Puoi mettere l'asterisco a mano.")));
 
   el.appendChild(section("status", "Stato", n("statuses"), ui.openSections.status ?? true, statusBlock(ctx), ctx));
 
   const me = ctx.hda.currentUserId;
   el.appendChild(section("people", "Gruppi e persone", n("ownerGroups", "assigned", "ownerUsers", "modifiedBy"), ui.openSections.people ?? true, [
     field("Gruppo di lavoro", tokenInput({ values: f.ownerGroups, placeholder: "es. Paghe Infinity…", onChange: (v) => ctx.setFilter("ownerGroups", v), search: (q) => ctx.lookups.search("groups", q) }),
-      "Il «Gruppo owner» del ticket in Touch. Per i ticket assegnati a un gruppo usa «Assegnato a»."),
+      "Il «Gruppo owner» del ticket in Touch."),
     field("Assegnato a (operatore o gruppo)", tokenInput({ values: f.assigned, placeholder: "Nome operatore o gruppo…", onChange: (v) => ctx.setFilter("assigned", v), search: (q) => ctx.lookups.search("people", q) }),
       me ? h("button", { type: "button", class: "linkbtn", onclick: () => ctx.setFilter("assigned", [{ id: me, label: ctx.lookups.label("users", me) || "Io" }]) }, "Solo i miei") : null),
     field("Responsabile del ticket", tokenInput({ values: f.ownerUsers, placeholder: "Nome operatore…", onChange: (v) => ctx.setFilter("ownerUsers", v), search: (q) => ctx.lookups.search("users", q) })),
@@ -410,7 +518,6 @@ export function renderSidebar(ctx) {
     field("Ultimo aggiornamento (dal – al)", dateRange(ctx, "updFrom", "updTo", true), uncertain(ctx, "updFrom")),
   ], ctx));
 
-  // tipi di ticket: quelli visti nei risultati (le descrizioni arrivano dal portale)
   const types = { ...(S.typesSeen || {}) };
   for (const id of f.types) if (!types[id]) types[id] = id;
   const typeEntries = Object.entries(types).sort((a, b) => a[1].localeCompare(b[1]));
@@ -422,11 +529,10 @@ export function renderSidebar(ctx) {
     field("Priorità", checks(ctx, "priorities", Object.entries(PRIORITIES)), uncertain(ctx, "priorities")),
   ], ctx));
 
-  // filtri visti in Touch e non ancora gestiti dal pannello: si possono riusare così come sono
   const caps = (S.captures || []).filter((c) => c.collection === "Incidents" && c.conditions && c.conditions.some((x) => !x.lock && x.id !== "Domain"));
   if (caps.length) {
     el.appendChild(section("touch", "Filtri usati in Touch", n("touch"), ui.openSections.touch ?? false, [
-      h("div", { class: "hint" }, "Le ultime ricerche fatte nel portale. Applicale qui per riusarle con la lettura chiara."),
+      h("div", { class: "hint" }, "Le ultime ricerche fatte nel portale."),
       h("div", { class: "learned" }, caps.slice(0, 6).map((c) => {
         const conds = c.conditions.filter((x) => !x.lock && x.id !== "Domain");
         return h("div", { class: "lrow" },

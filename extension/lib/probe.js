@@ -102,6 +102,16 @@ export async function runProbe(hda, { onStep = () => {}, sampleTicketId = null, 
     });
   }
 
+  await step("Knowledge Base Touch (ListData/KBArticles)", async () => {
+    const { rows, total } = await hda.listData("KBArticles", { conditions: [], limit: 1, sort: [{ property: "c2", direction: "DESC" }] });
+    return `${total} articoli totali, ${rows[0] ? Object.keys(rows[0]).length : 0} colonne`;
+  });
+
+  await step("FAQ Touch (ListData/Faqs)", async () => {
+    const { rows, total } = await hda.listData("Faqs", { conditions: [], limit: 1, sort: [{ property: "c5", direction: "DESC" }] });
+    return `${total} FAQ totali, ${rows[0] ? Object.keys(rows[0]).length : 0} colonne`;
+  });
+
   const { word, mid } = pickCalibrationSample(sampleSubject);
   const idCond = ticketId ? { property: "ID", op: "eq", value: ticketId, id: "ID" } : null;
   let workingContains = null;

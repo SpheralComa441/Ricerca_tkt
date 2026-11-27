@@ -9,8 +9,16 @@ import { norm, tokens } from "./util.js";
 const DAY = 86400000;
 
 export function makeLookups(hda, { kvGet, kvSet, log = () => {} }) {
-  const lists = { groups: new Map(), users: new Map(), accounts: new Map(), catalog: new Map() };
-  const loaded = { groups: false, users: false, catalog: false };
+  const lists = {
+    groups: new Map(),
+    users: new Map(),
+    accounts: new Map(),
+    catalog: new Map(),
+    services: new Map(),
+    catalogItems: new Map(),
+    catalogFolders: new Map(),
+  };
+  const loaded = { groups: false, users: false, catalog: false, services: false, catalogItems: false, catalogFolders: false };
   let fullAt = 0; // quando sono stati caricati gli elenchi completi (resta valido 7 giorni)
   const inflight = {}; // un solo caricamento alla volta per elenco (si scrive mentre carica)
   const failed = {}; // elenchi non disponibili: non si riprova a ogni tasto
@@ -18,11 +26,14 @@ export function makeLookups(hda, { kvGet, kvSet, log = () => {} }) {
   let saveTimer = null;
 
   function add(kind, id, label, extra = {}) {
-    if (!id || !label) return;
+    if (!id || !label || !lists[kind]) return;
+    const sid = String(id).trim();
+    const lbl = String(label).trim();
+    if (!sid || !lbl) return;
     const m = lists[kind];
-    const prev = m.get(id);
-    if (!prev || prev.label !== label) {
-      m.set(id, { id, label, ...prev, ...extra, label });
+    const prev = m.get(sid);
+    if (!prev || prev.label !== lbl) {
+      m.set(sid, { id: sid, label: lbl, ...prev, ...extra, label: lbl });
       dirty = true;
     }
   }
@@ -43,7 +54,7 @@ export function makeLookups(hda, { kvGet, kvSet, log = () => {} }) {
   async function restore() {
     const saved = await kvGet("lookups", null);
     if (!saved) return;
-    for (const k of Object.keys(lists)) for (const x of saved[k] || []) lists[k].set(x.id, x);
+    for (const k of Object.keys(lists)) for (const x of saved[k] || []) lists[k].set(String(x.id), x);
     if (saved.full && Date.now() - (saved.full.at || 0) < 7 * DAY) {
       Object.assign(loaded, saved.full.loaded || {});
       fullAt = saved.full.at;
@@ -70,6 +81,18 @@ export function makeLookups(hda, { kvGet, kvSet, log = () => {} }) {
       }
     }
     return null;
+  }
+
+  function flattenTree(nodes, prefix = "", out = []) {
+    for (const n of nodes || []) {
+      if (!n || n.id == null) continue;
+      const txt = String(n.text || n.ObjectDescription || n.Name || "").trim();
+      if (!txt) continue;
+      const path = prefix ? `${prefix} › ${txt}` : txt;
+      out.push({ id: String(n.id), label: path, short: txt, parent: prefix });
+      if (Array.isArray(n.children) && n.children.length) flattenTree(n.children, path, out);
+    }
+    return out;
   }
 
   function loadFull(kind) {
@@ -107,6 +130,79 @@ export function makeLookups(hda, { kvGet, kvSet, log = () => {} }) {
         rows.forEach((r) => add("catalog", r.ID, r.Description, { code: r.Code || "" }));
         ok = true;
       }
+    } else if (kind === "services") {
+      // Prodotti KB (Services con ServiceTypeID = "3C" = Prodotto, verificato in Touch)
+      try {
+        const res = await hda.listData("Services", {
+          conditions: [{ property: "ServiceTypeID", value: "3C", op: "eq", id: "TypeFilter" }],
+          limit: 500,
+          sort: [{ property: "c6", direction: "ASC" }],
+        });
+        if (res && res.rows && res.rows.length) {
+          for (const r of res.rows) {
+            const id = String(r.c1 || r.ID || "").trim();
+            const label = String(r.c6 || r.c0 || r.TranslatedName || r.Description || "").trim();
+            const code = String(r.c3 || r.ServiceCode || "").trim();
+            const parent = String(r.c2 || "").trim();
+            if (id && label) add("services", id, label, { code, type: parent });
+          }
+          ok = true;
+        }
+      } catch (e) {
+        log(`elenco prodotti (Services): ${e.message}`);
+      }
+      if (!ok && typeof hda.hierarchyTree === "function") {
+        try {
+          const tree = await hda.hierarchyTree("Service");
+          const flat = flattenTree(tree);
+          if (flat.length) {
+            flat.forEach((x) => add("services", x.id, x.short || x.label, { type: x.parent }));
+            ok = true;
+          }
+        } catch (e) {
+          log(`albero prodotti (Service): ${e.message}`);
+        }
+      }
+    } else if (kind === "catalogItems") {
+      // Argomento KB (KB04) ed Elemento di catalogo FAQ (Relations.CatalogItem.ID)
+      try {
+        const res = await hda.listData("CatalogItems", {
+          conditions: [{ property: "CatalogItemStatusID", value: "1|2", op: "eq", id: "StatusFilter" }],
+          limit: 500,
+        });
+        if (res && res.rows && res.rows.length) {
+          for (const r of res.rows) {
+            const id = String(r.c4 != null ? r.c4 : r.ID || "").trim();
+            const label = String(r.c8 || r.TranslatedDescription || r.c0 || "").trim();
+            const folder = String(r.c0 || "").trim();
+            if (id && label) add("catalogItems", id, label, { type: folder });
+          }
+          ok = true;
+        }
+      } catch (e) {
+        log(`elenco argomenti (CatalogItems): ${e.message}`);
+      }
+      if (!ok) {
+        const rows = await tryProjection(["CatalogItem", "CatalogItems"], ["ID", "TranslatedDescription", "Description"], 5000);
+        if (rows && rows.length) {
+          rows.forEach((r) => add("catalogItems", r.ID, r.TranslatedDescription || r.Description));
+          ok = true;
+        }
+      }
+    } else if (kind === "catalogFolders") {
+      // Cartelle KB e FAQ (TreeData?entity=CatalogFolders)
+      if (typeof hda.treeData === "function") {
+        try {
+          const tree = await hda.treeData("CatalogFolders");
+          const flat = flattenTree(tree);
+          if (flat.length) {
+            flat.forEach((x) => add("catalogFolders", x.id, x.label, { type: x.parent ? "" : "Cartella" }));
+            ok = true;
+          }
+        } catch (e) {
+          log(`albero cartelle (CatalogFolders): ${e.message}`);
+        }
+      }
     }
     loaded[kind] = ok;
     if (ok) {
@@ -121,11 +217,11 @@ export function makeLookups(hda, { kvGet, kvSet, log = () => {} }) {
     const ws = tokens(q);
     const out = [];
     for (const it of items) {
-      const l = norm(it.label + " " + (it.code || "") + " " + it.id);
+      const l = norm(it.label + " " + (it.code || "") + " " + (it.type || "") + " " + it.id);
       if (ws.every((w) => l.includes(w))) out.push(it);
     }
     const q0 = norm(q);
-    out.sort((a, b) => (norm(b.label).startsWith(q0) - norm(a.label).startsWith(q0)) || (a.inactive - b.inactive) || a.label.localeCompare(b.label));
+    out.sort((a, b) => (norm(b.label).startsWith(q0) - norm(a.label).startsWith(q0)) || (!!a.inactive - !!b.inactive) || a.label.localeCompare(b.label));
     return out.slice(0, limit);
   }
 
@@ -157,7 +253,7 @@ export function makeLookups(hda, { kvGet, kvSet, log = () => {} }) {
     for (const r of found) add("accounts", r.ID, r.CompanyName, { code: r.AccountCode || "", city: r.City || "" });
     scheduleSave();
     const ids = new Set();
-    return [...found.map((r) => lists.accounts.get(r.ID)), ...local].filter((x) => x && !ids.has(x.id) && ids.add(x.id)).slice(0, 30);
+    return [...found.map((r) => lists.accounts.get(String(r.ID))), ...local].filter((x) => x && !ids.has(x.id) && ids.add(x.id)).slice(0, 30);
   }
 
   return {
@@ -165,10 +261,13 @@ export function makeLookups(hda, { kvGet, kvSet, log = () => {} }) {
     harvest,
     loadFull,
     searchAccounts,
-    label(kind, id) {
-      return (lists[kind].get(id) || {}).label || null;
+    all(kind) {
+      return lists[kind] ? [...lists[kind].values()] : [];
     },
-    /** kind: groups | users | people (gruppi+operatori) | catalog */
+    label(kind, id) {
+      return (lists[kind] && lists[kind].get(String(id)) || {}).label || null;
+    },
+    /** kind: groups | users | people (gruppi+operatori) | catalog | services | catalogItems | catalogFolders */
     async search(kind, q) {
       if (kind === "accounts") return searchAccounts(q);
       if (kind === "people") {
@@ -178,7 +277,7 @@ export function makeLookups(hda, { kvGet, kvSet, log = () => {} }) {
         return [...u, ...g];
       }
       await loadFull(kind);
-      return match(lists[kind].values(), q);
+      return match(lists[kind] ? lists[kind].values() : [], q);
     },
     sizes() {
       return Object.fromEntries(Object.entries(lists).map(([k, m]) => [k, m.size]));

@@ -103,7 +103,7 @@ function slimRow(row) {
 export function reviveRow(o) {
   if (!o) return o;
   const r = { ...o };
-  for (const k of ["date", "lastChange", "closureDate", "nextExpiration"]) if (typeof r[k] === "number") r[k] = new Date(r[k]);
+  for (const k of ["date", "lastChange", "closureDate", "nextExpiration", "publishDate", "visibleFrom", "visibleTo"]) if (typeof r[k] === "number") r[k] = new Date(r[k]);
   return r;
 }
 

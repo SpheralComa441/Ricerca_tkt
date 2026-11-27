@@ -8,23 +8,91 @@
   <link rel="stylesheet" href="styles.css">
 </head>
 <body>
-  <header class="topbar">
-    <div class="brand"><img src="../icons/icon32.png" alt=""><span>Ricerca <b>TKT</b></span></div>
-    <button class="btn btn-ghost" id="soloBack" type="button" title="Mostra in questa pagina la ricerca e i filtri">Apri la ricerca</button>
-    <form class="searchbox" id="searchForm" autocomplete="off">
-      <input id="q" type="search" placeholder="Numero ticket, parole del testo o dell'oggetto…   ( / )" aria-label="Cerca">
-      <button type="submit" class="btn btn-primary" id="searchBtn">Cerca</button>
-    </form>
-    <div class="conn" id="conn" title="Stato della connessione a HDA TOUCH"><span class="dot"></span><span class="conn-text">Verifica…</span></div>
-    <div class="conn" id="arConn" title="Vecchio Cruscotto (Area Riservata Zucchetti): clicca per aprirlo e cercare anche nei ticket storici a 7 cifre"><span class="dot"></span><span class="conn-text">Vecchio cruscotto</span></div>
-    <button class="btn btn-ghost" id="diagBtn" title="Diagnostica e impostazioni">Diagnostica</button>
+  <header class="solo-bar" id="soloBar">
+    <div class="brand">
+      <span class="brand-logo" aria-hidden="true">
+        <svg viewBox="0 0 28 28" fill="none">
+          <rect x="3" y="4.5" width="22" height="8" rx="4" stroke="currentColor" stroke-width="2.6"/>
+          <rect x="3" y="15.5" width="22" height="8" rx="4" stroke="currentColor" stroke-width="2.6" opacity=".7"/>
+          <circle cx="9.5" cy="8.5" r="1.7" fill="currentColor"/>
+          <circle cx="18.5" cy="19.5" r="1.7" fill="currentColor"/>
+        </svg>
+      </span>
+      <span class="brand-name">Ricerca <b>TKT</b></span>
+    </div>
+    <button class="btn" id="soloBack" type="button" title="Mostra in questa pagina la ricerca e i filtri">Apri la ricerca</button>
+    <div class="solo-spacer"></div>
+    <button class="btn btn-subtle" id="soloDiagBtn" type="button" title="Diagnostica e impostazioni">Diagnostica</button>
   </header>
 
-  <main id="layout">
-    <aside class="sidebar" id="sidebar" aria-label="Filtri"></aside>
-    <section class="results" id="results" aria-label="Risultati"></section>
-    <section class="reader" id="reader" aria-label="Ticket" hidden></section>
-  </main>
+  <div id="shell">
+    <nav class="nav-rail" id="navRail" aria-label="Fonti">
+      <div class="brand">
+        <span class="brand-logo" aria-hidden="true">
+          <svg viewBox="0 0 28 28" fill="none">
+            <rect x="3" y="4.5" width="22" height="8" rx="4" stroke="currentColor" stroke-width="2.6"/>
+            <rect x="3" y="15.5" width="22" height="8" rx="4" stroke="currentColor" stroke-width="2.6" opacity=".7"/>
+            <circle cx="9.5" cy="8.5" r="1.7" fill="currentColor"/>
+            <circle cx="18.5" cy="19.5" r="1.7" fill="currentColor"/>
+          </svg>
+        </span>
+        <span class="brand-name">Ricerca <b>TKT</b></span>
+      </div>
+
+      <div class="nav-list" id="navList" role="tablist" aria-label="Fonti di ricerca"></div>
+
+      <div class="nav-footer">
+        <div class="conn" id="conn" title="Stato della connessione a HDA TOUCH"><span class="dot"></span><span class="conn-text">Verifica…</span></div>
+        <div class="conn" id="arConn" title="Vecchio Cruscotto (Area Riservata Zucchetti): clicca per aprirlo"><span class="dot"></span><span class="conn-text">Vecchio cruscotto</span></div>
+        <button class="nav-diag" id="diagBtn" type="button" title="Diagnostica e impostazioni">
+          <svg viewBox="0 0 24 24" class="ico" aria-hidden="true"><path d="M12 8a4 4 0 1 0 0 8 4 4 0 0 0 0-8zm8.6 5.3-.1-2.6 2-1.6-2-3.4-2.4.8-2.2-1.3L15.4 2h-3.9l-.5 2.6-2.2 1.3-2.4-.8-2 3.4 2 1.6-.1 2.6-2 1.6 2 3.4 2.4-.8 2.2 1.3.5 2.6h3.9l.5-2.6 2.2-1.3 2.4.8 2-3.4z"/></svg>
+          <span>Diagnostica</span>
+        </button>
+      </div>
+    </nav>
+
+    <main id="layout">
+      <aside class="sidebar" id="sidebar" aria-label="Filtri"></aside>
+
+      <section class="workspace" id="workspace">
+        <header class="ws-head" id="wsHead">
+          <div class="ws-title-row">
+            <div class="ws-title-wrap">
+              <h1 class="ws-title" id="wsTitle">HDA Touch</h1>
+              <span class="ws-subtitle" id="wsSubtitle"></span>
+            </div>
+            <div class="ws-cta" id="wsCta"></div>
+          </div>
+
+          <div class="ws-bar">
+            <div class="ws-tabs" id="wsTabs" role="tablist" aria-label="Viste"></div>
+            <div class="ws-controls">
+              <form class="searchbox" id="searchForm" autocomplete="off">
+                <svg viewBox="0 0 24 24" class="ico search-ico" aria-hidden="true"><path d="M11 4a7 7 0 1 0 4.24 12.57l4.6 4.6 1.41-1.41-4.6-4.6A7 7 0 0 0 11 4zm0 2a5 5 0 1 1 0 10 5 5 0 0 1 0-10z"/></svg>
+                <input id="q" type="search" placeholder="Cerca ticket, codice KB o parole…  ( / )" aria-label="Cerca">
+                <button type="submit" class="search-go" id="searchBtn" title="Cerca (Invio)">Cerca</button>
+              </form>
+              <form class="searchbox searchbox-faq" id="faqSearchForm" autocomplete="off" hidden>
+                <svg viewBox="0 0 24 24" class="ico search-ico" aria-hidden="true"><path d="M11 4a7 7 0 1 0 4.24 12.57l4.6 4.6 1.41-1.41-4.6-4.6A7 7 0 0 0 11 4zm0 2a5 5 0 1 1 0 10 5 5 0 0 1 0-10z"/></svg>
+                <input id="faqQ" type="search" placeholder="Cerca in Domanda e Risposta (più parole, sing./plur.)…  ( / )" aria-label="Cerca nelle FAQ">
+                <button type="submit" class="search-go" id="faqSearchBtn" title="Cerca nelle FAQ">Cerca</button>
+              </form>
+              <button class="btn-filter" id="filterToggle" type="button" title="Mostra o nascondi la colonna dei filtri">
+                <span>Filtri</span>
+                <svg viewBox="0 0 24 24" class="ico" aria-hidden="true"><path d="M4 6h16v2H4zm3 5h10v2H7zm3 5h4v2h-4z"/></svg>
+              </button>
+            </div>
+          </div>
+        </header>
+
+        <div class="ws-body" id="wsBody">
+          <section class="results" id="results" aria-label="Risultati"></section>
+          <aside class="activity-col" id="activityCol" aria-label="Attività recente"></aside>
+          <section class="reader" id="reader" aria-label="Dettaglio" hidden></section>
+        </div>
+      </section>
+    </main>
+  </div>
 
   <dialog id="diag" class="dialog"></dialog>
   <dialog id="saveDlg" class="dialog dialog-small"></dialog>

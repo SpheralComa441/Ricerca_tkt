@@ -996,7 +996,7 @@ test("asterisco: automatico per HDA Touch, scritto a mano ovunque", async () => 
   const { wildcardWord, wildcardText, buildConditions: bc } = await import("../lib/filters.js");
   const { searchTerms, relevance, matchesAllTerms, TIERS, highlightPatterns } = await import("../lib/relevance.js");
   const { buildArQuery } = await import("../lib/ar.js");
-  const { buildKbQuery } = await import("../lib/kb.js");
+  const { buildKbConditions } = await import("../lib/kb.js");
   const { tokens: toks } = await import("../lib/util.js");
 
   // la radice più l'asterisco: singolare, plurale e parole che iniziano allo stesso modo
@@ -1046,8 +1046,8 @@ test("asterisco: automatico per HDA Touch, scritto a mano ovunque", async () => 
   assert.equal(loose.tier, exact.tier, "tutte le parole vicine nel testo in tutti e due");
   assert.ok(exact.score > loose.score, "la parola scritta così viene prima");
 
-  // Vecchio Cruscotto e Knowledge Base: l'asterisco scritto resta, in minuscolo (lì le varianti l'app le chiede già)
+  // Vecchio Cruscotto e Knowledge Base Touch: l'asterisco scritto resta
   assert.match(buildArQuery({ text: "Centr* di cost*", idCenSer: "PAOW" }), /Testi:\(centr\*\) or Oggetto:\(centr\*\)/);
   assert.match(buildArQuery({ text: "Centr* di cost*", idCenSer: "PAOW" }), /Testi:\(cost\*\) or Oggetto:\(cost\*\)/);
-  assert.match(buildKbQuery({ text: "cost*", idCenSer: "PAOW" }), /altDescription:\(cost\*\) OR description:\(cost\*\)/);
+  assert.deepEqual(buildKbConditions({ text: "cost*", autoWildcard: false }), [{ property: "FullText", value: "cost*", op: "eq", id: "FullText" }]);
 });
