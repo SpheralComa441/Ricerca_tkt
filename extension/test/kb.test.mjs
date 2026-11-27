@@ -35,7 +35,7 @@ function rawKbRow(over = {}) {
     c11: "Pubblicato Internamente",
     c12: "Informazione",
     c13: "Default",
-    c14: "BERTOGLIO GABRIELE",
+    c14: "LAURA VERDI",
     c15: "Migliorie e correzioni anomalie 26.12.00",
     ...over,
   };
@@ -126,7 +126,7 @@ test("kb touch: lettura righe e parsing HTMLPreview + allegati (con trim degli s
   assert.equal(row.statusId, "3");
   assert.equal(row.statusTone, "int");
   assert.equal(row.typeText, "Informazione");
-  assert.equal(row.assigned, "BERTOGLIO GABRIELE");
+  assert.equal(row.assigned, "LAURA VERDI");
   assert.equal(kbStatusInfo("1").tone, "pub");
   assert.equal(kbStatusInfo("2").tone, "draft");
   assert.equal(relevance(row, "cedolino").tier, TIERS.ALL_NEAR_TEXT);

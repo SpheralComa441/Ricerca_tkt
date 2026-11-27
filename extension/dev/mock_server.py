@@ -108,7 +108,7 @@ KB_ARTICLES = [
         "KB01": "S523C", "KB01.Name": "PAGHE INFINITY", "KB02.Name": "26.12.00", "KB04": "6458", "KB04.Description": "Paghe Infinity",
         "FolderID": "2189", "KBArticleStatus.ID": 1, "KBArticleStatus": "Pubblicato", "KBArticleStatus.TranslatedDescription": "Pubblicato",
         "KBArticleTypeID": "1", "KBArticleType.Description": "Informazione", "LanguageID": "0", "Language.Description": "Default",
-        "LastupdateUser.FullName": "CASAGRANDE CARLO", "HASATTACH": False, "Attachments": [],
+        "LastupdateUser.FullName": "MARIO ROSSI", "HASATTACH": False, "Attachments": [],
     },
     {
         "ID": 4335, "Code": "KB4335Z", "Title": "Migliorie e correzioni anomalie non presenti nel sommario dei cambiamenti 26.12.00",
@@ -118,7 +118,7 @@ KB_ARTICLES = [
         "KB01": "S523C", "KB01.Name": "PAGHE INFINITY", "KB02.Name": "26.12.00", "KB04": "6458", "KB04.Description": "Paghe Infinity",
         "FolderID": "2189", "KBArticleStatus.ID": 3, "KBArticleStatus": "Pubblicato Internamente", "KBArticleStatus.TranslatedDescription": "Pubblicato Internamente",
         "KBArticleTypeID": "1", "KBArticleType.Description": "Informazione", "LanguageID": "0", "Language.Description": "Default",
-        "LastupdateUser.FullName": "BERTOGLIO GABRIELE", "HASATTACH": True,
+        "LastupdateUser.FullName": "LAURA VERDI", "HASATTACH": True,
         "Attachments": [{"ID": "A880HR", "FileName": "HR1_26.12.00_000KB.txt   ", "ContentType": "text/plain   ", "Author": "Administrator", "KBSize": 12.4, "LastUpdate": NOW - timedelta(days=5), "Content": "Note di rilascio 26.12.00\n- Corretto arrotondamento netto in busta\n- Aggiornato modello HR1NETNEG"}],
     },
     {
@@ -129,7 +129,7 @@ KB_ARTICLES = [
         "KB01": "S523C", "KB01.Name": "PAGHE INFINITY", "KB02.Name": "26.11.00", "KB04": "6458", "KB04.Description": "Paghe Infinity",
         "FolderID": "2189", "KBArticleStatus.ID": 1, "KBArticleStatus": "Pubblicato", "KBArticleStatus.TranslatedDescription": "Pubblicato",
         "KBArticleTypeID": "2", "KBArticleType.Description": "Errore", "LanguageID": "1", "Language.Description": "Italiano",
-        "LastupdateUser.FullName": "MULAZZI ENRICO", "HASATTACH": False, "Attachments": [],
+        "LastupdateUser.FullName": "SARA CONTI", "HASATTACH": False, "Attachments": [],
     },
     {
         "ID": 1102, "Code": "KB12051HR", "Title": "{47077} INFO: Segnalazione di lentezza (controllo tempi calcolo cedolino)",

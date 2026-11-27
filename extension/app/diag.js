@@ -190,10 +190,10 @@ function updatesSection(ctx) {
     }, "Salva token");
     box.appendChild(
       h("details", { class: "fsec", style: { borderTop: "1px solid var(--line)", padding: "8px 0 0" } },
-        h("summary", { style: { fontSize: "12.5px" } }, icon("chevron"), "Token GitHub opzionale (solo se non sei collegato a GitHub nel browser)"),
+        h("summary", { style: { fontSize: "12.5px" } }, icon("chevron"), "Token GitHub opzionale (non necessario su repository pubblico)"),
         h("div", { class: "fbody", style: { gap: "8px" } },
           h("div", { class: "hint", style: { marginTop: "0" } },
-            "Se hai già fatto l'accesso a GitHub in Edge/Chrome non serve alcun token. Se condividi l'estensione su un PC non collegato a GitHub, puoi inserire un Fine-Grained Token in sola lettura (Contents: Read-only su Ricerca_tkt): resta salvato solo in locale su questo browser."),
+            "Su repository pubblico gli aggiornamenti funzionano su qualsiasi PC senza login GitHub e senza token. Questo campo serve solo se un domani il repository torna privato su un PC non collegato a GitHub (Fine-Grained Token Contents: Read-only su Ricerca_tkt)."),
           h("div", { class: "upd-row" },
             h("div", { style: { flex: "1", minWidth: "220px" } }, tokInp),
             tokSave,
