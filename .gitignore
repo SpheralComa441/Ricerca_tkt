@@ -8,3 +8,5 @@ data/*
 .pytest_cache/
 bookmarklet/node_modules/
 bookmarklet/test/vendor/
+updater/it.ricercatkt.updater.json
+

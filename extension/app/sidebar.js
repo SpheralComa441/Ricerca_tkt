@@ -499,12 +499,16 @@ export function renderSidebar(ctx) {
 
   const me = ctx.hda.currentUserId;
   el.appendChild(section("people", "Gruppi e persone", n("ownerGroups", "assigned", "ownerUsers", "modifiedBy"), ui.openSections.people ?? true, [
-    field("Gruppo di lavoro", tokenInput({ values: f.ownerGroups, placeholder: "es. Paghe Infinity…", onChange: (v) => ctx.setFilter("ownerGroups", v), search: (q) => ctx.lookups.search("groups", q) }),
+    field("Gruppo di lavoro (Gruppo owner)", tokenInput({ values: f.ownerGroups, placeholder: "es. Paghe Infinity…", onChange: (v) => ctx.setFilter("ownerGroups", v), search: (q) => ctx.lookups.search("groups", q) }),
       "Il «Gruppo owner» del ticket in Touch."),
-    field("Assegnato a (operatore o gruppo)", tokenInput({ values: f.assigned, placeholder: "Nome operatore o gruppo…", onChange: (v) => ctx.setFilter("assigned", v), search: (q) => ctx.lookups.search("people", q) }),
-      me ? h("button", { type: "button", class: "linkbtn", onclick: () => ctx.setFilter("assigned", [{ id: me, label: ctx.lookups.label("users", me) || "Io" }]) }, "Solo i miei") : null),
-    field("Responsabile del ticket", tokenInput({ values: f.ownerUsers, placeholder: "Nome operatore…", onChange: (v) => ctx.setFilter("ownerUsers", v), search: (q) => ctx.lookups.search("users", q) })),
-    field("Ultima modifica di", tokenInput({ values: f.modifiedBy, placeholder: "Nome operatore…", onChange: (v) => ctx.setFilter("modifiedBy", v), search: (q) => ctx.lookups.search("users", q) }), uncertain(ctx, "modifiedBy")),
+    field("Assegnato a (in carico ora)", tokenInput({ values: f.assigned, placeholder: "Operatore o gruppo…", onChange: (v) => ctx.setFilter("assigned", v), search: (q) => ctx.lookups.search("people", q) }),
+      h("div", { class: "hint-row" },
+        h("span", null, "Chi ha in lavorazione il ticket adesso (operatore o gruppo)."),
+        me ? h("button", { type: "button", class: "linkbtn", onclick: () => ctx.setFilter("assigned", [{ id: me, label: ctx.lookups.label("users", me) || "Io" }]) }, "Solo i miei") : null)),
+    field("Owner del ticket (titolare)", tokenInput({ values: f.ownerUsers, placeholder: "Operatore owner…", onChange: (v) => ctx.setFilter("ownerUsers", v), search: (q) => ctx.lookups.search("users", q) }),
+      "L'operatore «Owner» titolare del ticket in Touch (può differire da Assegnato a se il ticket è stato girato)."),
+    field("Modificato da", tokenInput({ values: f.modifiedBy, placeholder: "Nome operatore…", onChange: (v) => ctx.setFilter("modifiedBy", v), search: (q) => ctx.lookups.search("users", q) }),
+      uncertain(ctx, "modifiedBy") || "Operatore che ha modificato o lavorato il ticket."),
   ], ctx));
 
   el.appendChild(section("customer", "Cliente e prodotto", n("accounts", "catalog", "classCli"), ui.openSections.customer ?? true, [

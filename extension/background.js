@@ -6,6 +6,7 @@
 //    impara proprietà, operatori e formato dei valori di ogni filtro senza doverli indovinare.
 
 import { learnFromConditions } from "./lib/filters.js";
+import { NATIVE_HOST_NAME, checkRemoteUpdate, downloadRemoteZipBase64 } from "./lib/updater.js";
 
 const APP_URL = chrome.runtime.getURL("app/index.html");
 const TOUCH_MATCH = "https://zucchetti.support/HDAPortal/*";
@@ -197,6 +198,36 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
     touchTab().then((t) => sendResponse({ open: !!t }));
     return true;
   }
+  if (msg.type === "updater:status") {
+    getUpdaterStatus(!!msg.pingHelper).then(sendResponse, (e) => sendResponse({ error: String(e && e.message) }));
+    return true;
+  }
+  if (msg.type === "updater:check") {
+    runUpdateCheck({ autoApply: !!msg.autoApply }).then(sendResponse, (e) => sendResponse({ error: String(e && e.message) }));
+    return true;
+  }
+  if (msg.type === "updater:apply") {
+    applyRemoteUpdate({ reopenApp: msg.reopenApp !== false }).then(sendResponse, (e) => sendResponse({ ok: false, error: String(e && e.message) }));
+    return true;
+  }
+  if (msg.type === "updater:set-config") {
+    saveUpdaterConfig(msg.config || {}).then(sendResponse, (e) => sendResponse({ error: String(e && e.message) }));
+    return true;
+  }
+  if (msg.type === "updater:reload") {
+    chrome.storage.local.set({ reopenAppAfterUpdate: true }).finally(() => {
+      sendResponse({ ok: true });
+      setTimeout(() => chrome.runtime.reload(), 150);
+    });
+    return true;
+  }
+  if (msg.type === "updater:consume-just-updated") {
+    chrome.storage.local.get("justUpdatedInfo").then((st) => {
+      if (st.justUpdatedInfo) chrome.storage.local.remove("justUpdatedInfo");
+      sendResponse(st.justUpdatedInfo || null);
+    });
+    return true;
+  }
 });
 
 // ---------------------------------------------------------------- filtri appresi da Touch
@@ -274,3 +305,247 @@ chrome.webRequest.onBeforeRequest.addListener(
   { urls: ["https://zucchetti.support/HDAPortal/WSCView/ListData/*", "https://zucchetti.support/HDAPortal/WSCView/List*"] },
   ["requestBody"],
 );
+
+// ---------------------------------------------------------------- aggiornamenti automatici
+
+const UPDATE_ALARM = "ricerca-tkt-update-check";
+const DEFAULT_UPDATER_CFG = { autoCheck: true, autoUpdate: true, githubToken: "" };
+let cachedHelper = null;
+let updateApplyInFlight = false;
+
+function sendNative(payload) {
+  return new Promise((resolve, reject) => {
+    if (!chrome.runtime || typeof chrome.runtime.sendNativeMessage !== "function") {
+      return reject(new Error("Native messaging non disponibile in questo browser."));
+    }
+    try {
+      chrome.runtime.sendNativeMessage(NATIVE_HOST_NAME, payload, (resp) => {
+        const err = chrome.runtime.lastError;
+        if (err) return reject(new Error(err.message || "Helper locale non configurato"));
+        if (!resp) return reject(new Error("Nessuna risposta dall'helper locale"));
+        resolve(resp);
+      });
+    } catch (e) {
+      reject(e);
+    }
+  });
+}
+
+async function pingNativeHelper(force = false) {
+  if (!force && cachedHelper && Date.now() - cachedHelper.at < 60_000) return cachedHelper;
+  try {
+    const r = await sendNative({ action: "ping" });
+    cachedHelper = {
+      available: !!(r && r.ok),
+      helperVersion: (r && r.helperVersion) || "",
+      installDir: (r && r.installDir) || "",
+      hasGit: !!(r && r.hasGit),
+      error: r && r.ok ? "" : (r && r.error) || "Risposta non valida",
+      at: Date.now(),
+    };
+  } catch (e) {
+    cachedHelper = {
+      available: false,
+      helperVersion: "",
+      installDir: "",
+      hasGit: false,
+      error: (e && e.message) || "Non configurato",
+      at: Date.now(),
+    };
+  }
+  return cachedHelper;
+}
+
+async function getUpdaterConfig() {
+  const st = await chrome.storage.local.get("updaterConfig");
+  return { ...DEFAULT_UPDATER_CFG, ...(st.updaterConfig || {}) };
+}
+
+async function saveUpdaterConfig(patch) {
+  const cur = await getUpdaterConfig();
+  const next = {
+    autoCheck: patch.autoCheck !== undefined ? !!patch.autoCheck : cur.autoCheck,
+    autoUpdate: patch.autoUpdate !== undefined ? !!patch.autoUpdate : cur.autoUpdate,
+    githubToken: patch.githubToken !== undefined ? String(patch.githubToken || "").trim() : cur.githubToken,
+  };
+  await chrome.storage.local.set({ updaterConfig: next });
+  await ensureUpdateAlarm(next.autoCheck);
+  return getUpdaterStatus(false);
+}
+
+function setUpdateBadge(hasUpdate, version) {
+  try {
+    if (hasUpdate) {
+      chrome.action.setBadgeBackgroundColor({ color: "#2563eb" });
+      chrome.action.setBadgeText({ text: "NEW" });
+      chrome.action.setTitle({ title: `Ricerca TKT — Nuova versione disponibile (v${version})` });
+    } else {
+      chrome.action.setBadgeText({ text: "" });
+      chrome.action.setTitle({ title: "Apri Ricerca TKT" });
+    }
+  } catch {
+    /* */
+  }
+}
+
+async function getUpdaterStatus(ping = false) {
+  const manifest = chrome.runtime.getManifest();
+  const [cfg, st, helper] = await Promise.all([
+    getUpdaterConfig(),
+    chrome.storage.local.get(["updaterLastCheck", "updaterInstalledSha", "updaterLastApplied"]),
+    ping ? pingNativeHelper(true) : Promise.resolve(cachedHelper || (await pingNativeHelper(false))),
+  ]);
+  return {
+    currentVersion: manifest.version,
+    extensionId: chrome.runtime.id,
+    config: {
+      autoCheck: cfg.autoCheck,
+      autoUpdate: cfg.autoUpdate,
+      hasToken: !!cfg.githubToken,
+    },
+    helper,
+    lastCheck: st.updaterLastCheck || null,
+    installedSha: st.updaterInstalledSha || "",
+    lastApplied: st.updaterLastApplied || null,
+  };
+}
+
+async function runUpdateCheck({ autoApply = false } = {}) {
+  const manifest = chrome.runtime.getManifest();
+  const [cfg, st] = await Promise.all([
+    getUpdaterConfig(),
+    chrome.storage.local.get("updaterInstalledSha"),
+  ]);
+  const res = await checkRemoteUpdate({
+    currentVersion: manifest.version,
+    installedSha: st.updaterInstalledSha || "",
+    token: cfg.githubToken,
+  });
+  await chrome.storage.local.set({ updaterLastCheck: res });
+  setUpdateBadge(res.status === "update_available", res.remoteVersion || "");
+
+  if (autoApply && cfg.autoUpdate && res.status === "update_available") {
+    const helper = await pingNativeHelper(true);
+    if (helper.available) {
+      await applyRemoteUpdate({ reopenApp: false, checkResult: res }).catch(() => {});
+    }
+  }
+  return getUpdaterStatus(false);
+}
+
+async function applyRemoteUpdate({ reopenApp = true, checkResult = null } = {}) {
+  if (updateApplyInFlight) return { ok: false, error: "Aggiornamento già in corso…" };
+  updateApplyInFlight = true;
+  try {
+    const helper = await pingNativeHelper(true);
+    if (!helper.available) {
+      return {
+        ok: false,
+        needsHelper: true,
+        error: "Helper locale non ancora attivato. Esegui una sola volta updater\\attiva_autoaggiornamento.bat nella cartella dell'estensione.",
+      };
+    }
+    const cfg = await getUpdaterConfig();
+    const manifest = chrome.runtime.getManifest();
+    let remote = checkResult;
+    if (!remote) {
+      remote = await checkRemoteUpdate({
+        currentVersion: manifest.version,
+        token: cfg.githubToken,
+      });
+    }
+
+    let resp;
+    try {
+      const { zipBase64 } = await downloadRemoteZipBase64({ token: cfg.githubToken });
+      resp = await sendNative({
+        action: "applyZip",
+        zipBase64,
+        expectedVersion: (remote && remote.remoteVersion) || "",
+      });
+    } catch (dlErr) {
+      if (helper.hasGit) {
+        resp = await sendNative({ action: "gitPull" });
+      } else {
+        throw dlErr;
+      }
+    }
+
+    if (!resp || !resp.ok) {
+      return { ok: false, error: (resp && resp.error) || "Errore durante l'applicazione dell'aggiornamento." };
+    }
+
+    const appliedVersion = resp.version || (remote && remote.remoteVersion) || manifest.version;
+    const now = Date.now();
+    await chrome.storage.local.set({
+      updaterInstalledSha: (remote && remote.remoteSha) || "",
+      updaterLastApplied: { version: appliedVersion, at: now, filesUpdated: resp.filesUpdated || 0 },
+      updaterLastCheck: {
+        status: "up_to_date",
+        currentVersion: appliedVersion,
+        remoteVersion: appliedVersion,
+        remoteSha: (remote && remote.remoteSha) || "",
+        remoteShortSha: (remote && remote.remoteShortSha) || "",
+        commitMessage: (remote && remote.commitMessage) || "",
+        checkedAt: now,
+      },
+      reopenAppAfterUpdate: !!reopenApp,
+      justUpdatedInfo: { from: manifest.version, to: appliedVersion, at: now },
+    });
+    setUpdateBadge(false);
+    setTimeout(() => chrome.runtime.reload(), 300);
+    return { ok: true, version: appliedVersion, filesUpdated: resp.filesUpdated || 0, reloading: true };
+  } finally {
+    updateApplyInFlight = false;
+  }
+}
+
+async function ensureUpdateAlarm(enabled) {
+  if (!chrome.alarms) return;
+  try {
+    if (!enabled) {
+      await chrome.alarms.clear(UPDATE_ALARM);
+      return;
+    }
+    const existing = await chrome.alarms.get(UPDATE_ALARM);
+    if (!existing) chrome.alarms.create(UPDATE_ALARM, { delayInMinutes: 2, periodInMinutes: 240 });
+  } catch {
+    /* */
+  }
+}
+
+if (chrome.alarms) {
+  chrome.alarms.onAlarm.addListener((alarm) => {
+    if (alarm && alarm.name === UPDATE_ALARM) {
+      runUpdateCheck({ autoApply: true }).catch(() => {});
+    }
+  });
+}
+
+async function handlePostReload() {
+  try {
+    const st = await chrome.storage.local.get("reopenAppAfterUpdate");
+    if (st.reopenAppAfterUpdate) {
+      await chrome.storage.local.remove("reopenAppAfterUpdate");
+      await openApp();
+    }
+  } catch {
+    /* */
+  }
+}
+
+chrome.runtime.onInstalled.addListener(async () => {
+  const cfg = await getUpdaterConfig();
+  await ensureUpdateAlarm(cfg.autoCheck);
+  await handlePostReload();
+});
+
+chrome.runtime.onStartup.addListener(async () => {
+  const cfg = await getUpdaterConfig();
+  await ensureUpdateAlarm(cfg.autoCheck);
+  if (cfg.autoCheck) setTimeout(() => runUpdateCheck({ autoApply: true }).catch(() => {}), 8000);
+});
+
+// Assicura la riapertura dell'app anche se il service worker riparte subito dopo chrome.runtime.reload()
+handlePostReload();
+

@@ -26,7 +26,7 @@ import { ticketIdFrom, ticketIdVariants, ticketNumber, isLegacyTicketNumber, isT
 
 const inExtension = typeof chrome !== "undefined" && !!(chrome.runtime && chrome.runtime.id);
 const DAY = 86400000;
-const DEFAULT_SETTINGS = { pageSize: 50, portalLang: "auto", archiveOnRead: true, archiveCap: 300, arCentro: "", autoWildcard: true };
+const DEFAULT_SETTINGS = { pageSize: 50, portalLang: "auto", archiveOnRead: true, archiveCap: 300, arCentro: "", autoWildcard: true, theme: "dark" };
 
 function portalLang(settings, touchLang) {
   const chosen = settings && settings.portalLang;
@@ -102,6 +102,8 @@ const S = {
   connected: null,
   arConnected: null,
   job: null,
+  updater: null,
+  updateBarDismissed: false,
   settings: { ...DEFAULT_SETTINGS },
 };
 const ui = { openSections: {}, statusDetail: false, showInternal: true, newestFirst: false, readerSearch: "", showFilters: true };
@@ -138,6 +140,13 @@ const ctx = {
   toggleFavorite,
   saveUi,
   saveSettings,
+  setTheme,
+  toggleTheme,
+  getUpdateStatus,
+  checkUpdates,
+  applyUpdate,
+  saveUpdaterConfig,
+  reloadExtension,
   reloadCalibration,
   refreshArchiveCount,
   storicoSetFilter,
@@ -2657,7 +2666,7 @@ async function exportCsv() {
       cols = [
         ["Numero", (r) => ticketNumber(r.id)], ["Oggetto", (r) => r.subject], ["Stato", (r) => statusInfo(r.statusId, r.statusText).label],
         ["Tipo", (r) => r.typeText], ["Priorità", (r) => r.priorityText], ["Cliente", (r) => r.account], ["Codice cliente", (r) => r.customerCode],
-        ["Contatto", (r) => r.contact], ["Gruppo", (r) => r.ownerGroup], ["Assegnato a", (r) => r.assigned], ["Responsabile", (r) => r.ownerUser],
+        ["Contatto", (r) => r.contact], ["Gruppo owner", (r) => r.ownerGroup], ["Assegnato a", (r) => r.assigned], ["Owner del ticket", (r) => r.ownerUser],
         ["Prodotto", (r) => r.catalog], ["Classificazione", (r) => r.classCli], ["Aperto il", (r) => fmtDateTime(r.date)], ["Ultimo aggiornamento", (r) => fmtDateTime(r.lastChange)],
       ];
     }
@@ -2759,6 +2768,173 @@ function onKey(e) {
   else if (e.key === "Enter" && t.classList && t.classList.contains("item")) t.click();
 }
 
+// ---------------------------------------------------------------- tema scuro / chiaro (blu)
+
+function applyTheme(theme) {
+  const mode = theme === "light" ? "light" : "dark";
+  document.documentElement.dataset.theme = mode;
+  try { localStorage.setItem("ricerca_tkt_theme", mode); } catch { /* */ }
+  const isLight = mode === "light";
+  const nextLabel = isLight ? "Tema scuro" : "Tema chiaro";
+  const icoName = isLight ? "moon" : "sun";
+  for (const id of ["#themeBtn", "#soloThemeBtn"]) {
+    const btn = $(id);
+    if (!btn) continue;
+    clear(btn);
+    btn.appendChild(icon(icoName));
+    btn.appendChild(h("span", null, nextLabel));
+    btn.title = isLight ? "Passa al tema scuro (blu notte)" : "Passa al tema chiaro (bianco e blu)";
+  }
+}
+
+async function setTheme(theme) {
+  const mode = theme === "light" ? "light" : "dark";
+  applyTheme(mode);
+  await saveSettings({ theme: mode });
+}
+
+async function toggleTheme() {
+  const next = (S.settings.theme || document.documentElement.dataset.theme || "dark") === "light" ? "dark" : "light";
+  await setTheme(next);
+}
+
+// ---------------------------------------------------------------- aggiornamenti automatici
+
+function bgMsg(msg) {
+  if (!inExtension) return Promise.resolve(null);
+  return new Promise((resolve, reject) => {
+    chrome.runtime.sendMessage(msg, (resp) => {
+      const err = chrome.runtime.lastError;
+      if (err) reject(new Error(err.message));
+      else resolve(resp);
+    });
+  });
+}
+
+function renderUpdateChrome() {
+  const st = S.updater;
+  const verEl = $("#navVer");
+  const diagBtn = $("#diagBtn");
+  const bar = $("#updateBar");
+  const lc = st && st.lastCheck;
+  const hasUpd = !!(lc && lc.status === "update_available");
+
+  if (verEl) {
+    const curVer = (st && st.currentVersion) || (inExtension ? chrome.runtime.getManifest().version : "5.1.0");
+    verEl.textContent = hasUpd ? `↑ v${lc.remoteVersion}` : `v${curVer}`;
+  }
+  if (diagBtn) diagBtn.classList.toggle("has-update", hasUpd);
+
+  if (!bar) return;
+  if (!hasUpd || S.updateBarDismissed || S.solo) {
+    bar.hidden = true;
+    clear(bar);
+    return;
+  }
+  clear(bar);
+  const helperReady = !!(st.helper && st.helper.available);
+  const msg = h("div", { class: "upd-msg" },
+    h("b", null, `Nuova versione disponibile: v${lc.remoteVersion}`),
+    lc.commitMessage ? ` — ${lc.commitMessage}` : "");
+  const actions = h("div", { class: "upd-actions" });
+  if (helperReady) {
+    const btn = h("button", {
+      type: "button",
+      class: "btn btn-small btn-primary",
+      onclick: async () => {
+        btn.disabled = true;
+        btn.textContent = "Aggiornamento…";
+        try {
+          const r = await applyUpdate();
+          if (r && r.ok) toast(`Aggiornata alla v${r.version}! Riavvio automatico…`, "ok", 5000);
+          else {
+            toast((r && r.error) || "Aggiornamento non riuscito", "err", 6000);
+            btn.disabled = false;
+            btn.textContent = "Aggiorna ora";
+          }
+        } catch (e) {
+          toast("Errore aggiornamento: " + e.message, "err", 5000);
+          btn.disabled = false;
+          btn.textContent = "Aggiorna ora";
+        }
+      },
+    }, icon("download"), "Aggiorna ora");
+    actions.appendChild(btn);
+  } else {
+    actions.appendChild(
+      h("button", { type: "button", class: "btn btn-small btn-primary", onclick: () => openDiag(ctx, { focusUpdates: true }) },
+        icon("update"), "Attiva aggiornamento automatico"),
+    );
+  }
+  actions.appendChild(
+    h("button", { type: "button", class: "btn btn-small btn-icon btn-subtle", title: "Nascondi avviso", onclick: () => { S.updateBarDismissed = true; renderUpdateChrome(); } }, icon("close")),
+  );
+  bar.appendChild(msg);
+  bar.appendChild(actions);
+  bar.hidden = false;
+}
+
+async function getUpdateStatus(pingHelper = false) {
+  if (!inExtension) return null;
+  const st = await bgMsg({ type: "updater:status", pingHelper });
+  if (st && !st.error) {
+    S.updater = st;
+    renderUpdateChrome();
+  }
+  return st;
+}
+
+async function checkUpdates(autoApply = false) {
+  if (!inExtension) return null;
+  const st = await bgMsg({ type: "updater:check", autoApply });
+  if (st && !st.error) {
+    S.updater = st;
+    S.updateBarDismissed = false;
+    renderUpdateChrome();
+  }
+  return st;
+}
+
+async function applyUpdate() {
+  if (!inExtension) return { ok: false, error: "Disponibile solo nell'estensione." };
+  return bgMsg({ type: "updater:apply", reopenApp: true });
+}
+
+async function saveUpdaterConfig(config) {
+  if (!inExtension) return null;
+  const st = await bgMsg({ type: "updater:set-config", config });
+  if (st && !st.error) {
+    S.updater = st;
+    renderUpdateChrome();
+  }
+  return st;
+}
+
+async function reloadExtension() {
+  if (!inExtension) return;
+  toast("Ricarico l'estensione…", "info", 2000);
+  await bgMsg({ type: "updater:reload" });
+}
+
+async function initUpdates() {
+  renderUpdateChrome();
+  if (!inExtension) return;
+  try {
+    const just = await bgMsg({ type: "updater:consume-just-updated" });
+    if (just && just.to) {
+      toast(`Ricerca TKT aggiornata automaticamente alla v${just.to}!`, "ok", 5500);
+      log(`aggiornamento completato: v${just.from} → v${just.to}`);
+    }
+    const st = await getUpdateStatus(false);
+    const stale = !st || !st.lastCheck || !st.lastCheck.checkedAt || Date.now() - st.lastCheck.checkedAt > 3600_000;
+    if (st && st.config && st.config.autoCheck !== false && stale) {
+      checkUpdates(false).catch(() => {});
+    }
+  } catch (e) {
+    log("updater: " + e.message);
+  }
+}
+
 // ---------------------------------------------------------------- avvio
 
 async function init() {
@@ -2769,6 +2945,7 @@ async function init() {
   ]);
   if (stLookups) S.stLookups = { groups: stLookups.groups || {}, operators: stLookups.operators || {}, clients: stLookups.clients || {} };
   Object.assign(S.settings, settings || {});
+  applyTheme(S.settings.theme);
   Object.assign(ui, savedUi || {});
   ui.openSections = ui.openSections || {};
   if (sort && SORTS[sort.key]) S.sort = sort;
@@ -2798,6 +2975,10 @@ async function init() {
   refreshArchiveCount();
 
   onKvChange((ch) => {
+    if (ch.settings && ch.settings.newValue && ch.settings.newValue.theme) {
+      S.settings.theme = ch.settings.newValue.theme;
+      applyTheme(S.settings.theme);
+    }
     if (ch.touchLang && ch.touchLang.newValue) {
       const l = portalLang(S.settings, ch.touchLang.newValue);
       if (l !== hda.lang) hda.setLang(l);
@@ -2814,6 +2995,7 @@ async function init() {
   syncSearchBoxes();
   renderSidebar(ctx);
   renderAll();
+  initUpdates();
 
   // Barra ricerca principale (NON cerca mai nelle FAQ)
   const onSearchInput = debounce(() => {
@@ -2857,6 +3039,9 @@ async function init() {
   $("#filterToggle").addEventListener("click", toggleFilters);
   $("#conn").addEventListener("click", () => { if (S.connected === false) openTouchHome(); });
   $("#arConn").addEventListener("click", () => openArHome());
+  $("#themeBtn").addEventListener("click", toggleTheme);
+  const soloThemeBtn = $("#soloThemeBtn");
+  if (soloThemeBtn) soloThemeBtn.addEventListener("click", toggleTheme);
   $("#diagBtn").addEventListener("click", () => openDiag(ctx));
   const soloDiagBtn = $("#soloDiagBtn");
   if (soloDiagBtn) soloDiagBtn.addEventListener("click", () => openDiag(ctx));

@@ -423,9 +423,9 @@ function facts(row, ticket, extraFacts = []) {
   const F = [
     ["Cliente", [row.account, row.customerCode ? `(cod. ${row.customerCode})` : ""].filter(Boolean).join(" ")],
     ["Contatto", [row.contact, t.TKMAILTO ? `‹${t.TKMAILTO}›` : ""].filter(Boolean).join(" ")],
-    ["Gruppo", row.ownerGroup],
+    ["Gruppo owner", row.ownerGroup],
     ["Assegnato a", row.assigned],
-    ["Responsabile", row.ownerUser],
+    ["Owner del ticket", row.ownerUser],
     ["Prodotto", t.CTITMDESC || row.catalog],
     ["Classificazione", row.classCli],
     ["Priorità", row.priorityText || (row.source === "storico" ? row.priority : "")],

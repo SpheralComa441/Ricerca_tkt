@@ -1,26 +1,34 @@
-# Ricerca TKT — Estensione Chrome / Edge (v5.0)
+# Ricerca TKT — Estensione Chrome / Edge (v5.1)
 
-Applicazione dedicata in una scheda del browser per cercare e leggere **ticket**, **Knowledge Base** e **FAQ** di **HDA TOUCH** (`https://zucchetti.support/HDAPortal/`) — più Vecchio Cruscotto e Storico dell'Area Riservata — con un'interfaccia Helpdesk scura (blu notte / nero con accenti blu) senza toccare i componenti ExtJS della pagina.
+Applicazione dedicata in una scheda del browser per cercare e leggere **ticket**, **Knowledge Base** e **FAQ** di **HDA TOUCH** (`https://zucchetti.support/HDAPortal/`) — più Vecchio Cruscotto e Storico dell'Area Riservata — con interfaccia Helpdesk in **tema scuro (blu notte)** o **tema chiaro (bianco e blu)** intercambiabile con un clic, e **aggiornamenti automatici**.
 
 Parla in **sola lettura** con gli stessi servizi dati che usa l'interfaccia di Touch (`WSCView/ListData`, `WSCView/List`, `WSCView/HTMLPreview`, `WSC/Projection`, `WSCView/GetStaticList`, `WSCView/GetStaticSimpleList`, `WSCView/TreeData`), usando la sessione già aperta nel browser. Non chiama mai `Detail`, `DoLockObject`, `Save`, `Delete` o `Close`: leggere un ticket, un articolo KB o una FAQ qui **non blocca mai il record** in Touch per gli altri operatori.
 
 ## Installazione (Chrome o Edge, nessuna compilazione)
 
-1. Scarica o aggiorna questa cartella sul PC.
+1. Scarica o clona questa cartella sul PC.
 2. Apri `chrome://extensions` (oppure `edge://extensions` su Edge).
 3. Attiva **Modalità sviluppatore** (in alto a destra su Chrome, a sinistra su Edge).
 4. Premi **Carica estensione non pacchettizzata** (*Load unpacked*) e seleziona la cartella `extension`.
 5. Fissa l'icona **Ricerca TKT** nella barra del browser (oppure usa <kbd>Alt</kbd>+<kbd>Maiusc</kbd>+<kbd>T</kbd>).
 
-Dopo un aggiornamento del codice basta premere il pulsante **Ricarica** (↻) nella scheda dell'estensione su `chrome://extensions`.
+## Aggiornamenti automatici (senza più passare da GitHub)
+
+Per motivi di sicurezza Chrome ed Edge non permettono a un'estensione caricata da cartella locale di sovrascrivere da sola i propri file senza un piccolo helper locale autorizzato dall'utente. Per attivare gli aggiornamenti automatici **una volta per tutte** (senza permessi amministratore):
+
+1. Nella cartella scaricata di Ricerca TKT fai doppio clic una sola volta su `updater\attiva_autoaggiornamento.bat`.
+2. Lo script rileva automaticamente l'ID dell'estensione su Edge e Chrome e registra l'helper `it.ricercatkt.updater` solo nel registro utente (`HKCU`).
+3. Da quel momento Ricerca TKT controlla da sola il branch `main` ogni 4 ore (sfruttando la sessione GitHub già aperta nel browser, oppure un token GitHub opzionale in sola lettura impostabile in *Diagnostica → Aggiornamenti automatici*): quando esce una nuova versione la scarica, aggiorna i file e ricarica l'estensione da sola, oppure puoi avviarla con un clic dal banner **Aggiorna ora** senza aprire GitHub né `edge://extensions`.
+
+Per disattivare l'helper locale in qualsiasi momento esegui `updater\disattiva_autoaggiornamento.bat`.
 
 ## Uso
 
 1. Apri `https://zucchetti.support/HDAPortal/` ed esegui l'accesso normalmente.
-2. Clicca l'icona **Ricerca TKT**: si apre la scheda dell'applicazione con la barra di navigazione sinistra (**Fonti**), la colonna **Filtri** (aperta di default e richiudibile con il tasto **Filtri**), l'area **Risultati** con schede sottolineate (*Risultati · Archivio locale · Preferiti · Recenti*) e, a destra, il pannello **Attività recente** che lascia spazio al **Lettore** quando apri un elemento.
+2. Clicca l'icona **Ricerca TKT**: si apre la scheda dell'applicazione con la barra di navigazione sinistra (**Fonti**, pulsante **Tema chiaro / Tema scuro** e **Diagnostica**), la colonna **Filtri** (aperta di default e richiudibile con il tasto **Filtri**), l'area **Risultati** con schede sottolineate (*Risultati · Archivio locale · Preferiti · Recenti*) e, a destra, il pannello **Attività recente** che lascia spazio al **Lettore** quando apri un elemento.
 3. **Filtri (HDA Touch)**:
    - **Stato**: tre pulsanti chiari (**Aperti**, **In attesa**, **Chiusi**) più *Scegli i singoli stati* con tutti i 32 stati di Touch in italiano. Nessuno scelto = **tutti gli stati** (compresi i chiusi, che Touch di solito nasconde).
-   - **Gruppi e persone**: *Gruppo di lavoro*, *Assegnato a* (operatore o gruppo, con scelta rapida **Solo i miei**), *Responsabile*, *Ultima modifica di*, con suggerimenti immediati e scelta multipla a "gettoni".
+   - **Gruppi e persone**: *Gruppo di lavoro (Gruppo owner)*, *Assegnato a (in carico ora)* (chi ha in lavorazione il ticket adesso, operatore o gruppo, con scelta rapida **Solo i miei**), *Owner del ticket (titolare)* (l'operatore *Owner* in Touch, che può differire da *Assegnato a* se il ticket è stato girato), *Modificato da*, con suggerimenti immediati e scelta multipla a "gettoni".
    - **Cliente e prodotto**: *Cliente* (per ragione sociale o codice), *Prodotto*, *Classificazione cliente*.
    - **Date**: *Aperto (dal – al)* e *Ultimo aggiornamento (dal – al)* con scelte rapide (*7 giorni*, *30 giorni*, *12 mesi*, *Quest'anno*, *Anno scorso*).
    - **Testo, tipo e priorità**: barra principale (numero ticket o parole), *L'oggetto contiene*, *Tag*, *Tipo di ticket*, *Priorità*.
