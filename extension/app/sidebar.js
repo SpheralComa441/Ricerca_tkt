@@ -129,28 +129,16 @@ function liveTextInput(value, placeholder, onApply, { delay = 500, inputmode = n
 
 const okDay = (v) => !v || /^(19[89]\d|20\d\d)-\d\d-\d\d$/.test(v);
 
-function dateRangeGeneric(f, kFrom, kTo, onSet, presets = true) {
-  const a = h("input", { class: "input", type: "date", value: f[kFrom] || "", "aria-label": "dal" });
-  const b = h("input", { class: "input", type: "date", value: f[kTo] || "", "aria-label": "al" });
-  a.addEventListener("change", () => okDay(a.value) && a.value !== (f[kFrom] || "") && onSet({ [kFrom]: a.value }));
-  b.addEventListener("change", () => okDay(b.value) && b.value !== (f[kTo] || "") && onSet({ [kTo]: b.value }));
+function standardDatePresets() {
   const now = new Date();
-  const P = {
-    "7 giorni": () => [isoDay(new Date(now.getTime() - 7 * 864e5)), ""],
-    "30 giorni": () => [isoDay(new Date(now.getTime() - 30 * 864e5)), ""],
-    "12 mesi": () => [isoDay(new Date(now.getFullYear() - 1, now.getMonth(), now.getDate())), ""],
-    "Quest'anno": () => [`${now.getFullYear()}-01-01`, ""],
-    "Anno scorso": () => [`${now.getFullYear() - 1}-01-01`, `${now.getFullYear() - 1}-12-31`],
-  };
-  return h("div", null,
-    h("div", { class: "row2" }, a, b),
-    presets ? h("div", { class: "presets" },
-      Object.entries(P).map(([name, fn]) => h("button", { type: "button", class: "preset", onclick: () => { const [x, y] = fn(); onSet({ [kFrom]: x, [kTo]: y }); } }, name)),
-      f[kFrom] || f[kTo] ? h("button", { type: "button", class: "preset", onclick: () => onSet({ [kFrom]: "", [kTo]: "" }) }, "Qualsiasi") : null) : null);
-}
-
-function dateRange(ctx, kFrom, kTo, presets) {
-  return dateRangeGeneric(ctx.S.filters, kFrom, kTo, (obj) => ctx.setFilters(obj), presets);
+  const y = now.getFullYear();
+  return [
+    ["7 giorni", isoDay(new Date(now.getTime() - 7 * 864e5)), ""],
+    ["30 giorni", isoDay(new Date(now.getTime() - 30 * 864e5)), ""],
+    ["12 mesi", isoDay(new Date(y - 1, now.getMonth(), now.getDate())), ""],
+    ["Quest'anno", `${y}-01-01`, ""],
+    ["Anno scorso", `${y - 1}-01-01`, `${y - 1}-12-31`],
+  ];
 }
 
 function multiPills(selected, options, onChange) {
@@ -229,14 +217,14 @@ function uncertain(ctx, key) {
   return null;
 }
 
-/** Filtri della scheda Storico: quelli della Ricerca avanzata dell'Area Riservata (che non cerca per parole). */
+/** Filtri della scheda Ricerca avanzata (Area Riservata — archivio completo, non cerca per parole). */
 function renderStoricoSidebar(ctx) {
   const f = ctx.S.storico.filters;
   const el = clear(document.getElementById("sidebar"));
   el.dataset.source = "storico";
-  el.appendChild(h("div", { class: "side-head" }, h("h2", null, "Filtri Storico"), h("button", { class: "linkbtn", onclick: () => ctx.storicoReset() }, "Azzera tutto")));
+  el.appendChild(h("div", { class: "side-head" }, h("h2", null, "Filtri Ricerca avanzata"), h("button", { class: "linkbtn", onclick: () => ctx.storicoReset() }, "Azzera tutto")));
   el.appendChild(h("div", { class: "side-note src-storico" },
-    "Ricerca avanzata dell'Area Riservata: contiene tutti i ticket storici, anche prima del 2024. Non cerca per parole."));
+    "Ricerca avanzata dell'Area Riservata: contiene tutti i ticket storici, anche prima del 2024. Non cerca per parole; scegli il periodo nella barra sopra i risultati."));
 
   const text = (key, placeholder, clean = (v) => v.trim()) => {
     const inp = h("input", { class: "input", type: "text", inputmode: key === "number" || key === "clientCode" ? "numeric" : null, value: f[key] || "", placeholder });
@@ -245,29 +233,10 @@ function renderStoricoSidebar(ctx) {
     inp.addEventListener("keydown", (e) => e.key === "Enter" && (e.preventDefault(), apply()));
     return inp;
   };
-  const day = (key, label) => {
-    const inp = h("input", { class: "input", type: "date", value: f[key] || "", "aria-label": label });
-    inp.addEventListener("change", () => okDay(inp.value) && inp.value !== (f[key] || "") && ctx.storicoSetFilter(key, inp.value));
-    return inp;
-  };
-  const year = new Date().getFullYear();
-  const presets = [
-    ["Fino al 2023", { dateFrom: "", dateTo: "2023-12-31" }],
-    ...[2023, 2022, 2021, 2020].map((y) => [String(y), { dateFrom: `${y}-01-01`, dateTo: `${y}-12-31` }]),
-    ["Tutti gli anni", { dateFrom: "", dateTo: `${year}-12-31` }],
-  ];
   const one = (v) => (v ? [v] : []);
 
   el.appendChild(h("div", { class: "fbody plain" },
     field("Numero ticket", text("number", "es. 5123456", (v) => v.replace(/\D/g, ""))),
-    field("Periodo (dal – al)",
-      h("div", null,
-        h("div", { class: "row2" }, day("dateFrom", "dal"), day("dateTo", "al")),
-        h("div", { class: "presets" }, presets.map(([name, val]) =>
-          h("button", { type: "button", class: "preset" + (f.dateFrom === val.dateFrom && f.dateTo === val.dateTo ? " on" : ""), onclick: () => ctx.storicoSetFilter(val) }, name))))),
-    field("Il periodo si riferisce a", h("div", { class: "seg" },
-      [["1", "Ultimo aggiornamento"], ["2", "Apertura"]].map(([v, name]) =>
-        h("button", { type: "button", class: "preset" + ((f.dateRef || "1") === v ? " on" : ""), onclick: () => (f.dateRef || "1") !== v && ctx.storicoSetFilter("dateRef", v) }, name)))),
     field("Stato", h("div", { class: "seg" },
       [["", "Tutti"], ["A", "Aperti"], ["C", "Chiusi"]].map(([v, name]) =>
         h("button", { type: "button", class: "preset" + ((f.statoBase || "") === v ? " on" : ""), onclick: () => (f.statoBase || "") !== v && ctx.storicoSetFilter("statoBase", v) }, name)))),
@@ -283,7 +252,7 @@ function renderStoricoSidebar(ctx) {
       placeholder: "Nome operatore…",
       onChange: (v) => ctx.storicoSetFilter("operator", v[v.length - 1] || null),
       search: (q) => ctx.storicoLookup("operators", q),
-    }), "Operatori già comparsi nei risultati dello Storico.")));
+    }), "Operatori già comparsi nei risultati di Ricerca avanzata.")));
 }
 
 /** Filtri della scheda Vecchio Cruscotto: quelli della «Ricerca rapida» dell'Area Riservata. */
@@ -293,23 +262,8 @@ function renderArSidebar(ctx) {
   el.dataset.source = "ar";
   el.appendChild(h("div", { class: "side-head" }, h("h2", null, "Filtri Vecchio Cruscotto"), h("button", { class: "linkbtn", onclick: () => ctx.arReset() }, "Azzera tutto")));
   el.appendChild(h("div", { class: "side-note src-ar" },
-    "Filtri della Ricerca rapida dell'Area Riservata. Le parole si scrivono nella barra in alto; si può cercare anche solo con i filtri."));
+    "Filtri della Ricerca rapida dell'Area Riservata. Le parole si scrivono nella barra in alto e il periodo nella barra sopra i risultati."));
 
-  const day = (key, label) => {
-    const inp = h("input", { class: "input", type: "date", value: f[key] || "", "aria-label": label });
-    inp.addEventListener("change", () => okDay(inp.value) && inp.value !== (f[key] || "") && ctx.arSetFilter(key, inp.value));
-    return inp;
-  };
-  const p2 = (n) => String(n).padStart(2, "0");
-  const iso = (d) => `${d.getFullYear()}-${p2(d.getMonth() + 1)}-${p2(d.getDate())}`;
-  const now = new Date();
-  const y = now.getFullYear();
-  const presets = [
-    ["Ultimi 3 mesi", { dateFrom: iso(new Date(y, now.getMonth() - 2, 1)), dateTo: iso(new Date(y, now.getMonth() + 1, 0)) }],
-    [String(y), { dateFrom: `${y}-01-01`, dateTo: `${y}-12-31` }],
-    [String(y - 1), { dateFrom: `${y - 1}-01-01`, dateTo: `${y - 1}-12-31` }],
-    ["Tutto", { dateFrom: "", dateTo: "" }],
-  ];
   const seg = (key, options, def) => h("div", { class: "seg" },
     options.map(([v, name]) => h("button", { type: "button", class: "preset" + ((f[key] || def) === v ? " on" : ""), onclick: () => (f[key] || def) !== v && ctx.arSetFilter(key, v) }, name)));
   const one = (v) => (v ? [v] : []);
@@ -331,13 +285,6 @@ function renderArSidebar(ctx) {
   client.addEventListener("keydown", (e) => e.key === "Enter" && (e.preventDefault(), applyClient()));
 
   el.appendChild(h("div", { class: "fbody plain" },
-    field("Periodo (dal – al)",
-      h("div", null,
-        h("div", { class: "row2" }, day("dateFrom", "dal"), day("dateTo", "al")),
-        h("div", { class: "presets" }, presets.map(([name, val]) =>
-          h("button", { type: "button", class: "preset" + (f.dateFrom === val.dateFrom && f.dateTo === val.dateTo ? " on" : ""), onclick: () => ctx.arSetFilter(val) }, name)))),
-      "Il portale ragiona a mesi interi. Limite: 210 ticket per ricerca (espandibile con «Cerca tutti»)."),
-    field("Il periodo si riferisce a", seg("dateRef", [["1", "Ultimo aggiornamento"], ["2", "Apertura"]], "1")),
     field("Stato", seg("statoBase", [["", "Tutti"], ["A", "Aperti"], ["C", "Chiusi"]], "")),
     field("Gruppo in carico", groupField("group", "groupLabel", "es. Paghe Infinity…")),
     field("Operatore in carico", operatorField("operator")),
@@ -406,10 +353,6 @@ function renderKbSidebar(ctx) {
     field("Codice articolo", liveTextInput(f.code, "es. KB25631HR", (v) => ctx.kbSetFilter("code", v))),
     field("Lingua", multiPills(f.languages, kbLanguages.slice(0, 8), (v) => ctx.kbSetFilter("languages", v))),
   ], ctx));
-
-  el.appendChild(section("kbDates", "Data creazione", n("dateFrom", "dateTo"), ui.openSections.kbDates ?? false, [
-    field("Creato (dal – al)", dateRangeGeneric(f, "dateFrom", "dateTo", (obj) => ctx.kbSetFilter(obj), true)),
-  ], ctx));
 }
 
 /** Filtri della scheda FAQ (HD Touch — Faqs; Categoria e Tags omessi perché non funzionanti in Touch). */
@@ -456,14 +399,6 @@ function renderFaqSidebar(ctx) {
       inp.addEventListener("change", () => { apply.cancel(); ctx.faqSetFilter("importance", inp.value.trim()); });
       return inp;
     })()),
-  ], ctx));
-
-  const statusDateInp = h("input", { class: "input", type: "date", value: f.statusDateFrom || "", "aria-label": "Data cambio stato da" });
-  statusDateInp.addEventListener("change", () => okDay(statusDateInp.value) && statusDateInp.value !== (f.statusDateFrom || "") && ctx.faqSetFilter("statusDateFrom", statusDateInp.value));
-
-  el.appendChild(section("faqDates", "Date", n("dateFrom", "dateTo", "statusDateFrom"), ui.openSections.faqDates ?? false, [
-    field("Data creazione (dal – al)", dateRangeGeneric(f, "dateFrom", "dateTo", (obj) => ctx.faqSetFilter(obj), true)),
-    field("Data cambio stato (da)", statusDateInp),
   ], ctx));
 }
 
@@ -517,11 +452,6 @@ export function renderSidebar(ctx) {
     field("Classificazione cliente", textField(ctx, "classCli", "es. Pro, Infinity Business Partner"), uncertain(ctx, "classCli")),
   ], ctx));
 
-  el.appendChild(section("dates", "Date", n("dateFrom", "dateTo", "updFrom", "updTo"), ui.openSections.dates ?? true, [
-    field("Aperto (dal – al)", dateRange(ctx, "dateFrom", "dateTo", true), uncertain(ctx, "dateFrom")),
-    field("Ultimo aggiornamento (dal – al)", dateRange(ctx, "updFrom", "updTo", true), uncertain(ctx, "updFrom")),
-  ], ctx));
-
   const types = { ...(S.typesSeen || {}) };
   for (const id of f.types) if (!types[id]) types[id] = id;
   const typeEntries = Object.entries(types).sort((a, b) => a[1].localeCompare(b[1]));
@@ -546,5 +476,149 @@ export function renderSidebar(ctx) {
       })),
       f.touch.length ? h("button", { class: "linkbtn", onclick: () => ctx.setFilter("touch", []) }, "Togli i filtri di Touch") : null,
     ], ctx));
+  }
+}
+
+/** Barra compatta dei filtri Date posizionata subito sopra l'elenco dei risultati per ogni fonte. */
+export function renderDateBar(ctx) {
+  const el = document.getElementById("dateBar");
+  if (!el) return;
+  const { S, ui } = ctx;
+  if (S.solo || S.view !== "results") {
+    el.hidden = true;
+    clear(el);
+    return;
+  }
+
+  clear(el);
+  el.hidden = false;
+  el.dataset.source = S.source;
+
+  const makeDayInput = (val, label, onVal) => {
+    const inp = h("input", { class: "input db-date", type: "date", value: val || "", "aria-label": label, title: label });
+    inp.addEventListener("change", () => okDay(inp.value) && inp.value !== (val || "") && onVal(inp.value));
+    return inp;
+  };
+
+  const makeRangeControls = (fromVal, toVal, onSet, presets, { showClear = true, clearLabel = "Qualsiasi" } = {}) => {
+    const inputs = h("div", { class: "db-range" },
+      makeDayInput(fromVal, "Dal", (v) => onSet(v, toVal)),
+      h("span", { class: "db-dash", "aria-hidden": "true" }, "–"),
+      makeDayInput(toVal, "Al", (v) => onSet(fromVal, v)));
+    const pills = h("div", { class: "db-presets" },
+      presets.map(([name, a, b]) => {
+        const active = (fromVal || "") === (a || "") && (toVal || "") === (b || "");
+        return h("button", { type: "button", class: "preset" + (active ? " on" : ""), onclick: () => onSet(a, b) }, name);
+      }),
+      showClear && (fromVal || toVal)
+        ? h("button", { type: "button", class: "preset db-clear", title: "Rimuovi filtro data", onclick: () => onSet("", "") }, clearLabel)
+        : null);
+    return [inputs, pills];
+  };
+
+  if (S.source === "touch") {
+    const f = S.filters;
+    const mode = ui.touchDateMode === "updated" ? "updated" : "open";
+    const hasOpen = !!(f.dateFrom || f.dateTo);
+    const hasUpd = !!(f.updFrom || f.updTo);
+    const kFrom = mode === "updated" ? "updFrom" : "dateFrom";
+    const kTo = mode === "updated" ? "updTo" : "dateTo";
+    const seg = h("div", { class: "db-seg", role: "group", "aria-label": "Campo data HDA Touch" },
+      h("button", {
+        type: "button",
+        class: "db-seg-btn" + (mode === "open" ? " on" : ""),
+        onclick: () => { ui.touchDateMode = "open"; renderDateBar(ctx); },
+      }, "Aperto", hasOpen ? h("span", { class: "db-dot", title: "Filtro attivo su Aperto" }) : null),
+      h("button", {
+        type: "button",
+        class: "db-seg-btn" + (mode === "updated" ? " on" : ""),
+        onclick: () => { ui.touchDateMode = "updated"; renderDateBar(ctx); },
+      }, "Aggiornato", hasUpd ? h("span", { class: "db-dot", title: "Filtro attivo su Ultimo aggiornamento" }) : null));
+    const [inputs, pills] = makeRangeControls(
+      f[kFrom],
+      f[kTo],
+      (a, b) => ctx.setFilters({ [kFrom]: a, [kTo]: b }),
+      standardDatePresets(),
+    );
+    el.append(h("span", { class: "db-lbl" }, icon("calendar")), seg, inputs, pills);
+    return;
+  }
+
+  if (S.source === "ar") {
+    const f = S.arS.filters;
+    const now = new Date();
+    const y = now.getFullYear();
+    const p2 = (n) => String(n).padStart(2, "0");
+    const iso = (d) => `${d.getFullYear()}-${p2(d.getMonth() + 1)}-${p2(d.getDate())}`;
+    const presets = [
+      ["Ultimi 3 mesi", iso(new Date(y, now.getMonth() - 2, 1)), iso(new Date(y, now.getMonth() + 1, 0))],
+      [String(y), `${y}-01-01`, `${y}-12-31`],
+      [String(y - 1), `${y - 1}-01-01`, `${y - 1}-12-31`],
+      ["Tutto", "", ""],
+    ];
+    const ref = f.dateRef || "1";
+    const seg = h("div", { class: "db-seg", role: "group", "aria-label": "Riferimento periodo" },
+      [["1", "Ultimo aggiornamento"], ["2", "Apertura"]].map(([v, name]) =>
+        h("button", { type: "button", class: "db-seg-btn" + (ref === v ? " on" : ""), onclick: () => ref !== v && ctx.arSetFilter("dateRef", v) }, name)));
+    const [inputs, pills] = makeRangeControls(
+      f.dateFrom,
+      f.dateTo,
+      (a, b) => ctx.arSetFilter({ dateFrom: a, dateTo: b }),
+      presets,
+      { showClear: false },
+    );
+    el.append(h("span", { class: "db-lbl", title: "Il portale ragiona a mesi interi" }, icon("calendar")), seg, inputs, pills);
+    return;
+  }
+
+  if (S.source === "storico") {
+    const f = S.storico.filters;
+    const year = new Date().getFullYear();
+    const presets = [
+      ["Fino al 2023", "", "2023-12-31"],
+      ...[2023, 2022, 2021, 2020].map((y) => [String(y), `${y}-01-01`, `${y}-12-31`]),
+      ["Tutti gli anni", "", `${year}-12-31`],
+    ];
+    const ref = f.dateRef || "1";
+    const seg = h("div", { class: "db-seg", role: "group", "aria-label": "Riferimento periodo" },
+      [["1", "Ultimo aggiornamento"], ["2", "Apertura"]].map(([v, name]) =>
+        h("button", { type: "button", class: "db-seg-btn" + (ref === v ? " on" : ""), onclick: () => ref !== v && ctx.storicoSetFilter("dateRef", v) }, name)));
+    const [inputs, pills] = makeRangeControls(
+      f.dateFrom,
+      f.dateTo,
+      (a, b) => ctx.storicoSetFilter({ dateFrom: a, dateTo: b }),
+      presets,
+      { showClear: false },
+    );
+    el.append(h("span", { class: "db-lbl" }, icon("calendar")), seg, inputs, pills);
+    return;
+  }
+
+  if (S.source === "kb") {
+    const f = S.kbS.filters;
+    const [inputs, pills] = makeRangeControls(
+      f.dateFrom,
+      f.dateTo,
+      (a, b) => ctx.kbSetFilter({ dateFrom: a, dateTo: b }),
+      standardDatePresets(),
+    );
+    el.append(h("span", { class: "db-lbl" }, icon("calendar"), h("span", null, "Creato")), inputs, pills);
+    return;
+  }
+
+  if (S.source === "faq") {
+    const f = S.faqS.filters;
+    const [inputs, pills] = makeRangeControls(
+      f.dateFrom,
+      f.dateTo,
+      (a, b) => ctx.faqSetFilter({ dateFrom: a, dateTo: b }),
+      standardDatePresets(),
+    );
+    const statusDate = makeDayInput(f.statusDateFrom, "Data cambio stato da", (v) => ctx.faqSetFilter("statusDateFrom", v));
+    const statusGroup = h("div", { class: "db-extra" },
+      h("span", { class: "db-lbl" }, icon("calendar"), h("span", null, "Cambio stato da")),
+      statusDate,
+      f.statusDateFrom ? h("button", { type: "button", class: "preset db-clear", title: "Togli data cambio stato", onclick: () => ctx.faqSetFilter("statusDateFrom", "") }, "×") : null);
+    el.append(h("span", { class: "db-lbl" }, icon("calendar"), h("span", null, "Creata")), inputs, pills, statusGroup);
   }
 }

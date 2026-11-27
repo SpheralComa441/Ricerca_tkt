@@ -131,10 +131,10 @@ export async function checkRemoteUpdate({
           currentVersion,
           checkedAt,
           authMode,
-          error: "Token GitHub non valido o senza permessi in lettura sul repository Ricerca_tkt.",
+          error: "Accesso negato al server aggiornamenti.",
         };
       }
-      if (!mRes.ok) throw new Error(`GitHub API HTTP ${mRes.status}`);
+      if (!mRes.ok) throw new Error(`Server aggiornamenti HTTP ${mRes.status}`);
       manifestJson = await mRes.json();
       if (cRes && cRes.ok) {
         const cj = await cRes.json().catch(() => null);
@@ -156,7 +156,7 @@ export async function checkRemoteUpdate({
           currentVersion,
           checkedAt,
           authMode,
-          error: "Il repository è privato: accedi a GitHub in questo browser oppure inserisci un token in sola lettura nelle impostazioni.",
+          error: "Archivio aggiornamenti privato o temporaneamente non raggiungibile.",
         };
       }
       manifestJson = JSON.parse(mText);
@@ -197,7 +197,7 @@ export async function checkRemoteUpdate({
 }
 
 /**
- * Scarica l'archivio ZIP del branch `main` usando il token (se impostato) o la sessione browser GitHub,
+ * Scarica l'archivio ZIP dell'ultima versione disponibile,
  * verifica che sia uno ZIP autentico e restituisce i byte codificati in Base64.
  */
 export async function downloadRemoteZipBase64({ token = "", fetchImpl = globalThis.fetch } = {}) {
@@ -214,18 +214,14 @@ export async function downloadRemoteZipBase64({ token = "", fetchImpl = globalTh
     : await fetchImpl(ARCHIVE_ZIP_URL, { credentials: "include", cache: "no-store" });
 
   if (!res.ok || /github\.com\/login/i.test(String(res.url || ""))) {
-    const err = new Error(
-      cleanToken
-        ? `Download archivio rifiutato da GitHub (HTTP ${res.status}): verifica il token.`
-        : "Accesso a GitHub richiesto per scaricare l'aggiornamento (effettua l'accesso a GitHub in questo browser oppure imposta un token in sola lettura).",
-    );
+    const err = new Error(`Download aggiornamento non riuscito (HTTP ${res.status}).`);
     err.code = "AUTH_REQUIRED";
     throw err;
   }
 
   const buf = await res.arrayBuffer();
   if (!isValidZipBytes(buf)) {
-    const err = new Error("La risposta ricevuta da GitHub non è un archivio ZIP valido (sessione GitHub scaduta o non autenticata).");
+    const err = new Error("La risposta ricevuta non è un archivio ZIP valido.");
     err.code = "AUTH_REQUIRED";
     throw err;
   }

@@ -54,11 +54,11 @@ function updatesSection(ctx) {
     const hasUpd = lc && lc.status === "update_available";
 
     const statusPill = hasUpd
-      ? h("span", { class: "upd-pill accent" }, `Nuova versione: v${lc.remoteVersion}` + (lc.remoteShortSha ? ` (${lc.remoteShortSha})` : ""))
+      ? h("span", { class: "upd-pill accent" }, `Nuova versione: v${lc.remoteVersion}`)
       : lc && lc.status === "up_to_date"
         ? h("span", { class: "upd-pill ok" }, "Aggiornata")
         : lc && lc.status === "auth_required"
-          ? h("span", { class: "upd-pill warn" }, "Accesso GitHub richiesto")
+          ? h("span", { class: "upd-pill warn" }, "Server aggiornamenti non raggiungibile")
           : lc && lc.status === "error"
             ? h("span", { class: "upd-pill warn" }, "Controllo non riuscito")
             : h("span", { class: "upd-pill" }, "Non ancora controllata");
@@ -76,7 +76,7 @@ function updatesSection(ctx) {
 
     if (lc && lc.commitMessage) {
       box.appendChild(h("div", { class: "hint", style: { marginTop: "0" } },
-        `Ultimo aggiornamento su main: «${lc.commitMessage}»` + (lc.checkedAt ? ` · controllato ${new Date(lc.checkedAt).toLocaleString("it-IT")}` : "")));
+        `Ultimo aggiornamento disponibile: «${lc.commitMessage}»` + (lc.checkedAt ? ` · controllato ${new Date(lc.checkedAt).toLocaleString("it-IT")}` : "")));
     } else if (lc && lc.error) {
       box.appendChild(h("div", { class: "rd-note", style: { marginTop: "0" } }, lc.error));
     }
@@ -107,7 +107,7 @@ function updatesSection(ctx) {
       type: "button",
       class: "btn btn-small btn-primary",
       disabled: busy || !helper.available ? true : null,
-      title: helper.available ? "Scarica e applica subito l'ultima versione da main, poi riavvia l'estensione" : "Attiva prima l'helper locale (una sola volta)",
+      title: helper.available ? "Scarica e applica subito l'ultima versione, poi riavvia l'estensione" : "Attiva prima l'helper locale (una sola volta)",
       onclick: async () => {
         busy = true;
         applyBtn.disabled = true;
@@ -127,7 +127,7 @@ function updatesSection(ctx) {
           render(await ctx.getUpdateStatus(true));
         }
       },
-    }, icon("download"), hasUpd ? `Aggiorna a v${lc.remoteVersion}` : "Forza aggiornamento da main");
+    }, icon("download"), hasUpd ? `Aggiorna a v${lc.remoteVersion}` : "Reinstalla ultima versione");
 
     const reloadBtn = h("button", {
       type: "button",
@@ -153,7 +153,7 @@ function updatesSection(ctx) {
     box.appendChild(
       h("div", { style: { display: "grid", gap: "4px" } },
         h("label", { class: "check" }, autoCheckCb, "Controlla automaticamente nuovi aggiornamenti ogni 4 ore"),
-        h("label", { class: "check" }, autoApplyCb, "Installa automaticamente gli aggiornamenti senza dover passare da GitHub (richiede helper locale attivo)")),
+        h("label", { class: "check" }, autoApplyCb, "Installa automaticamente gli aggiornamenti in background (richiede helper locale attivo)")),
     );
 
     if (!helper.available) {
@@ -170,35 +170,6 @@ function updatesSection(ctx) {
     } else if (helper.installDir) {
       box.appendChild(h("div", { class: "hint", style: { marginTop: "0" } }, `Cartella aggiornata automaticamente: ${helper.installDir}`));
     }
-
-    // Token opzionale per repo privato senza login GitHub nel browser (es. colleghi)
-    const tokInp = h("input", {
-      class: "input",
-      type: "password",
-      placeholder: cfg.hasToken ? "Token salvato (scrivi per sostituire, vuoto per rimuovere)" : "github_pat_… (opzionale)",
-      autocomplete: "off",
-    });
-    const tokSave = h("button", {
-      type: "button",
-      class: "btn btn-small",
-      onclick: async () => {
-        await ctx.saveUpdaterConfig({ githubToken: tokInp.value.trim() });
-        tokInp.value = "";
-        toast("Impostazione token salvata", "ok", 1400);
-        render(await ctx.checkUpdates(false));
-      },
-    }, "Salva token");
-    box.appendChild(
-      h("details", { class: "fsec", style: { borderTop: "1px solid var(--line)", padding: "8px 0 0" } },
-        h("summary", { style: { fontSize: "12.5px" } }, icon("chevron"), "Token GitHub opzionale (non necessario su repository pubblico)"),
-        h("div", { class: "fbody", style: { gap: "8px" } },
-          h("div", { class: "hint", style: { marginTop: "0" } },
-            "Su repository pubblico gli aggiornamenti funzionano su qualsiasi PC senza login GitHub e senza token. Questo campo serve solo se un domani il repository torna privato su un PC non collegato a GitHub (Fine-Grained Token Contents: Read-only su Ricerca_tkt)."),
-          h("div", { class: "upd-row" },
-            h("div", { style: { flex: "1", minWidth: "220px" } }, tokInp),
-            tokSave,
-            cfg.hasToken ? h("button", { type: "button", class: "btn btn-small btn-subtle", onclick: async () => { await ctx.saveUpdaterConfig({ githubToken: "" }); toast("Token rimosso", "ok", 1400); render(await ctx.getUpdateStatus(false)); } }, "Rimuovi") : null))),
-    );
   }
 
   ctx.getUpdateStatus(true).then(render, (e) => render({ error: e.message }));
@@ -339,7 +310,7 @@ function centroField(ctx) {
     ctx.saveSettings();
   });
   return h("div", { class: "field" }, h("label", null, "Centro servizi dell'Area Riservata"), inp,
-    h("div", { class: "hint" }, "Serve al Vecchio Cruscotto e allo Storico per cercare solo tra i ticket del tuo centro. Vuoto = lo trova l'app" + (found ? ` (ora: ${found}).` : ".")));
+    h("div", { class: "hint" }, "Serve al Vecchio Cruscotto e a Ricerca avanzata per cercare solo tra i ticket del tuo centro. Vuoto = lo trova l'app" + (found ? ` (ora: ${found}).` : ".")));
 }
 
 function archiveSection(ctx) {

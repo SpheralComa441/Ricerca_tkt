@@ -5,7 +5,7 @@
 // il pannello Attività recente e il lettore unificato.
 
 import { h, clear, $, highlight, toast, icon } from "./dom.js";
-import { renderSidebar } from "./sidebar.js";
+import { renderSidebar, renderDateBar } from "./sidebar.js";
 import { renderReader, renderReaderLoading, renderReaderError } from "./reader.js";
 import { openDiag } from "./diag.js";
 import { makeTransport, AuthError, PORTAL_BASE } from "../lib/transport.js";
@@ -106,7 +106,7 @@ const S = {
   updateBarDismissed: false,
   settings: { ...DEFAULT_SETTINGS },
 };
-const ui = { openSections: {}, statusDetail: false, showInternal: true, newestFirst: false, readerSearch: "", showFilters: true };
+const ui = { openSections: {}, statusDetail: false, showInternal: true, newestFirst: false, readerSearch: "", showFilters: true, touchDateMode: "open" };
 const listFilters = { touch: "", ar: "", storico: "", kb: "", faq: "" };
 
 let transport, hda, ar, storico, kb, faq, lookups;
@@ -168,7 +168,7 @@ const ctx = {
 const SOURCES = {
   touch: { label: "HDA Touch", short: "T", ico: "ticket", subtitle: "Ticket di HDA TOUCH", title: "Ticket di HDA TOUCH" },
   ar: { label: "Vecchio Cruscotto", short: "VC", ico: "layers", subtitle: "Ricerca rapida Area Riservata", title: "Ticket del Vecchio Cruscotto (Area Riservata)" },
-  storico: { label: "Storico", short: "ST", ico: "history", subtitle: "Ricerca avanzata Area Riservata (anche pre-2024)", title: "Ricerca avanzata dell'Area Riservata (senza ricerca per parole)" },
+  storico: { label: "Ricerca avanzata", short: "RA", ico: "history", subtitle: "Area Riservata · archivio completo (anche pre-2024)", title: "Ricerca avanzata dell'Area Riservata (senza ricerca per parole)" },
   kb: { label: "Knowledge Base", short: "KB", ico: "book", subtitle: "Articoli Knowledge Base di HDA Touch", title: "Articoli Knowledge Base di HDA Touch" },
   faq: { label: "FAQ", short: "FQ", ico: "help", subtitle: "FAQ di HDA Touch (ricerca dedicata)", title: "FAQ di HDA Touch — ricerca dedicata su Domanda e Risposta" },
 };
@@ -284,7 +284,7 @@ function setArConn(state, text) {
   el.title =
     state === true
       ? "Vecchio Cruscotto (Area Riservata Zucchetti) collegato"
-      : "Clicca per aprire l'Area Riservata Zucchetti ed eseguire l'accesso (per Vecchio Cruscotto e Storico)";
+      : "Clicca per aprire l'Area Riservata Zucchetti ed eseguire l'accesso (per Vecchio Cruscotto e Ricerca avanzata)";
 }
 
 async function checkArConnection() {
@@ -984,14 +984,14 @@ async function search({ more = false, fresh = false } = {}) {
       const stExact = (stRows || []).find((r) => r.id === exactNum);
       if (stExact && !opened) openFound(stExact);
       if (!all.length && stExact) {
-        S.notices.push(`Il ticket ${exactNum} è stato trovato nello Storico.`);
+        S.notices.push(`Il ticket ${exactNum} è stato trovato in Ricerca avanzata.`);
       } else if (!all.length) {
         S.notices.push(
           isLegacyNum && S.arConnected !== true
-            ? `Il ticket ${exactNum} non è su HDA TOUCH. Clicca «Collega Area Riservata» nella barra sinistra per cercarlo nel Vecchio Cruscotto.`
+            ? `Il ticket ${exactNum} non è su HDA TOUCH. Clicca «Collega Area Riservata» nella barra sinistra per cercarlo nel Vecchio Cruscotto e in Ricerca avanzata.`
             : typedZ
               ? `Il ticket ${tid} non risulta su HDA TOUCH.`
-              : `Il ticket ${exactNum} non risulta né in HDA TOUCH né nel Vecchio Cruscotto${isLegacyNum && !S.storico.error ? " né nello Storico" : ""}.`,
+              : `Il ticket ${exactNum} non risulta né in HDA TOUCH né nel Vecchio Cruscotto${isLegacyNum && !S.storico.error ? " né in Ricerca avanzata" : ""}.`,
         );
       }
     } else {
@@ -1812,12 +1812,15 @@ function openFound(row) {
   openTicket(row.id, row);
 }
 
+const DATE_CHIP_KEYS = new Set(["dateFrom", "dateTo", "updFrom", "updTo", "period", "dates", "statusDateFrom"]);
+
 function activeFilterCountFor(source = S.source) {
-  if (source === "touch") return describeFilters({ ...S.filters, text: "" }).length;
-  if (source === "ar") return describeAr().filter((c) => c.key !== "text").length;
-  if (source === "storico") return describeStorico().filter((c) => c.key !== "box").length;
-  if (source === "kb") return describeKb().filter((c) => c.key !== "text").length;
-  if (source === "faq") return describeFaq().filter((c) => c.key !== "query").length;
+  const notDate = (c) => !DATE_CHIP_KEYS.has(c.key);
+  if (source === "touch") return describeFilters({ ...S.filters, text: "" }).filter(notDate).length;
+  if (source === "ar") return describeAr().filter((c) => c.key !== "text" && notDate(c)).length;
+  if (source === "storico") return describeStorico().filter((c) => c.key !== "box" && notDate(c)).length;
+  if (source === "kb") return describeKb().filter((c) => c.key !== "text" && notDate(c)).length;
+  if (source === "faq") return describeFaq().filter((c) => c.key !== "query" && notDate(c)).length;
   return 0;
 }
 
@@ -2087,6 +2090,7 @@ function listFilterBox() {
 function renderAll() {
   renderNavRail();
   renderWorkspaceHeader();
+  renderDateBar(ctx);
   renderResults();
   renderActivityPanel();
 }
@@ -2242,7 +2246,7 @@ function renderResults() {
   if (onRes && src === "storico") {
     const text = String(S.filters.text || "").trim();
     if (text && !ticketIdFrom(text) && !storicoQuery()) {
-      el.appendChild(noticeEl(`Nello Storico non si può cercare per parole («${text}»): scrivi un numero ticket oppure usa i filtri a sinistra.`));
+      el.appendChild(noticeEl(`In Ricerca avanzata non si può cercare per parole («${text}»): scrivi un numero ticket, scegli un periodo qui sopra oppure usa i filtri a sinistra.`));
     }
     if (st.error) {
       el.appendChild(h("div", { class: "err-box" }, st.error.message,
@@ -2274,25 +2278,25 @@ function renderResults() {
     } else if (src === "touch") {
       heading = isUnconstrained(S.filters) ? "Cerca in HDA Touch" : "Nessun ticket trovato";
       desc = isUnconstrained(S.filters)
-        ? "Scrivi parole o un numero ticket nella barra in alto, oppure scegli uno stato o un gruppo nei filtri a sinistra."
+        ? "Scrivi parole o un numero ticket nella barra in alto, scegli un periodo qui sopra oppure un filtro a sinistra."
         : "Prova a rimuovere qualche filtro o a modificare le parole cercate.";
     } else if (src === "ar") {
       heading = arQuery() ? "Nessun ticket trovato nel Vecchio Cruscotto" : "Vecchio Cruscotto (Area Riservata)";
-      desc = arQuery() ? "Prova ad allargare il periodo o a rimuovere un filtro." : "Scrivi parole o un numero ticket in alto, oppure seleziona un filtro a sinistra.";
+      desc = arQuery() ? "Prova ad allargare il periodo qui sopra o a rimuovere un filtro." : "Scrivi parole o un numero ticket in alto, scegli un periodo qui sopra oppure un filtro a sinistra.";
     } else if (src === "storico") {
-      heading = storicoQuery() ? "Nessun ticket trovato nello Storico" : "Storico ticket (Area Riservata)";
-      desc = storicoQuery() ? "Prova ad allargare il periodo o a cambiare i filtri." : "Scrivi un numero ticket in alto oppure scegli un periodo, un cliente o un gruppo a sinistra.";
+      heading = storicoQuery() ? "Nessun ticket trovato in Ricerca avanzata" : "Ricerca avanzata (Area Riservata)";
+      desc = storicoQuery() ? "Prova ad allargare il periodo qui sopra o a cambiare i filtri." : "Scrivi un numero ticket in alto, scegli un periodo qui sopra oppure un cliente o un gruppo a sinistra.";
     } else if (src === "kb") {
       heading = kbQuery() ? "Nessun articolo Knowledge Base trovato" : "Knowledge Base di HDA Touch";
       desc = kbQuery()
-        ? "Prova con altre parole oppure togli un filtro a sinistra (stato, prodotto, argomento, periodo)."
-        : "Scrivi parole o un codice (es. KB25631HR) nella barra in alto, usa i filtri di HD Touch a sinistra, oppure sfoglia tutti gli articoli.";
+        ? "Prova con altre parole oppure togli un filtro (periodo qui sopra, stato, prodotto o argomento a sinistra)."
+        : "Scrivi parole o un codice (es. KB25631HR) nella barra in alto, usa i filtri di HD Touch, oppure sfoglia tutti gli articoli.";
       if (!kbQuery()) cta = h("button", { type: "button", class: "btn btn-primary", onclick: kbBrowseAll }, icon("book"), "Sfoglia tutti gli articoli KB");
     } else if (src === "faq") {
       heading = hasFaqFilter(faqS.filters) ? "Nessuna FAQ trovata" : "FAQ di HDA Touch";
       desc = hasFaqFilter(faqS.filters)
-        ? "Prova a cambiare le parole nella barra FAQ o a rimuovere uno dei filtri a sinistra."
-        : "Usa la barra in alto per cercare insieme in Domanda e Risposta (con varianti e attinenza), oppure usa i filtri a sinistra.";
+        ? "Prova a cambiare le parole nella barra FAQ o a rimuovere uno dei filtri."
+        : "Usa la barra in alto per cercare insieme in Domanda e Risposta (con varianti e attinenza), oppure usa i filtri.";
       if (hasFaqFilter(faqS.filters)) cta = h("button", { type: "button", class: "btn", onclick: faqReset }, "Azzera filtri FAQ");
       else if (!faqS.loadedOnce) cta = h("button", { type: "button", class: "btn btn-primary", onclick: () => runFaq({ fresh: true }) }, "Carica le FAQ");
     }
@@ -2306,7 +2310,7 @@ function renderResults() {
   if (busy) {
     const still = src === "touch" && S.pending && S.pending.size ? [...S.pending].join(", ") : "";
     const msg = src === "storico"
-      ? (items.length ? "Carico altri…" : "Cerco nello Storico…")
+      ? (items.length ? "Carico altri…" : "Cerco in Ricerca avanzata…")
       : src === "ar"
         ? ["Cerco nel Vecchio Cruscotto… ", h("span", { class: "ar-progress" }, arS.progress || "")]
         : src === "kb"
@@ -2820,7 +2824,7 @@ function renderUpdateChrome() {
   const hasUpd = !!(lc && lc.status === "update_available");
 
   if (verEl) {
-    const curVer = (st && st.currentVersion) || (inExtension ? chrome.runtime.getManifest().version : "5.1.0");
+    const curVer = (st && st.currentVersion) || (inExtension ? chrome.runtime.getManifest().version : "5.2.0");
     verEl.textContent = hasUpd ? `↑ v${lc.remoteVersion}` : `v${curVer}`;
   }
   if (diagBtn) diagBtn.classList.toggle("has-update", hasUpd);

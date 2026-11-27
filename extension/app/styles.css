@@ -518,7 +518,9 @@ mark {
   letter-spacing: .07em;
   color: var(--muted);
   margin: 0;
+  line-height: 1.3;
 }
+.side-head .linkbtn { white-space: nowrap; flex-shrink: 0; }
 .side-note {
   font-size: 12px;
   line-height: 1.5;
@@ -924,6 +926,87 @@ select.input option { background: var(--surface); color: var(--text); }
   font-size: 11px;
   padding: 0 6px;
   line-height: 18px;
+}
+
+/* ------------------------------------------------------------------ Barra Date rapida sopra i risultati */
+.date-bar {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+  padding: 9px 26px;
+  background: var(--sidebar);
+  border-bottom: 1px solid var(--line);
+}
+.db-lbl {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 12px;
+  font-weight: 650;
+  color: var(--muted);
+  white-space: nowrap;
+}
+.db-lbl .ico { width: 15px; height: 15px; color: var(--accent); }
+.db-seg {
+  display: inline-flex;
+  align-items: center;
+  padding: 2px;
+  border-radius: 8px;
+  background: var(--input-bg);
+  border: 1px solid var(--line-strong);
+  gap: 2px;
+}
+.db-seg-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  border: 0;
+  background: transparent;
+  color: var(--muted);
+  font-size: 12px;
+  font-weight: 600;
+  padding: 4px 10px;
+  border-radius: 6px;
+  cursor: pointer;
+  white-space: nowrap;
+  transition: background .14s, color .14s;
+}
+.db-seg-btn:hover { color: var(--text); }
+.db-seg-btn.on {
+  background: var(--accent-solid);
+  color: #fff;
+}
+.db-dot {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--accent);
+}
+.db-seg-btn.on .db-dot { background: #fff; }
+.db-range {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+}
+.db-date {
+  width: 132px;
+  height: 30px;
+  font-size: 12px;
+  padding: 0 7px;
+}
+.db-dash { color: var(--faint); font-size: 12px; user-select: none; }
+.db-presets {
+  display: inline-flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 5px;
+}
+.db-clear { color: var(--accent-text); border-color: var(--accent-border); }
+.db-extra {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
 }
 
 /* ------------------------------------------------------------------ Corpo Workspace: Risultati + Attività / Lettore */
@@ -1599,7 +1682,7 @@ select.input option { background: var(--surface); color: var(--text); }
 body.solo { display: grid; grid-template-rows: 54px minmax(0, 1fr); }
 body.solo .solo-bar { display: flex; }
 body.solo #shell { height: auto; grid-template-columns: minmax(0, 1fr); }
-body.solo .nav-rail, body.solo .sidebar, body.solo .ws-head, body.solo .update-bar, body.solo .results, body.solo .activity-col { display: none !important; }
+body.solo .nav-rail, body.solo .sidebar, body.solo .ws-head, body.solo .update-bar, body.solo .date-bar, body.solo .results, body.solo .activity-col { display: none !important; }
 body.solo #layout, body.solo #layout.reading, body.solo #layout.nofilters { grid-template-columns: minmax(0, 1fr); }
 body.solo .ws-body, body.solo #layout.reading .ws-body { grid-template-columns: minmax(0, 1fr); }
 body.solo .reader { border-left: 0; }
@@ -1621,5 +1704,6 @@ body.solo .rd-head, body.solo .rd-body {
   #shell { grid-template-columns: 186px minmax(0, 1fr); }
   #layout { grid-template-columns: 256px minmax(0, 1fr); }
   .ws-head { padding: 16px 16px 0; }
+  .date-bar { padding: 8px 16px; }
   .results { padding: 14px 16px 40px; }
 }

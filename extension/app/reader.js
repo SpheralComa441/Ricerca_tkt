@@ -390,7 +390,7 @@ function header(ctx, id, row, full) {
     statusPill = pill(statusId, row && row.statusText);
   }
 
-  const badgeText = isKb ? "Knowledge Base" : isFaq ? "FAQ" : isStorico ? "Storico" : isAr ? "Vecchio Cruscotto" : "HDA Touch";
+  const badgeText = isKb ? "Knowledge Base" : isFaq ? "FAQ" : isStorico ? "Ricerca avanzata" : isAr ? "Vecchio Cruscotto" : "HDA Touch";
   const badgeCls = isKb ? "kb" : isFaq ? "faq" : isStorico ? "storico" : isAr ? "ar" : "touch";
 
   const openPortalBtn = isAr
