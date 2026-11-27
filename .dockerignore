@@ -1,8 +1,0 @@
-.git
-data
-tests
-__pycache__
-*.pyc
-.env
-venv
-.venv

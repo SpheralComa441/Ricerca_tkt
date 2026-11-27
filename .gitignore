@@ -1,12 +1,5 @@
 __pycache__/
 *.pyc
-.venv/
-venv/
-.env
-data/*
-!data/.gitkeep
-.pytest_cache/
-bookmarklet/node_modules/
-bookmarklet/test/vendor/
+.DS_Store
+Thumbs.db
 updater/it.ricercatkt.updater.json
-
