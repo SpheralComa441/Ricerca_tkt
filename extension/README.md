@@ -37,6 +37,7 @@ Per disattivare l'helper locale in qualsiasi momento esegui `updater\disattiva_a
    - Le risposte email con lo storico citato sotto hanno il pulsante **Mostra il testo citato**.
    - I numeri di ticket citati nel testo (es. `tk 10500123`) sono cliccabili e aprono quel ticket direttamente nel lettore.
    - Barra strumenti della conversazione: mostra/nascondi **Note interne**, ordine **Dal più vecchio / Dal più recente**, **Cerca nel ticket** con evidenziazione immediata, **Copia** tutto il ticket come testo pulito, **Apri in Touch** (apre il dettaglio nella scheda di Touch).
+   - **Estrazione completa in `.txt`**: subito sopra il riquadro **Allegati** è presente il tasto **Esporta storia (.txt)** che scarica un file di testo leggibile con i metadati del ticket, l'elenco allegati e **tutta la cronologia in ordine cronologico** (incluse note interne e scambi con 2° livello non visibili a clienti e partner), indicando per ogni scambio data/ora, mittente, gruppo di appartenenza / nome partner, visibilità e testo completo.
 5. **Cercare dentro il testo delle conversazioni (Archivio locale)**:
    - Ogni ticket che apri viene salvato automaticamente nell'archivio locale del browser (`IndexedDB`) con **tutta la conversazione**.
    - Con **Archivia** puoi salvare in blocco i ticket della ricerca corrente (2 alla volta con pausa, saltando quelli non modificati).

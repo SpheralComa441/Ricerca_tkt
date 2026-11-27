@@ -2,7 +2,7 @@
   "manifest_version": 3,
   "name": "Ricerca TKT",
   "short_name": "Ricerca TKT",
-  "version": "5.2.2",
+  "version": "5.2.3",
   "description": "Ricerca avanzata e lettura chiara di Ticket, Knowledge Base e FAQ di HDA TOUCH, Vecchio Cruscotto e Ricerca avanzata, con tema scuro/chiaro e aggiornamenti automatici.",
   "minimum_chrome_version": "116",
   "icons": { "16": "icons/icon16.png", "32": "icons/icon32.png", "48": "icons/icon48.png", "128": "icons/icon128.png" },

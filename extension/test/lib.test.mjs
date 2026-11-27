@@ -134,6 +134,51 @@ test("makeRowReader: mappa dalla configurazione", () => {
   assert.equal(rr.sortAlias("lastChange"), null);
 });
 
+test("makeRowReader: nomi reali colonne Touch (OwnerUserGroup, AssignedUserGroup, AssignedUserOrGroup, CLK.CompanyName)", () => {
+  const rr = makeRowReader({
+    c0: "Account.AccountCode",
+    c1: "Account.CompanyName",
+    c7: "AssignedUserGroup",
+    c10: "AssignedUserOrGroup",
+    c15: "CLK.CompanyName",
+    c23: "ID",
+    c35: "OwnerUser.FullName",
+    c36: "OwnerUserGroup",
+    c45: "Subject",
+    c46: "Supplier.Name",
+    c50: "TicketPriority",
+    c56: "TicketStatus",
+    c57: "TicketStatus.TranslatedDescription",
+    c59: "TicketStatusID",
+    c60: "TicketType",
+  });
+  const r = rr.read({
+    c0: "1234",
+    c1: "PARTNER SPA",
+    c7: "Paghe 2° Livello",
+    c10: "Laura Verdi",
+    c15: "AZIENDA FINALE SRL",
+    c23: "11973804Z",
+    c35: "Andrea Minopoli",
+    c36: "Paghe 1° Livello",
+    c45: "Quesito detassazione",
+    c46: "Zucchetti HR",
+    c50: "Alta",
+    c56: "In progress",
+    c57: "In lavorazione",
+    c59: "S2",
+    c60: "Assistenza",
+  });
+  assert.equal(r.ownerGroup, "Paghe 1° Livello");
+  assert.equal(r.assignedGroup, "Paghe 2° Livello");
+  assert.equal(r.assigned, "Laura Verdi");
+  assert.equal(r.originalClient, "AZIENDA FINALE SRL");
+  assert.equal(r.supplier, "Zucchetti HR");
+  assert.equal(r.priorityText, "Alta");
+  assert.equal(r.statusText, "In lavorazione");
+  assert.equal(r.typeText, "Assistenza");
+});
+
 // ---------------------------------------------------------------- filtri
 
 test("buildConditions: formato verificato (Domain, eq con id, in con |)", () => {

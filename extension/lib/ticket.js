@@ -1,12 +1,15 @@
 // Ticket completo: dati, richiesta, conversazione, soluzione, allegati → una sola timeline ordinata.
 
-import { parseMsDate, norm, ticketNumber, ticketIdVariants, isLegacyTicketNumber, isTouchNativeId } from "./util.js";
+import { parseMsDate, fmtDateTime, norm, ticketNumber, ticketIdVariants, isLegacyTicketNumber, isTouchNativeId } from "./util.js";
 import { htmlToText, cleanText, isProbablyHtml, unescapeIfEscapedHtml } from "./richtext.js";
 import { guessMimeFromName } from "./hda.js";
+import { statusInfo } from "./statuses.js";
 import { buildArTicket } from "./ar.js";
 
-// Colonne della conversazione (nomi verificati dalla configurazione "Storico conversazioni" + TextHTML verificato via Projection)
-export const CONV_COLUMNS = ["ID", "Text", "TextHTML", "FirstUpdate", "UserID", "User.FullName", "ContactID", "Contact.FirstName", "Contact.LastName", "Account.CompanyName", "SiteVisible", "MSGDIR", "TicketConversationItemStat.AttachmentCount"];
+// Colonne base della conversazione (verificate via Projection su Touch)
+export const CONV_COLUMNS_CORE = ["ID", "Text", "TextHTML", "FirstUpdate", "UserID", "User.FullName", "ContactID", "Contact.FirstName", "Contact.LastName", "Account.CompanyName", "SiteVisible", "MSGDIR", "TicketConversationItemStat.AttachmentCount"];
+// Colonne complete della conversazione (include i campi verificati da ConversationHistory: altro reparto / 2° livello, ticket remoto, major incident)
+export const CONV_COLUMNS = [...CONV_COLUMNS_CORE, "OTHERDEPT", "REMOTETKT", "FROMMAJINC"];
 // Alias della vista ConversationHistory di ListData (verificati)
 export const CONV_ALIAS = { c0: "Account.CompanyName", c1: "AccountID", c2: "Contact.FirstName", c3: "Contact.LastName", c4: "ContactID", c5: "FirstUpdate", c6: "FROMMAJINC", c7: "ID", c8: "MSGDIR", c9: "OTHERDEPT", c10: "REMOTETKT", c11: "SiteVisible", c12: "Text", c13: "TicketConversationItemStat.AttachmentCount", c14: "User.FullName", c15: "UserID" };
 // Alias della vista AttachmentPreview di ListData/Attachments (verificati: c5 = KBSize introdotto da Touch)
@@ -15,6 +18,18 @@ export const ATTACH_ALIAS = { c0: "ContentType", c1: "Description", c2: "FileNam
 export const TICKET_COLUMNS = ["ID", "Subject", "ProblemHTML", "Problem", "SolutionHTML", "Solution", "Date", "ClosureDate", "LastChange", "TicketStatusID", "TicketTypeID", "TicketPriorityID", "AccountID", "ContactID", "OwnerUserGroupID", "OwnerUserID", "AssignedUserID", "AssignedUserGroupID", "CTITMDESC", "CLASSCLI", "TKMAILTO", "TicketSourceID", "ParentTicketID", "Tag"];
 
 const LIST_TRUNC = 500; // l'elenco della conversazione tronca il testo a 500 caratteri
+
+/** Interpreta un campo flag/descrittivo del portale (es. OTHERDEPT, REMOTETKT, FROMMAJINC). */
+function parseFlagOrText(v) {
+  if (v == null || v === false || v === 0) return false;
+  if (v === true || v === 1) return true;
+  const s = String(v).trim();
+  if (!s) return false;
+  const low = s.toLowerCase();
+  if (low === "0" || low === "false" || low === "no" || low === "n") return false;
+  if (low === "1" || low === "true" || low === "yes" || low === "si" || low === "sì" || low === "s" || low === "y") return true;
+  return s;
+}
 
 /** Riga grezza di ListData/Attachments (schema 9 colonne con c5=KBSize o legacy 8 colonne) → allegato normalizzato */
 export function normalizeAttachment(r, ticketId = "") {
@@ -49,20 +64,25 @@ export function normalizeAttachment(r, ticketId = "") {
 
 /** Riga grezza della conversazione (Projection o ListData) → messaggio normalizzato */
 export function normalizeItem(r) {
-  const userId = r.UserID || "";
-  const contactName = [r["Contact.FirstName"], r["Contact.LastName"]].filter(Boolean).join(" ");
+  const userId = String(r.UserID || "").trim();
+  const contactName = [r["Contact.FirstName"], r["Contact.LastName"]].filter(Boolean).join(" ").trim();
   let role = "operator";
-  let author = r["User.FullName"] || "";
+  let author = String(r["User.FullName"] || "").trim();
   if (userId === "#HDASRV#") {
     role = "system";
     author = "Sistema";
   } else if (userId === "#HDAMAIL#") {
     role = "customer";
-    author = contactName || r["Account.CompanyName"] || "Email del cliente";
+    author = contactName || String(r["Account.CompanyName"] || "").trim() || "Email del cliente";
   } else if (userId === "CP" || (!userId && r.ContactID) || (r.ContactID && /customer portal/i.test(author))) {
     role = "customer";
-    author = contactName || r["Account.CompanyName"] || "Cliente";
+    author = contactName || String(r["Account.CompanyName"] || "").trim() || "Cliente";
   }
+  const otherDept = parseFlagOrText(r.OTHERDEPT);
+  const remoteTicket = parseFlagOrText(r.REMOTETKT);
+  const fromMajorIncident = Boolean(parseFlagOrText(r.FROMMAJINC));
+  const secondLevel = !!(otherDept || remoteTicket);
+  const group = String(r.group || r["UserGroup.Description"] || "").trim();
   const raw = r.TextHTML || r.Text || "";
   const html = isProbablyHtml(unescapeIfEscapedHtml(raw)) ? raw : null;
   const text = html ? htmlToText(html) : cleanText(raw);
@@ -70,9 +90,16 @@ export function normalizeItem(r) {
     id: r.ID,
     date: parseMsDate(r.FirstUpdate),
     role,
+    userId,
     author,
-    account: r["Account.CompanyName"] || "",
+    group,
+    account: String(r["Account.CompanyName"] || "").trim(),
     internal: r.SiteVisible === false || r.SiteVisible === 0 || r.SiteVisible === "0",
+    secondLevel,
+    otherDept,
+    remoteTicket,
+    fromMajorIncident,
+    msgDir: String(r.MSGDIR || "").trim(),
     creation: r.MSGDIR === "CREATION",
     attachments: Number(r["TicketConversationItemStat.AttachmentCount"]) || 0,
     html,
@@ -116,6 +143,8 @@ export function buildTimeline({ ticket = {}, row = {}, items = [], attachments =
       role: "customer",
       author: row.contact || row.account || "Cliente",
       account: row.account || "",
+      originalClient: row.originalClient || "",
+      customerCode: row.customerCode || "",
       html: problemHtml || null,
       text: problemText,
       attachments: incidentAtts.length,
@@ -146,7 +175,15 @@ export function buildTimeline({ ticket = {}, row = {}, items = [], attachments =
   const solHtml = ticket.SolutionHTML || "";
   const solText = solHtml ? htmlToText(solHtml) : cleanText(ticket.Solution || "");
   if (solText) {
-    out.push({ kind: "solution", date: parseMsDate(ticket.ClosureDate) || null, role: "operator", author: row.assigned || "", html: solHtml || null, text: solText });
+    out.push({
+      kind: "solution",
+      date: parseMsDate(ticket.ClosureDate) || null,
+      role: "operator",
+      author: row.assigned || "",
+      group: row.assignedGroup || row.ownerGroup || "",
+      html: solHtml || null,
+      text: solText,
+    });
   }
   return out;
 }
@@ -161,6 +198,256 @@ export function timelineText(entries, header = "") {
     lines.push(e.text, "");
   }
   return lines.join("\n").trim();
+}
+
+const SOURCE_LABELS = {
+  touch: "HDA Touch",
+  ar: "Vecchio Cruscotto (Area Riservata)",
+  storico: "Ricerca avanzata (Area Riservata)",
+};
+
+function fmtKb(sizeKb) {
+  const n = Number(sizeKb);
+  if (!Number.isFinite(n) || n <= 0) return "";
+  return n >= 1024 ? `${(n / 1024).toFixed(2).replace(".", ",")} MB` : `${n.toFixed(1).replace(".", ",")} KB`;
+}
+
+function sortEntriesChronologically(entries) {
+  return (entries || [])
+    .filter(Boolean)
+    .map((e, idx) => {
+      const dt = parseMsDate(e.date);
+      return { e, idx, t: dt ? dt.getTime() : null };
+    })
+    .sort((a, b) => {
+      const rank = (x) => (x.t != null ? 0 : x.e.kind === "request" ? -1 : x.e.kind === "solution" ? 1 : 0);
+      const ra = rank(a);
+      const rb = rank(b);
+      if (ra !== rb) return ra - rb;
+      if (a.t != null && b.t != null && a.t !== b.t) return a.t - b.t;
+      return a.idx - b.idx;
+    })
+    .map((x) => x.e);
+}
+
+function cleanAuthorForTxt(e) {
+  if (e.authorName) return String(e.authorName).trim();
+  let name = String(e.author || "").trim();
+  const grp = String(e.group || "").trim();
+  if (name && grp) {
+    const suffix = `(${grp})`;
+    if (name.endsWith(suffix)) name = name.slice(0, -suffix.length).trim();
+  }
+  if (name) return name;
+  if (e.kind === "request" || e.role === "customer") return "Cliente / Partner";
+  if (e.role === "system") return "Sistema";
+  return "Operatore";
+}
+
+function roleSuffixForTxt(e) {
+  if (e.kind === "request" || e.role === "customer") return "Cliente / Partner";
+  if (e.role === "system") return "Sistema";
+  return "Operatore";
+}
+
+function resolveGroupOrPartner(e, row) {
+  const r = row || {};
+  const isCust = e.kind === "request" || e.role === "customer";
+  if (isCust) {
+    const acct = String(e.account || r.account || "").trim();
+    const code = String(e.customerCode || r.customerCode || "").trim();
+    const orig = String(e.originalClient || r.originalClient || "").trim();
+    const parts = [];
+    if (acct) parts.push(code && !acct.includes(code) ? `${acct} (cod. ${code})` : acct);
+    else if (code) parts.push(`Codice cliente ${code}`);
+    if (orig && orig !== acct) parts.push(`Cliente originale: ${orig}`);
+    if (parts.length) return parts.join(" — ");
+    return String(e.group || "").trim() || "Cliente / Partner";
+  }
+  if (e.role === "system") {
+    const g = String(e.group || "").trim();
+    if (g) return g;
+    return r.ownerGroup ? `Sistema (gruppo ticket: ${r.ownerGroup})` : "Sistema";
+  }
+  const explicitGroup = String(e.group || "").trim();
+  if (explicitGroup) return explicitGroup;
+  if (typeof e.otherDept === "string" && e.otherDept.trim()) return `${e.otherDept.trim()} (2° livello / altro reparto)`;
+  const msgAcct = String(e.account || "").trim();
+  if (msgAcct) return msgAcct;
+  if (e.secondLevel) {
+    return typeof e.remoteTicket === "string" && e.remoteTicket.trim()
+      ? `Altro reparto / 2° livello (rif. ${e.remoteTicket.trim()})`
+      : "Altro reparto / 2° livello";
+  }
+  const authorLow = norm(cleanAuthorForTxt(e));
+  if (authorLow && r.assigned && r.assignedGroup && norm(r.assigned) === authorLow) return String(r.assignedGroup).trim();
+  if (authorLow && r.ownerUser && r.ownerGroup && norm(r.ownerUser) === authorLow) return String(r.ownerGroup).trim();
+  const og = String(r.ownerGroup || "").trim();
+  const ag = String(r.assignedGroup || "").trim();
+  if (og && ag && og !== ag) return `${og} / ${ag} (gruppi ticket)`;
+  if (og || ag) return `${og || ag} (gruppo ticket)`;
+  return "Supporto / Operatore";
+}
+
+function exchangeBanner(e) {
+  if (e.kind === "request") return "RICHIESTA INIZIALE";
+  if (e.kind === "solution") return "SOLUZIONE";
+  if (e.internal && e.secondLevel) return "NOTA INTERNA / SCAMBIO 2° LIVELLO";
+  if (e.secondLevel) return "SCAMBIO 2° LIVELLO / ALTRO REPARTO";
+  if (e.internal) return "NOTA INTERNA";
+  if (e.role === "customer") return "MESSAGGIO CLIENTE / PARTNER";
+  if (e.role === "system") return "SISTEMA";
+  return "RISPOSTA OPERATORE";
+}
+
+function visibilityLabel(e) {
+  if (e.internal && e.secondLevel) return "NON visibile a clienti e partner (Nota interna / scambio 2° livello)";
+  if (e.internal) return "NON visibile a clienti e partner (Nota interna)";
+  if (e.secondLevel) return "Scambio con altro reparto / 2° livello";
+  return "Visibile al cliente / partner";
+}
+
+/** Nome file pulito per il download dell'estrazione testuale di un ticket. */
+export function ticketTxtFilename(full) {
+  const raw = ticketNumber((full && full.id) || (full && full.row && full.row.id) || "ticket");
+  const safe = String(raw || "ticket").replace(/[^A-Za-z0-9_-]+/g, "_").replace(/^_+|_+$/g, "") || "ticket";
+  return `ticket_${safe}.txt`;
+}
+
+/**
+ * Genera l'estrazione completa di un ticket in formato TXT leggibile:
+ *  - metadati completi del ticket e elenco allegati;
+ *  - TUTTI gli scambi in ordine cronologico (incluse note interne e scambi con 2° livelli non visibili);
+ *  - per ogni scambio: data e ora, chi scrive, gruppo di appartenenza / nome partner, destinatario, visibilità e testo completo.
+ */
+export function formatTicketTxt(full, { exportedAt = new Date() } = {}) {
+  const f = full || {};
+  const row = f.row || {};
+  const ticket = f.ticket || {};
+  const id = String(f.id || row.id || "").trim();
+  const num = ticketNumber(id);
+  const source = f.source || row.source || "touch";
+  const subject = cleanText(row.subject || ticket.Subject || "") || (num ? `Ticket #${num}` : "Ticket");
+  const statusId = row.statusId || ticket.TicketStatusID || "";
+  const statusLabel = statusId || row.statusText ? statusInfo(statusId, row.statusText).label : "";
+  const entries = sortEntriesChronologically(f.timeline || []);
+  const internalCount = entries.filter((e) => e.internal || e.secondLevel).length;
+  const attachments = Array.isArray(f.attachments) ? f.attachments : [];
+
+  const SEP_HEAVY = "=".repeat(80);
+  const SEP_LIGHT = "-".repeat(80);
+  const kv = (label, val) => {
+    const v = String(val ?? "").trim();
+    if (!v) return null;
+    return `${(label + ":").padEnd(23, " ")}${v}`;
+  };
+
+  const lines = [
+    SEP_HEAVY,
+    `TICKET #${num || id} — ${subject}`,
+    SEP_HEAVY,
+  ];
+
+  const meta = [
+    ["Fonte", SOURCE_LABELS[source] || source],
+    ["Numero ticket", id && id !== num ? `#${num} (ID portale: ${id})` : `#${num || id}`],
+    ["Stato", statusLabel],
+    ["Tipo", row.typeText],
+    ["Priorità", row.priorityText || row.priority],
+    ["Cliente / Partner", [row.account, row.customerCode && !String(row.account || "").includes(row.customerCode) ? `(cod. ${row.customerCode})` : ""].filter(Boolean).join(" ")],
+    ["Cliente originale", row.originalClient && row.originalClient !== row.account ? row.originalClient : ""],
+    ["Contatto", [row.contact, ticket.TKMAILTO ? `<${ticket.TKMAILTO}>` : ""].filter(Boolean).join(" ")],
+    ["Prodotto", ticket.CTITMDESC || row.catalog],
+    ["Classificazione", row.classCli],
+    ["Fornitore", row.supplier],
+    ["Gruppo owner", row.ownerGroup],
+    ["Owner del ticket", row.ownerUser],
+    ["Gruppo assegnato", row.assignedGroup && row.assignedGroup !== row.ownerGroup ? row.assignedGroup : ""],
+    ["Assegnato a", row.assigned],
+    ["Ticket collegato", ticket.ParentTicketID],
+    ["Aperto il", fmtDateTime(row.date || ticket.Date)],
+    ["Ultimo aggiornamento", fmtDateTime(row.lastChange || ticket.LastChange)],
+    ["Chiuso il", fmtDateTime(ticket.ClosureDate || row.closureDate)],
+    ["Scadenza SLA", row.nextExpiration && statusInfo(statusId).group !== "closed" ? `${fmtDateTime(row.nextExpiration)}${row.sla ? " · " + row.sla : ""}` : ""],
+    ...(Array.isArray(f.extraFacts) ? f.extraFacts : []),
+    [
+      "Totale scambi",
+      entries.length
+        ? `${entries.length}${internalCount ? ` (di cui ${internalCount} ${internalCount === 1 ? "nota interna / 2° livello" : "note interne / 2° livello"})` : ""}`
+        : "0",
+    ],
+  ];
+
+  const seenMeta = new Set();
+  for (const [k, v] of meta) {
+    if (!k || seenMeta.has(k)) continue;
+    const line = kv(k, v);
+    if (line) {
+      seenMeta.add(k);
+      lines.push(line);
+    }
+  }
+
+  if (attachments.length) {
+    lines.push(kv("Allegati del ticket", String(attachments.length)));
+    for (const att of attachments) {
+      const attMeta = [fmtKb(att.sizeKb), att.author, att.date ? fmtDateTime(att.date) : ""].filter(Boolean).join(" — ");
+      lines.push(`  - ${att.fileName || att.id}${attMeta ? ` (${attMeta})` : ""}`);
+    }
+  }
+
+  const expStr = fmtDateTime(exportedAt);
+  if (expStr) lines.push(kv("Esportato il", expStr));
+
+  lines.push(
+    "",
+    SEP_HEAVY,
+    "CRONOLOGIA COMPLETA DEGLI SCAMBI (ordine cronologico: dal più vecchio al più recente)",
+    SEP_HEAVY,
+    "",
+  );
+
+  if (!entries.length) {
+    lines.push("Nessuno scambio presente nella cronologia del ticket.");
+    return lines.join("\n").trim() + "\n";
+  }
+
+  entries.forEach((e, idx) => {
+    const dt = fmtDateTime(e.date);
+    const author = cleanAuthorForTxt(e);
+    const roleLbl = roleSuffixForTxt(e);
+    const whoStr = norm(author) === norm(roleLbl) ? author : `${author} (${roleLbl})`;
+    const grpPartner = resolveGroupOrPartner(e, row);
+    const destStr = e.to || [e.toName, e.toGroup && e.toGroup !== e.toName ? `(${e.toGroup})` : ""].filter(Boolean).join(" ");
+    const msgAtts = Array.isArray(e.attachmentItems) && e.attachmentItems.length
+      ? e.attachmentItems.map((a) => `${a.fileName || a.id}${fmtKb(a.sizeKb) ? ` (${fmtKb(a.sizeKb)})` : ""}`).join(", ")
+      : e.attachments > 0
+        ? `${e.attachments} allegat${e.attachments === 1 ? "o" : "i"}`
+        : "";
+    const secondLevelRef = [
+      typeof e.remoteTicket === "string" && e.remoteTicket.trim() ? `Ticket remoto: ${e.remoteTicket.trim()}` : "",
+      e.fromMajorIncident ? "Da Major Incident" : "",
+    ].filter(Boolean).join(" · ");
+
+    lines.push(SEP_LIGHT);
+    lines.push(`[${idx + 1}] ${exchangeBanner(e)}`);
+    lines.push(kv("Data e ora", dt || "Non disponibile"));
+    lines.push(kv("Chi scrive", whoStr));
+    lines.push(kv("Gruppo / Partner", grpPartner));
+    if (destStr) lines.push(kv("Destinatario", destStr));
+    if (e.label) lines.push(kv("Causale", e.label));
+    if (secondLevelRef) lines.push(kv("Rif. 2° livello", secondLevelRef));
+    lines.push(kv("Visibilità", visibilityLabel(e)));
+    if (msgAtts) lines.push(kv("Allegati messaggio", msgAtts));
+    lines.push(SEP_LIGHT);
+
+    const body = cleanText(e.text || (e.html ? htmlToText(e.html) : "")) || "(nessun testo)";
+    lines.push(body);
+    if (e.truncated) lines.push("", "[Nota: testo troncato dal portale in modalità elenco]");
+    lines.push("");
+  });
+
+  return lines.join("\n").trim() + "\n";
 }
 
 /**
@@ -237,13 +524,27 @@ export async function loadTicket(hda, id, { row = null, rowReader, conditionsFor
   const fetchConversation = async (ticketId) => {
     const cond = [{ property: "TicketID", op: "eq", value: ticketId }];
     if (caps.convVia !== "list") {
+      const cols = caps.convCoreOnly ? CONV_COLUMNS_CORE : CONV_COLUMNS;
       try {
-        const rows = await hda.projection("TicketConversationItem", cond, CONV_COLUMNS, 1000);
+        const rows = await hda.projection("TicketConversationItem", cond, cols, 1000);
         caps.convVia = "projection";
         return rows.map(normalizeItem);
       } catch (e) {
         if (e && e.name === "AuthError") throw e;
-        log("conversazione via Projection: " + e.message);
+        if (!caps.convCoreOnly && /column|property|field|expression|invalid|unknown|otherdept|remotetkt|frommajinc/i.test(String(e.message || ""))) {
+          log("conversazione via Projection (colonne estese non supportate): riprovo con colonne base");
+          try {
+            const rows = await hda.projection("TicketConversationItem", cond, CONV_COLUMNS_CORE, 1000);
+            caps.convCoreOnly = true;
+            caps.convVia = "projection";
+            return rows.map(normalizeItem);
+          } catch (e2) {
+            if (e2 && e2.name === "AuthError") throw e2;
+            log("conversazione via Projection: " + e2.message);
+          }
+        } else {
+          log("conversazione via Projection: " + e.message);
+        }
       }
     }
     const { rows } = await hda.listData("TicketConversationItems", {

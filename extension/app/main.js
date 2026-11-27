@@ -2827,7 +2827,7 @@ function renderUpdateChrome() {
   const hasUpd = !!(lc && lc.status === "update_available");
 
   if (verEl) {
-    const curVer = (st && st.currentVersion) || (inExtension ? chrome.runtime.getManifest().version : "5.2.2");
+    const curVer = (st && st.currentVersion) || (inExtension ? chrome.runtime.getManifest().version : "5.2.3");
     verEl.textContent = hasUpd ? `↑ ${lc.remoteVersion}` : `v${curVer}`;
   }
   if (updBtn) updBtn.classList.toggle("has-update", hasUpd);

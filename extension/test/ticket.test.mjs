@@ -3,7 +3,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 
-import { normalizeItem, buildTimeline, timelineText, loadTicket, CONV_ALIAS } from "../lib/ticket.js";
+import { normalizeItem, buildTimeline, timelineText, formatTicketTxt, ticketTxtFilename, loadTicket, CONV_ALIAS, CONV_COLUMNS, CONV_COLUMNS_CORE } from "../lib/ticket.js";
 
 const D = (iso) => `/Date(${new Date(iso).getTime()})/`;
 
@@ -154,3 +154,130 @@ test("loadTicket: numero non su Touch e senza Z → Vecchio Cruscotto", async ()
   const full = await loadTicket(hda, "8900042", { rowReader, conditionsFor, ar, caps: {} });
   assert.equal(full.source, "ar");
 });
+
+test("loadTicket: se Projection rifiuta le colonne estese OTHERDEPT/REMOTETKT, riprova con CONV_COLUMNS_CORE senza perdere TextHTML", async () => {
+  const triedCols = [];
+  const hda = {
+    async projection(entity, _cond, cols) {
+      if (entity === "Incident") return [{ ID: "11Z", Subject: "Prova", ProblemHTML: "<p>Richiesta</p>", Date: D("2026-03-01T09:00:00") }];
+      triedCols.push([...cols]);
+      if (cols.includes("OTHERDEPT")) throw new Error("Invalid column OTHERDEPT");
+      return [{ ID: "m1", UserID: "U1", "User.FullName": "Laura Verdi", TextHTML: "<p>Risposta completa oltre 500 caratteri</p>", FirstUpdate: D("2026-03-01T10:00:00"), SiteVisible: false }];
+    },
+  };
+  const caps = {};
+  const full = await loadTicket(hda, "11Z", { row: { id: "11Z", subject: "Prova" }, caps });
+  assert.equal(triedCols.length, 2);
+  assert.deepEqual(triedCols[0], CONV_COLUMNS);
+  assert.deepEqual(triedCols[1], CONV_COLUMNS_CORE);
+  assert.equal(caps.convCoreOnly, true);
+  assert.equal(caps.convVia, "projection");
+  assert.equal(full.timeline[1].internal, true);
+  assert.match(full.timeline[1].text, /oltre 500 caratteri/);
+});
+
+test("formatTicketTxt: estrazione cronologica completa con note interne, 2° livello (OTHERDEPT/REMOTETKT), partner, gruppo, data/ora e allegati", () => {
+  const items = [
+    // volutamente fuori ordine per verificare il riordino cronologico
+    {
+      ID: "m3",
+      UserID: "U1",
+      "User.FullName": "Laura Verdi",
+      Text: "Confermiamo la correzione sulla versione 26.12.",
+      FirstUpdate: D("2026-11-20T15:40:00"),
+      SiteVisible: true,
+    },
+    {
+      ID: "m2",
+      UserID: "U9",
+      "User.FullName": "Marco Fontana",
+      Text: "Analisi 2° livello: anomalia riprodotta su SQL.",
+      FirstUpdate: D("2026-11-19T11:25:00"),
+      SiteVisible: false,
+      OTHERDEPT: true,
+      REMOTETKT: "2L-9941",
+    },
+    {
+      ID: "m1",
+      UserID: "U1",
+      "User.FullName": "Laura Verdi",
+      Text: "Nota interna di presa in carico.",
+      FirstUpdate: D("2026-11-18T10:05:00"),
+      SiteVisible: false,
+    },
+    {
+      ID: "m1b",
+      UserID: "#HDAMAIL#",
+      "Contact.FirstName": "Mario",
+      "Contact.LastName": "Rossi",
+      "Account.CompanyName": "PARTNER ALFA SRL",
+      Text: "Allego il file di log richiesto.",
+      FirstUpdate: D("2026-11-18T14:15:00"),
+      SiteVisible: true,
+    },
+  ];
+  const row = {
+    id: "11973804Z",
+    source: "touch",
+    subject: "Detassazione premi di risultato",
+    statusId: "S6",
+    statusText: "Risolto",
+    typeText: "Assistenza",
+    priorityText: "P2 - Alta",
+    account: "PARTNER ALFA SRL",
+    customerCode: "100234",
+    originalClient: "BETA MECCANICA SPA",
+    contact: "Mario Rossi",
+    ownerGroup: "Paghe 1° Livello",
+    ownerUser: "Laura Verdi",
+    assignedGroup: "Paghe 2° Livello",
+    assigned: "Laura Verdi",
+    catalog: "Paghe Infinity",
+    date: new Date(2026, 10, 18, 9, 15),
+    lastChange: new Date(2026, 10, 20, 16, 0),
+  };
+  const attachments = [
+    { id: "A1", fileName: "log_errore.txt", sizeKb: 12.4, author: "Mario Rossi", date: new Date(2026, 10, 18, 14, 15), parentObject: "TicketConversationItem", parentObjectId: "m1b" },
+  ];
+  const timeline = buildTimeline({
+    ticket: {
+      ID: "11973804Z",
+      Subject: row.subject,
+      ProblemHTML: "<p>Nel cedolino manca la detassazione.</p>",
+      SolutionHTML: "<p>Aggiornato parametro voce.</p>",
+      Date: D("2026-11-18T09:15:00"),
+      ClosureDate: D("2026-11-20T16:00:00"),
+    },
+    row,
+    items,
+    attachments,
+  });
+
+  // Anche se passiamo la timeline invertita, formatTicketTxt la ristampa sempre in ordine cronologico
+  const reversedFull = { id: "11973804Z", source: "touch", row, ticket: { TKMAILTO: "m.rossi@alfa.it" }, attachments, timeline: timeline.slice().reverse() };
+  assert.equal(ticketTxtFilename(reversedFull), "ticket_11973804.txt");
+
+  const txt = formatTicketTxt(reversedFull, { exportedAt: new Date(2026, 10, 27, 17, 50) });
+  assert.match(txt, /TICKET #11973804 — Detassazione premi di risultato/);
+  assert.match(txt, /Cliente \/ Partner:\s+PARTNER ALFA SRL \(cod\. 100234\)/);
+  assert.match(txt, /Cliente originale:\s+BETA MECCANICA SPA/);
+  assert.match(txt, /Gruppo owner:\s+Paghe 1° Livello/);
+  assert.match(txt, /Totale scambi:\s+6 \(di cui 2 note interne \/ 2° livello\)/);
+  assert.match(txt, /log_errore\.txt \(12,4 KB/);
+
+  // Verifica ordine cronologico e contenuti chiave di ogni scambio
+  const i1 = txt.indexOf("[1] RICHIESTA INIZIALE");
+  const i2 = txt.indexOf("[2] NOTA INTERNA\n");
+  const i3 = txt.indexOf("[3] MESSAGGIO CLIENTE / PARTNER");
+  const i4 = txt.indexOf("[4] NOTA INTERNA / SCAMBIO 2° LIVELLO");
+  const i5 = txt.indexOf("[5] RISPOSTA OPERATORE");
+  const i6 = txt.indexOf("[6] SOLUZIONE");
+  assert.ok(i1 > 0 && i2 > i1 && i3 > i2 && i4 > i3 && i5 > i4 && i6 > i5, "tutti i 6 scambi presenti in ordine cronologico");
+
+  assert.match(txt.slice(i1, i2), /Data e ora:\s+18\/11\/2026 09:15[\s\S]*Chi scrive:\s+Mario Rossi \(Cliente \/ Partner\)[\s\S]*Gruppo \/ Partner:\s+PARTNER ALFA SRL \(cod\. 100234\) — Cliente originale: BETA MECCANICA SPA/);
+  assert.match(txt.slice(i2, i3), /Data e ora:\s+18\/11\/2026 10:05[\s\S]*Chi scrive:\s+Laura Verdi \(Operatore\)[\s\S]*Visibilità:\s+NON visibile a clienti e partner \(Nota interna\)/);
+  assert.match(txt.slice(i3, i4), /Data e ora:\s+18\/11\/2026 14:15[\s\S]*Allegati messaggio:\s+log_errore\.txt \(12,4 KB\)/);
+  assert.match(txt.slice(i4, i5), /Data e ora:\s+19\/11\/2026 11:25[\s\S]*Chi scrive:\s+Marco Fontana \(Operatore\)[\s\S]*Gruppo \/ Partner:\s+Altro reparto \/ 2° livello \(rif\. 2L-9941\)[\s\S]*Rif\. 2° livello:\s+Ticket remoto: 2L-9941[\s\S]*Visibilità:\s+NON visibile a clienti e partner \(Nota interna \/ scambio 2° livello\)/);
+  assert.match(txt.slice(i6), /Data e ora:\s+20\/11\/2026 16:00[\s\S]*Aggiornato parametro voce\./);
+});
+

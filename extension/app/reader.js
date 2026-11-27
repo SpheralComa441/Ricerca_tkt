@@ -4,7 +4,7 @@ import { h, clear, icon, highlight, toast } from "./dom.js";
 import { fmtDateTime, fmtDate, ticketNumber, tokens, isLegacyTicketNumber, sleep, debounce } from "../lib/util.js";
 import { statusInfo } from "../lib/statuses.js";
 import { sanitizeHtml, textToFragment, splitQuoted, htmlToText } from "../lib/richtext.js";
-import { timelineText } from "../lib/ticket.js";
+import { timelineText, formatTicketTxt, ticketTxtFilename } from "../lib/ticket.js";
 import { highlightPatterns } from "../lib/relevance.js";
 import { guessMimeFromName } from "../lib/hda.js";
 import { kbLabel, isKbId, kbStatusInfo, kbNumericId } from "../lib/kb.js";
@@ -132,6 +132,14 @@ function triggerBlobDownload(bytes, fileName, contentType) {
       /* */
     }
   }, 45000);
+}
+
+function exportTicketTxt(full) {
+  const txt = formatTicketTxt(full);
+  const bytes = new TextEncoder().encode("\uFEFF" + txt.replace(/\r?\n/g, "\r\n"));
+  const name = ticketTxtFilename(full);
+  triggerBlobDownload(bytes, name, "text/plain;charset=utf-8");
+  toast(`Esportato: ${name}`, "ok", 2200);
 }
 
 async function downloadAttachment(ctx, att, parentId, btn = null) {
@@ -303,6 +311,30 @@ async function openAttachmentPreview(ctx, att, parentId) {
   }
 }
 
+function ticketExportSection(full) {
+  const entries = (full && full.timeline) || [];
+  const nTotal = entries.length;
+  const nInternal = entries.filter((e) => e && (e.internal || e.secondLevel)).length;
+  const detail = nTotal
+    ? `${nTotal} scamb${nTotal === 1 ? "io" : "i"} in ordine cronologico${
+        nInternal
+          ? ` · inclus${nInternal === 1 ? "a 1 nota interna / 2° livello" : `e ${nInternal} note interne / 2° livello`}`
+          : " · incluse note interne e 2° livello"
+      }`
+    : "Storia completa del ticket in formato testo (.txt)";
+  return h("section", { class: "export-bar", "aria-label": "Estrazione completa del ticket" },
+    h("div", { class: "export-bar-info" },
+      h("span", { class: "export-bar-title" }, icon("fileText"), "Storia completa (.txt)"),
+      h("span", { class: "export-bar-meta" }, detail)),
+    h("button", {
+      type: "button",
+      id: "exportTxtBtn",
+      class: "btn btn-small btn-primary",
+      title: "Scarica il file .txt con tutta la storia del ticket in ordine cronologico (incluse note interne e scambi con 2° livello)",
+      onclick: () => exportTicketTxt(full),
+    }, icon("download"), "Esporta storia (.txt)"));
+}
+
 function attachmentsSection(ctx, attachments, parentId) {
   if (!attachments || !attachments.length) return null;
   const dlAllBtn =
@@ -435,11 +467,14 @@ function header(ctx, id, row, full) {
 function facts(row, ticket, extraFacts = []) {
   const t = ticket || {};
   const F = [
-    ["Cliente", [row.account, row.customerCode ? `(cod. ${row.customerCode})` : ""].filter(Boolean).join(" ")],
+    ["Cliente", [row.account, row.customerCode && !String(row.account || "").includes(row.customerCode) ? `(cod. ${row.customerCode})` : ""].filter(Boolean).join(" ")],
+    ["Cliente originale", row.originalClient && row.originalClient !== row.account ? row.originalClient : ""],
     ["Contatto", [row.contact, t.TKMAILTO ? `‹${t.TKMAILTO}›` : ""].filter(Boolean).join(" ")],
     ["Gruppo owner", row.ownerGroup],
+    ["Gruppo assegnato", row.assignedGroup && row.assignedGroup !== row.ownerGroup ? row.assignedGroup : ""],
     ["Assegnato a", row.assigned],
     ["Owner del ticket", row.ownerUser],
+    ["Fornitore", row.supplier],
     ["Prodotto", t.CTITMDESC || row.catalog],
     ["Classificazione", row.classCli],
     ["Priorità", row.priorityText || (row.source === "storico" ? row.priority : "")],
@@ -529,8 +564,15 @@ function entryEl(ctx, e, parentId, allAttachments) {
   if (e.kind === "question") { cls = "msg question"; role = e.author || "Domanda"; }
   if (e.kind === "solution") { cls = "msg solution"; role = "Soluzione"; }
   if (e.kind === "doc") { cls = "msg doc"; role = e.author || "Contenuto"; }
-  if (e.internal) { cls += " internal"; role = "Nota interna"; }
+  if (e.internal) { cls += " internal"; role = e.secondLevel ? "Nota interna · 2° livello" : "Nota interna"; }
   const who = e.kind === "doc" || e.kind === "question" ? "" : e.author || (e.kind === "request" ? "Cliente" : "");
+  const secondLvlTag = e.secondLevel
+    ? typeof e.otherDept === "string" && e.otherDept.trim()
+      ? e.otherDept.trim()
+      : typeof e.remoteTicket === "string" && e.remoteTicket.trim()
+        ? `2° livello · ${e.remoteTicket.trim()}`
+        : "2° livello"
+    : "";
   return h("article", { class: cls, dataset: { internal: e.internal ? "1" : "0" } },
     h("div", { class: "msg-card" },
       h("div", { class: "msg-h" },
@@ -538,7 +580,8 @@ function entryEl(ctx, e, parentId, allAttachments) {
         who ? h("span", { class: "who" }, who) : null,
         e.to ? h("span", { class: "hint" }, "→ " + e.to) : null,
         e.label ? h("span", { class: "tag-mini", title: "Causale del movimento" }, e.label) : null,
-        e.role === "customer" && e.account && e.account !== who ? h("span", { class: "hint" }, e.account) : null,
+        e.account && e.account !== who ? h("span", { class: "hint" }, e.account) : null,
+        secondLvlTag ? h("span", { class: "tag-mini", title: "Scambio con secondo livello / altro reparto" }, secondLvlTag) : null,
         e.internal ? h("span", { class: "tag-mini", title: "Non visibile al cliente" }, icon("lock"), " interna") : null,
         e.date ? h("span", { class: "at", title: e.date.toLocaleString("it-IT") }, fmtDateTime(e.date)) : null),
       bodyOf(e),
@@ -564,6 +607,7 @@ export function renderReader(ctx, full, { fromArchive = null } = {}) {
   el.appendChild(body);
   const factsEl = isKb ? kbFacts(row, full.extraFacts) : isFaq ? faqFacts(row, full.extraFacts) : facts(row, full.ticket, full.extraFacts);
   if (factsEl) body.appendChild(factsEl);
+  if (!isKb && !isFaq) body.appendChild(ticketExportSection(full));
   const attBox = attachmentsSection(ctx, attachments, parentId);
   if (attBox) body.appendChild(attBox);
 

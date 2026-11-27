@@ -116,6 +116,7 @@ export function icon(name) {
     moon: "M12.3 3a9 9 0 1 0 8.7 11.4 7 7 0 0 1-8.7-11.4zm-1.4 2.18A9 9 0 0 0 18.82 15a7 7 0 1 1-7.92-9.82z",
     update: "M12 3a9 9 0 0 1 7.75 4.44l-1.72 1.02A7 7 0 1 0 19 12h2a9 9 0 1 1-9-9zm1 4v5.59l3.3 3.3-1.42 1.41L11 13.41V7h2z",
     calendar: "M7 2h2v2h6V2h2v2h2a2 2 0 0 1 2 2v14a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V6a2 2 0 0 1 2-2h2V2zm12 8H5v10h14V10zm0-4H5v2h14V6z",
+    fileText: "M6 2h9l5 5v15a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2zm8 1.5V8h4.5L14 3.5zM8 11v2h8v-2H8zm0 4v2h8v-2H8zm0 4v2h5v-2H8z",
   };
   const ns = "http://www.w3.org/2000/svg";
   const svg = document.createElementNS(ns, "svg");

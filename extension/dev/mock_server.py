@@ -192,6 +192,7 @@ def conversation(t):
         {"ID": t["ID"] + "-0", "UserID": "#HDASRV#", "MSGDIR": "CREATION", "Text": t["Problem"], "FirstUpdate": base, "SiteVisible": True},
         {"ID": t["ID"] + "-1", "UserID": t["AssignedUserID"], "User.FullName": t["AssignedUser.FullName"], "Text": "Buongiorno, abbiamo preso in carico la segnalazione. Può indicarci la versione installata? Vedi anche tk 10500086 per un caso simile.", "FirstUpdate": base + timedelta(hours=2), "SiteVisible": True},
         {"ID": t["ID"] + "-2", "UserID": t["AssignedUserID"], "User.FullName": t["AssignedUser.FullName"], "Text": "Nota interna: probabile regressione dell'ultimo aggiornamento, verificato su ambiente di test.", "FirstUpdate": base + timedelta(hours=3), "SiteVisible": False},
+        {"ID": t["ID"] + "-2b", "UserID": "U4", "User.FullName": "Marco Fontana", "Text": "Scambio 2° livello: anomalia confermata sul motore di calcolo, patch prevista nella prossima release.", "FirstUpdate": base + timedelta(hours=4), "SiteVisible": False, "OTHERDEPT": True, "REMOTETKT": "2L-9941"},
         {"ID": t["ID"] + "-3", "UserID": "#HDAMAIL#", "ContactID": t["ContactID"], "Contact.FirstName": t["Contact.FirstName"], "Contact.LastName": t["Contact.LastName"], "Account.CompanyName": t["Account.CompanyName"],
          "Text": f"Versione 26.12.00, grazie.\n\nIl giorno {base:%d/%m/%Y} Assistenza ha scritto:\n> Buongiorno, abbiamo preso in carico la segnalazione.", "FirstUpdate": base + timedelta(hours=5), "SiteVisible": True},
     ]

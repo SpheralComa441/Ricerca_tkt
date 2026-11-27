@@ -264,25 +264,39 @@ export function previewTimeline(moves, row = {}, attachments = []) {
     const mit = Number(v.DTTIPMIT) || 0; // 1 = centro servizi, 2 = cliente
     const des = Number(v.DTTIPDES) || 0;
     const fromCustomer = mit === 2;
-    const sender = [v.DTMITPER_DESC, !fromCustomer && v.MITGRU_DES && v.MITGRU_DES !== v.DTMITPER_DESC ? `(${v.MITGRU_DES})` : ""].filter(Boolean).join(" ").trim();
-    const dest = [v.DTDESPER_DESC, v.DESGRU_DES && v.DESGRU_DES !== v.DTDESPER_DESC ? `(${v.DESGRU_DES})` : ""].filter(Boolean).join(" ").trim();
+    const authorName = String(v.DTMITPER_DESC || "").trim();
+    const authorGroup = String(v.MITGRU_DES || "").trim();
+    const toName = String(v.DTDESPER_DESC || "").trim();
+    const toGroup = String(v.DESGRU_DES || "").trim();
+    const sender = [authorName, !fromCustomer && authorGroup && authorGroup !== authorName ? `(${authorGroup})` : ""].filter(Boolean).join(" ").trim();
+    const dest = [toName, toGroup && toGroup !== toName ? `(${toGroup})` : ""].filter(Boolean).join(" ").trim();
     const raw = String(v.DT_TESTO || "").trim();
     // le risposte arrivate per posta sono HTML (a volte con i tag scritti come &lt;p&gt;)
     const asHtml = raw && isProbablyHtml(unescapeIfEscapedHtml(raw)) ? unescapeIfEscapedHtml(raw) : null;
     const text = asHtml ? htmlToText(asHtml) : raw;
     const cause = String(v.CRDESCRI || "").trim();
     const internal = !fromCustomer && des !== 2;
+    const isInternal = i === 0 ? false : internal;
+    const secondLevel =
+      isInternal &&
+      ((toGroup && authorGroup && toGroup !== authorGroup) ||
+        /2[°o]?\s*liv|second[oa]\s*liv|svilupp|laborator|repart|fornitor|estern/i.test(`${authorGroup} ${toGroup} ${cause}`));
     const serial = String(v.DTSERIAL || "").trim();
     const msgAtts = serial ? bySerial.get(serial) || [] : [];
     timeline.push({
       kind: i === 0 ? "request" : "message",
       date: parsePreviewDate(v.DTDATA),
       role: fromCustomer ? "customer" : "operator",
-      internal: i === 0 ? false : internal,
+      internal: isInternal,
+      secondLevel,
       author: sender || (fromCustomer ? row.contact || row.account || "Cliente" : "Operatore"),
+      authorName: authorName || (fromCustomer ? row.contact || row.account || "Cliente" : "Operatore"),
+      group: authorGroup,
       account: fromCustomer ? row.account || "" : "",
       label: cause,
       to: dest,
+      toName,
+      toGroup,
       html: asHtml,
       text: text || (cause ? `(${cause})` : ""),
       attachments: msgAtts.length || (Number(v.TOTALLEGSER) > 0 ? Number(v.TOTALLEGSER) : 0),

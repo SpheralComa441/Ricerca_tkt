@@ -309,3 +309,33 @@ test("storico/ar: allegati Area Riservata con VFCODICEID + VFAUTHCODE → percor
   });
   await assert.rejects(() => arLogin.requestBinary(full.attachments[0].arPath, { fileName: "cedolino.pdf" }), /Sessione Area Riservata scaduta/);
 });
+
+test("storico: estrazione TXT include tutti i movimenti cronologici con gruppo mittente, destinatario 2° livello e nome partner", async () => {
+  const { formatTicketTxt, ticketTxtFilename } = await import("../lib/ticket.js");
+  const html2L = `<!DOCTYPE html><html><body>
+${move("m1", { date: "10-03-2026 09:10", cause: "Nuovo ticket", serial: "000000000000001", mit: 2, des: 1, from: "BIANCHI MARIO", to: "Paghe 1° Livello", text: "Anomalia calcolo TFR." })}
+${move("m2", { date: "10-03-2026 10:25", cause: "Passaggio 2° livello", serial: "000000000000002", mit: 1, des: 1, from: "VERDI LAURA", fromGroup: "Paghe 1° Livello", to: "FONTANA MARCO", text: "Inoltro al 2° livello per analisi SQL." }).replace("this.DESGRU_DES=new ZtVWeb._VC(this,'DESGRU_DES',null,'character','')", "this.DESGRU_DES=new ZtVWeb._VC(this,'DESGRU_DES',null,'character','Sviluppo 2° Livello')")}
+${move("m3", { date: "10-03-2026 14:00", cause: "Risposta interna", serial: "000000000000003", mit: 1, des: 1, from: "FONTANA MARCO", fromGroup: "Sviluppo 2° Livello", to: "VERDI LAURA", text: "Confermato bug nella procedura." }).replace("this.DESGRU_DES=new ZtVWeb._VC(this,'DESGRU_DES',null,'character','')", "this.DESGRU_DES=new ZtVWeb._VC(this,'DESGRU_DES',null,'character','Paghe 1° Livello')")}
+${move("m4", { date: "10-03-2026 16:45", cause: "Risposta a cliente", serial: "000000000000004", mit: 1, des: 2, from: "VERDI LAURA", fromGroup: "Paghe 1° Livello", to: "BIANCHI MARIO", text: "Fix rilasciato, rielaborare." })}
+</body></html>`;
+  const moves = parsePreview(html2L);
+  const full = buildStoricoTicket({
+    row: { id: "8901234", source: "storico", subject: "Anomalia TFR", account: "STUDIO PARTNER SRL", customerCode: "4567", ownerGroup: "Paghe 1° Livello", assigned: "VERDI LAURA", date: new Date(2026, 2, 10, 9, 10) },
+    moves,
+    attachments: [{ id: "st-1", fileName: "tracciato.txt", sizeKb: 4.5, serial: "000000000000001" }],
+  });
+  assert.equal(full.timeline[1].internal, true);
+  assert.equal(full.timeline[1].secondLevel, true);
+  assert.equal(full.timeline[1].group, "Paghe 1° Livello");
+  assert.equal(full.timeline[1].toGroup, "Sviluppo 2° Livello");
+  assert.equal(full.timeline[2].group, "Sviluppo 2° Livello");
+
+  assert.equal(ticketTxtFilename(full), "ticket_8901234.txt");
+  const txt = formatTicketTxt(full, { exportedAt: new Date(2026, 10, 27, 17, 55) });
+  assert.match(txt, /TICKET #8901234 — Anomalia TFR/);
+  assert.match(txt, /\[1\] RICHIESTA INIZIALE[\s\S]*Data e ora:\s+10\/03\/2026 09:10[\s\S]*Chi scrive:\s+BIANCHI MARIO \(Cliente \/ Partner\)[\s\S]*Gruppo \/ Partner:\s+STUDIO PARTNER SRL \(cod\. 4567\)/);
+  assert.match(txt, /\[2\] NOTA INTERNA \/ SCAMBIO 2° LIVELLO[\s\S]*Chi scrive:\s+VERDI LAURA \(Operatore\)[\s\S]*Gruppo \/ Partner:\s+Paghe 1° Livello[\s\S]*Destinatario:\s+FONTANA MARCO \(Sviluppo 2° Livello\)[\s\S]*Visibilità:\s+NON visibile a clienti e partner/);
+  assert.match(txt, /\[3\] NOTA INTERNA \/ SCAMBIO 2° LIVELLO[\s\S]*Chi scrive:\s+FONTANA MARCO \(Operatore\)[\s\S]*Gruppo \/ Partner:\s+Sviluppo 2° Livello/);
+  assert.match(txt, /\[4\] RISPOSTA OPERATORE[\s\S]*Data e ora:\s+10\/03\/2026 16:45[\s\S]*Fix rilasciato, rielaborare\./);
+});
+
